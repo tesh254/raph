@@ -211,4 +211,11 @@ GoReleaser builds these targets:
 - `windows/amd64`
 - `windows/arm64`
 
-Usage docs deploy from `docs/` to `https://tesh254.github.io/raph/`.
+Usage docs deploy from `docs/` to `https://raph.madebyknnls.com/`.
+
+## License
+
+Raph is source-available for private, non-commercial, personal use only.
+Commercial use, business use, monetization, selling, and reselling are
+prohibited without a separate written license. See [LICENSE](LICENSE) for the
+full terms.
