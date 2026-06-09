@@ -1,0 +1,81 @@
+version: 2
+
+project_name: raph
+
+builds:
+  - id: raph
+    main: ./cmd/raph
+    binary: raph
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X raph/internal/version.Version={{ .Tag }}
+      - -X raph/internal/version.Commit={{ .Commit }}
+      - -X raph/internal/version.Date={{ .Date }}
+
+archives:
+  - id: raph
+    ids:
+      - raph
+    name_template: "raph_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "merge conflict"
+      - "Merge pull request"
+      - "Merge remote-tracking branch"
+      - "Merge branch"
+
+release:
+  prerelease: auto
+
+homebrew_casks:
+  - name: raph
+    ids:
+      - raph
+    binaries:
+      - raph
+    repository:
+      owner: tesh254
+      name: raph
+      branch: main
+    directory: Casks
+    homepage: "https://tesh254.github.io/raph/"
+    description: "Local-first graph-vector brain for coding agents"
+    skip_upload: auto
+    commit_author:
+      name: goreleaserbot
+      email: goreleaserbot@users.noreply.github.com
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/raph"]
+          end
