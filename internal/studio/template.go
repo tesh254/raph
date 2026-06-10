@@ -267,6 +267,10 @@ const indexHTML = `<!DOCTYPE html>
       user-select: none;
       transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
     }
+    .node-card.dragging {
+      cursor: grabbing;
+      box-shadow: 0 0 0 2px rgba(32, 48, 41, 0.18), 0 18px 40px rgba(35, 42, 38, 0.16);
+    }
     .node-card:hover {
       border-color: #8fa798;
       box-shadow: var(--shadow);
@@ -334,8 +338,25 @@ const indexHTML = `<!DOCTYPE html>
       stroke-width: 5px;
       stroke-linejoin: round;
     }
-    .edge-dimmed {
+    .edge-path {
+      transition: opacity 140ms ease;
+    }
+    .edge-path.edge-dimmed,
+    .edge-label.edge-dimmed {
       opacity: 0.12;
+    }
+    .edge-path.edge-active {
+      stroke-dasharray: 8 10;
+      animation: edge-flow 1.2s linear infinite;
+      filter: drop-shadow(0 0 5px rgba(142, 193, 159, 0.9)) drop-shadow(0 0 12px rgba(53, 95, 134, 0.35));
+    }
+    .edge-label.edge-active {
+      opacity: 1;
+      fill: #315442;
+    }
+    @keyframes edge-flow {
+      from { stroke-dashoffset: 0; }
+      to { stroke-dashoffset: -18; }
     }
     .empty-state {
       position: absolute;
@@ -593,6 +614,13 @@ const indexHTML = `<!DOCTYPE html>
       filter: '',
       details: {},
       positions: {},
+      manualPositions: {},
+      hovered: '',
+      dragNode: '',
+      dragOffsetX: 0,
+      dragOffsetY: 0,
+      isDraggingNode: false,
+      suppressClick: false,
       scale: 1,
       panX: 0,
       panY: 0,
@@ -602,6 +630,8 @@ const indexHTML = `<!DOCTYPE html>
       panOriginX: 0,
       panOriginY: 0,
       panMoved: false,
+      renderFrame: 0,
+      viewportFrame: 0,
       tab: 'content',
       actor: '',
       activity: []
@@ -660,6 +690,24 @@ const indexHTML = `<!DOCTYPE html>
       return node.domain === 'code' ? 'code' : node.domain === 'documentation' ? 'documentation' : 'memory';
     }
 
+    function scheduleRender() {
+      if (state.renderFrame) return;
+      state.renderFrame = window.requestAnimationFrame(function() {
+        state.renderFrame = 0;
+        render();
+      });
+    }
+
+    function scheduleViewportRedraw() {
+      if (state.viewportFrame) return;
+      state.viewportFrame = window.requestAnimationFrame(function() {
+        state.viewportFrame = 0;
+        applyTransform();
+        drawEdges(visibleNodes());
+        updateNodeEmphasis();
+      });
+    }
+
     function storageKey() {
       return 'raph-studio-activity';
     }
@@ -682,6 +730,32 @@ const indexHTML = `<!DOCTYPE html>
     function actorName() {
       var value = String(els.actor.value || '').trim();
       return value || 'browser';
+    }
+
+    function focusID() {
+      return state.hovered || state.selected;
+    }
+
+    function isRelatedToFocus(id) {
+      var focus = focusID();
+      if (!focus) return true;
+      if (id === focus) return true;
+      return (state.children[focus] || []).indexOf(id) !== -1 ||
+        (state.parents[focus] || []).indexOf(id) !== -1 ||
+        (state.children[id] || []).indexOf(focus) !== -1 ||
+        (state.parents[id] || []).indexOf(focus) !== -1;
+    }
+
+    function updateNodeEmphasis() {
+      var focus = focusID();
+      els.nodes.querySelectorAll('.node-card').forEach(function(card) {
+        var id = card.dataset.id;
+        var related = !focus || isRelatedToFocus(id);
+        card.classList.toggle('selected', state.selected === id);
+        card.classList.toggle('related', !!focus && related && state.selected !== id);
+        card.classList.toggle('dimmed', !!focus && !related);
+        card.classList.toggle('dragging', state.dragNode === id && state.isDraggingNode);
+      });
     }
 
     function recordActivity(action, id, note) {
@@ -736,6 +810,19 @@ const indexHTML = `<!DOCTYPE html>
         if (e.source_id === source && e.target_id === target) return e.type;
       }
       return '';
+    }
+
+    function resetVisibleToFocus(id) {
+      state.visible = {};
+      state.expanded = {};
+      state.visible[id] = true;
+      (state.parents[id] || []).forEach(function(parentID) {
+        state.visible[parentID] = true;
+      });
+      (state.children[id] || []).forEach(function(childID) {
+        state.visible[childID] = true;
+      });
+      state.expanded[id] = true;
     }
 
     function degreeOf(id) {
@@ -886,6 +973,8 @@ const indexHTML = `<!DOCTYPE html>
     function focusRoot(id, shouldRender) {
       state.activeRoot = id;
       state.selected = id;
+      state.hovered = '';
+      resetVisibleToFocus(id);
       if (shouldRender) {
         renderRoots();
         render();
@@ -898,6 +987,8 @@ const indexHTML = `<!DOCTYPE html>
       if (!state.byId[id]) return;
       state.selected = id;
       state.activeRoot = id;
+      state.hovered = '';
+      resetVisibleToFocus(id);
       renderRoots();
       render();
       showProperties(id);
@@ -905,7 +996,16 @@ const indexHTML = `<!DOCTYPE html>
     }
 
     function expand(id) {
-      state.visible[id] = true;
+      var next = {};
+      [id].concat(neighborsOf(id)).forEach(function(nodeID) {
+        next[nodeID] = true;
+        neighborsOf(nodeID).forEach(function(nearID) {
+          next[nearID] = true;
+        });
+      });
+      Object.keys(next).forEach(function(nodeID) {
+        state.visible[nodeID] = true;
+      });
       state.expanded[id] = true;
     }
 
@@ -932,13 +1032,8 @@ const indexHTML = `<!DOCTYPE html>
       return list;
     }
 
-    function isRelatedToSelected(id) {
-      if (!state.selected) return false;
-      if (id === state.selected) return true;
-      return (state.children[state.selected] || []).indexOf(id) !== -1 ||
-        (state.parents[state.selected] || []).indexOf(id) !== -1 ||
-        (state.children[id] || []).indexOf(state.selected) !== -1 ||
-        (state.parents[id] || []).indexOf(state.selected) !== -1;
+    function nodePosition(id) {
+      return state.manualPositions[id] || state.positions[id];
     }
 
     function depthOf(id) {
@@ -1020,6 +1115,12 @@ const indexHTML = `<!DOCTYPE html>
         });
       });
 
+      Object.keys(state.manualPositions).forEach(function(id) {
+        if (state.positions[id]) {
+          state.positions[id] = state.manualPositions[id];
+        }
+      });
+
       if (state.scale === 1 && state.panX === 0 && state.panY === 0) {
         state.panX = Math.max(16, stageRect.width / 12);
         state.panY = Math.max(18, stageRect.height / 12);
@@ -1049,12 +1150,75 @@ const indexHTML = `<!DOCTYPE html>
       state.scale = nextScale;
       state.panX = stageX - graphX * nextScale;
       state.panY = stageY - graphY * nextScale;
-      render();
+      scheduleViewportRedraw();
     }
 
     function zoomFromCenter(factor) {
       var rect = els.stage.getBoundingClientRect();
       zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, factor);
+    }
+
+    function startNodeDrag(id, event) {
+      if (event.button !== 0) return;
+      if (event.target.closest && event.target.closest('button')) return;
+      var pos = nodePosition(id);
+      if (!pos) return;
+      state.dragNode = id;
+      state.isDraggingNode = false;
+      state.dragOffsetX = event.clientX - (state.panX + pos.x * state.scale);
+      state.dragOffsetY = event.clientY - (state.panY + pos.y * state.scale);
+      els.stage.classList.add('panning');
+      event.preventDefault();
+    }
+
+    function moveNodeDrag(event) {
+      if (!state.dragNode) return;
+      var pos = nodePosition(state.dragNode);
+      if (!pos) return;
+      var dx = event.clientX - (state.panX + pos.x * state.scale + state.dragOffsetX);
+      var dy = event.clientY - (state.panY + pos.y * state.scale + state.dragOffsetY);
+      if (!state.isDraggingNode && Math.abs(dx) + Math.abs(dy) > 3) {
+        state.isDraggingNode = true;
+      }
+      if (!state.isDraggingNode) return;
+      var rect = els.stage.getBoundingClientRect();
+      var graphX = (event.clientX - rect.left - state.panX - state.dragOffsetX) / state.scale;
+      var graphY = (event.clientY - rect.top - state.panY - state.dragOffsetY) / state.scale;
+      state.manualPositions[state.dragNode] = {
+        x: graphX,
+        y: graphY,
+        w: pos.w,
+        h: pos.h
+      };
+      var card = els.nodes.querySelector('.node-card[data-id="' + state.dragNode + '"]');
+      if (card) {
+        card.style.left = graphX + 'px';
+        card.style.top = graphY + 'px';
+      }
+      updateNodeEmphasis();
+      scheduleViewportRedraw();
+    }
+
+    function stopNodeDrag() {
+      if (!state.dragNode) return;
+      if (state.isDraggingNode) {
+        recordActivity('drag', state.dragNode, 'node repositioned');
+        state.suppressClick = true;
+        window.setTimeout(function() {
+          state.suppressClick = false;
+        }, 0);
+      } else {
+        state.selected = state.dragNode;
+        state.hovered = '';
+        resetVisibleToFocus(state.dragNode);
+        renderRoots();
+        showProperties(state.dragNode);
+        recordActivity('select', state.dragNode, 'node clicked');
+      }
+      state.dragNode = '';
+      state.isDraggingNode = false;
+      els.stage.classList.remove('panning');
+      scheduleRender();
     }
 
     function render() {
@@ -1065,15 +1229,18 @@ const indexHTML = `<!DOCTYPE html>
       els.empty.hidden = state.nodes.length !== 0;
 
       list.forEach(function(node) {
-        var pos = state.positions[node.id];
+        var pos = nodePosition(node.id);
+        if (!pos) return;
         var card = document.createElement('article');
-        var related = isRelatedToSelected(node.id);
+        var related = isRelatedToFocus(node.id);
         card.className = 'node-card' +
           (state.selected === node.id ? ' selected' : '') +
           (state.selected && related && state.selected !== node.id ? ' related' : '') +
           (state.selected && !related ? ' dimmed' : '');
         card.style.left = pos.x + 'px';
         card.style.top = pos.y + 'px';
+        card.style.width = pos.w + 'px';
+        card.style.height = pos.h + 'px';
         card.dataset.id = node.id;
         var count = childCount(node.id);
         var expandedText = count ? count + ' links' : 'leaf';
@@ -1089,7 +1256,23 @@ const indexHTML = `<!DOCTYPE html>
             '<span class="expand-pill">' + escapeHTML(expandedText) + '</span>' +
           '</div>' +
           (snippet ? '<div class="node-snippet">' + escapeHTML(snippet) + '</div>' : '');
+        card.addEventListener('mouseenter', function() {
+          if (state.dragNode === node.id && state.isDraggingNode) return;
+          state.hovered = node.id;
+          updateNodeEmphasis();
+          scheduleViewportRedraw();
+        });
+        card.addEventListener('mouseleave', function() {
+          if (state.dragNode === node.id && state.isDraggingNode) return;
+          if (state.hovered === node.id) {
+            state.hovered = '';
+            updateNodeEmphasis();
+            scheduleViewportRedraw();
+          }
+        });
+        card.addEventListener('mousedown', startNodeDrag.bind(null, node.id));
         card.addEventListener('click', function(event) {
+          if (state.suppressClick || state.isDraggingNode || state.dragNode) return;
           event.stopPropagation();
           toggleNode(node.id);
         });
@@ -1098,16 +1281,18 @@ const indexHTML = `<!DOCTYPE html>
 
       drawEdges(list);
       applyTransform();
+      updateNodeEmphasis();
       updateStats();
     }
 
     function drawEdges(list) {
       var visibleSet = {};
       list.forEach(function(node) { visibleSet[node.id] = true; });
+      var focus = focusID();
       state.edges.forEach(function(edge) {
         if (!visibleSet[edge.source_id] || !visibleSet[edge.target_id]) return;
-        var source = state.positions[edge.source_id];
-        var target = state.positions[edge.target_id];
+        var source = nodePosition(edge.source_id);
+        var target = nodePosition(edge.target_id);
         if (!source || !target) return;
         var x1 = state.panX + (source.x + source.w) * state.scale;
         var y1 = state.panY + (source.y + 38) * state.scale;
@@ -1115,13 +1300,17 @@ const indexHTML = `<!DOCTYPE html>
         var y2 = state.panY + (target.y + 38) * state.scale;
         var mid = Math.max(28, (x2 - x1) / 2);
         var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('class', 'edge-path');
         path.setAttribute('d', 'M ' + x1 + ' ' + y1 + ' C ' + (x1 + mid) + ' ' + y1 + ', ' + (x2 - mid) + ' ' + y2 + ', ' + x2 + ' ' + y2);
         path.setAttribute('fill', 'none');
         path.setAttribute('stroke', edge.type === 'DECLARES' ? '#7fa8c9' : edge.type === 'LINKS_TO' ? '#aab1ad' : '#8ec19f');
         path.setAttribute('stroke-width', edge.type === 'HAS_SECTION' ? '1.4' : '1.8');
         path.setAttribute('stroke-linecap', 'round');
-        if (state.selected && !(isRelatedToSelected(edge.source_id) && isRelatedToSelected(edge.target_id))) {
-          path.setAttribute('class', 'edge-dimmed');
+        if (focus && !(isRelatedToFocus(edge.source_id) && isRelatedToFocus(edge.target_id))) {
+          path.classList.add('edge-dimmed');
+        }
+        if (focus && (edge.source_id === focus || edge.target_id === focus || edge.source_id === state.selected || edge.target_id === state.selected)) {
+          path.classList.add('edge-active');
         }
         els.edges.appendChild(path);
 
@@ -1130,8 +1319,11 @@ const indexHTML = `<!DOCTYPE html>
         label.setAttribute('y', (y1 + y2) / 2 - 4);
         label.setAttribute('text-anchor', 'middle');
         label.setAttribute('class', 'edge-label');
-        if (state.selected && !(isRelatedToSelected(edge.source_id) && isRelatedToSelected(edge.target_id))) {
-          label.setAttribute('class', 'edge-label edge-dimmed');
+        if (focus && !(isRelatedToFocus(edge.source_id) && isRelatedToFocus(edge.target_id))) {
+          label.classList.add('edge-dimmed');
+        }
+        if (focus && (edge.source_id === focus || edge.target_id === focus || edge.source_id === state.selected || edge.target_id === state.selected)) {
+          label.classList.add('edge-active');
         }
         label.textContent = edge.type;
         els.edges.appendChild(label);
@@ -1193,15 +1385,18 @@ const indexHTML = `<!DOCTYPE html>
       els.propertiesBody.querySelectorAll('.relation').forEach(function(rel) {
         rel.addEventListener('click', function() {
           var nextID = rel.dataset.id;
-          state.visible[nextID] = true;
           state.selected = nextID;
+          state.hovered = '';
+          resetVisibleToFocus(nextID);
+          renderRoots();
           render();
           showProperties(nextID);
+          recordActivity('focus', nextID, 'relation opened');
         });
       });
       document.getElementById('expand-selected').addEventListener('click', function() {
         expand(id);
-        render();
+        scheduleRender();
         showProperties(id);
       });
       document.getElementById('focus-selected').addEventListener('click', function() {
@@ -1221,7 +1416,7 @@ const indexHTML = `<!DOCTYPE html>
           state.byId[id] = fullNode;
           if (state.selected === id) {
             showProperties(id, true);
-            render();
+            scheduleRender();
           }
         }).catch(function() {});
       }
@@ -1310,17 +1505,20 @@ const indexHTML = `<!DOCTYPE html>
       });
       if (matches[0]) {
         state.selected = matches[0].id;
+        state.hovered = '';
+        resetVisibleToFocus(matches[0].id);
+        renderRoots();
         showProperties(matches[0].id);
         recordActivity('result', matches[0].id, 'top search match');
       }
-      render();
+      scheduleRender();
     }
 
     function fitToView() {
       state.scale = 1;
       state.panX = 16;
       state.panY = 18;
-      render();
+      scheduleViewportRedraw();
       recordActivity('fit', '', 'reset viewport');
     }
 
@@ -1337,16 +1535,24 @@ const indexHTML = `<!DOCTYPE html>
     }
 
     function moveStagePan(event) {
+      if (state.dragNode) {
+        moveNodeDrag(event);
+        return;
+      }
       if (!state.isPanning) return;
       var dx = event.clientX - state.panStartX;
       var dy = event.clientY - state.panStartY;
       if (Math.abs(dx) + Math.abs(dy) > 3) state.panMoved = true;
       state.panX = state.panOriginX + dx;
       state.panY = state.panOriginY + dy;
-      render();
+      scheduleViewportRedraw();
     }
 
     function stopStagePan() {
+      if (state.dragNode) {
+        stopNodeDrag();
+        return;
+      }
       if (!state.isPanning) return;
       state.isPanning = false;
       els.stage.classList.remove('panning');
@@ -1409,7 +1615,8 @@ const indexHTML = `<!DOCTYPE html>
         return;
       }
       state.selected = '';
-      render();
+      state.hovered = '';
+      scheduleRender();
     });
     els.agentSearch.addEventListener('click', runAgentSearch);
     els.agentNeighbors.addEventListener('click', runAgentNeighbors);
