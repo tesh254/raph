@@ -14,6 +14,7 @@ import (
 	"raph/internal/config"
 	"raph/internal/db"
 	"raph/internal/indexer"
+	"raph/internal/verbose"
 )
 
 type Repository struct {
@@ -31,6 +32,8 @@ type Paths struct {
 	PID      string
 	Log      string
 }
+
+const idleTimeout = time.Hour
 
 func RuntimePaths() (Paths, error) {
 	cfgPaths, err := config.EnsureBaseLayout()
@@ -77,6 +80,7 @@ func Register(path string, noEmbeddings bool) (Repository, error) {
 	if !found {
 		registry.Repositories = append(registry.Repositories, repo)
 	}
+	verbose.Printf("registered repository path=%s embeddings=%t", absPath, !noEmbeddings)
 	if err := save(paths.Registry, registry); err != nil {
 		return Repository{}, err
 	}
@@ -105,6 +109,7 @@ func Remove(ctx context.Context, path string, clean bool) error {
 		return fmt.Errorf("%s is not registered for sync", absPath)
 	}
 	registry.Repositories = next
+	verbose.Printf("removed repository path=%s clean=%t", absPath, clean)
 	if err := save(paths.Registry, registry); err != nil {
 		return err
 	}
@@ -134,6 +139,7 @@ func Start(interval time.Duration) (bool, error) {
 		return false, err
 	}
 	if running {
+		verbose.Printf("sync worker already running")
 		return false, nil
 	}
 	paths, err := RuntimePaths()
@@ -157,6 +163,7 @@ func Start(interval time.Duration) (bool, error) {
 		_ = logFile.Close()
 		return false, err
 	}
+	verbose.Printf("spawned sync worker pid=%d interval=%s", cmd.Process.Pid, interval)
 	_ = logFile.Close()
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
 		running, _, statusErr := Status()
@@ -207,6 +214,7 @@ func Stop() (bool, error) {
 	if err == nil {
 		_ = os.Remove(paths.PID)
 	}
+	verbose.Printf("stopped sync worker pid=%d", pid)
 	return true, nil
 }
 
@@ -232,13 +240,22 @@ func RunWorker(ctx context.Context, interval time.Duration) error {
 	}
 	_ = lock.Close()
 	defer os.Remove(paths.PID)
+	verbose.Printf("worker online pid=%d interval=%s idle_timeout=%s", os.Getpid(), interval, idleTimeout)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	snapshots := make(map[string]map[string]indexer.FileState)
+	lastChange := time.Now()
 	for {
-		if err := syncOnce(ctx, snapshots); err != nil {
+		changed, err := syncOnce(ctx, snapshots)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s sync error: %v\n", time.Now().Format(time.RFC3339), err)
+		} else if changed {
+			lastChange = time.Now()
+			verbose.Printf("worker observed repository change; idle timer reset")
+		} else if time.Since(lastChange) >= idleTimeout {
+			verbose.Printf("worker idle for %s; shutting down", idleTimeout)
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -248,15 +265,16 @@ func RunWorker(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-func syncOnce(ctx context.Context, snapshots map[string]map[string]indexer.FileState) error {
+func syncOnce(ctx context.Context, snapshots map[string]map[string]indexer.FileState) (bool, error) {
 	repositories, err := List()
 	if err != nil {
-		return err
+		return false, err
 	}
 	cfg, err := config.LoadConfigIfPresent()
 	if err != nil {
-		return err
+		return false, err
 	}
+	changedAny := false
 	for _, repo := range repositories {
 		current, err := indexer.CollectFileStates(repo.Path)
 		if err != nil {
@@ -267,33 +285,37 @@ func syncOnce(ctx context.Context, snapshots map[string]map[string]indexer.FileS
 		if !initialized {
 			previous = repo.Files
 		}
-		if err := syncRepository(ctx, cfg, repo, previous, current); err != nil {
-			return err
+		changed, err := syncRepository(ctx, cfg, repo, previous, current)
+		if err != nil {
+			return false, err
 		}
+		changedAny = changedAny || changed
 		snapshots[repo.Path] = current
 		if err := updateSnapshot(repo.Path, current); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return nil
+	return changedAny, nil
 }
 
-func syncRepository(ctx context.Context, cfg *config.Config, repo Repository, previous, current map[string]indexer.FileState) error {
+func syncRepository(ctx context.Context, cfg *config.Config, repo Repository, previous, current map[string]indexer.FileState) (bool, error) {
 	store, err := db.InitStorage()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer store.Close()
 	idx, err := indexer.New(store, cfg, repo.Path, repo.NoEmbeddings)
 	if err != nil {
-		return err
+		return false, err
 	}
+	changed := false
 	for relativePath := range previous {
 		if _, exists := current[relativePath]; !exists {
 			if err := idx.RemoveFile(ctx, relativePath); err != nil {
-				return fmt.Errorf("remove %s: %w", relativePath, err)
+				return false, fmt.Errorf("remove %s: %w", relativePath, err)
 			}
 			fmt.Printf("%s removed %s from %s\n", time.Now().Format(time.RFC3339), relativePath, repo.Path)
+			changed = true
 		}
 	}
 	for relativePath, state := range current {
@@ -302,11 +324,12 @@ func syncRepository(ctx context.Context, cfg *config.Config, repo Repository, pr
 		}
 		stats, err := idx.SyncFile(ctx, filepath.Join(repo.Path, filepath.FromSlash(relativePath)))
 		if err != nil {
-			return fmt.Errorf("sync %s: %w", relativePath, err)
+			return false, fmt.Errorf("sync %s: %w", relativePath, err)
 		}
 		fmt.Printf("%s synced %s in %s (%d nodes, %d embeddings)\n", time.Now().Format(time.RFC3339), relativePath, repo.Path, stats.NodesSaved, stats.EmbeddingsCreated)
+		changed = true
 	}
-	return nil
+	return changed, nil
 }
 
 func load() (Registry, Paths, error) {

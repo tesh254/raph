@@ -48,7 +48,7 @@ func TestSyncOnceUpdatesAndRemovesChangedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshots := make(map[string]map[string]indexer.FileState)
-	if err := syncOnce(context.Background(), snapshots); err != nil {
+	if _, err := syncOnce(context.Background(), snapshots); err != nil {
 		t.Fatal(err)
 	}
 
@@ -77,7 +77,7 @@ func TestSyncOnceUpdatesAndRemovesChangedFiles(t *testing.T) {
 	if err := os.Remove(filePath); err != nil {
 		t.Fatal(err)
 	}
-	if err := syncOnce(context.Background(), snapshots); err != nil {
+	if _, err := syncOnce(context.Background(), snapshots); err != nil {
 		t.Fatal(err)
 	}
 	store, err = db.InitStorage()

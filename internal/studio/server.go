@@ -10,10 +10,11 @@ import (
 
 	"raph/internal/config"
 	"raph/internal/db"
+	"raph/internal/verbose"
 )
 
 type StudioServer struct {
-	store  db.GraphStore
+	store  *db.LibSQLStore
 	config *config.Config
 	port   int
 }
@@ -42,7 +43,11 @@ type NeighborResponse struct {
 	Edges []db.Edge `json:"edges"`
 }
 
-func NewStudioServer(store db.GraphStore, port int) *StudioServer {
+type SQLiteResponse struct {
+	Tables []db.TableDump `json:"tables"`
+}
+
+func NewStudioServer(store *db.LibSQLStore, port int) *StudioServer {
 	return &StudioServer{store: store, port: port}
 }
 
@@ -59,9 +64,11 @@ func (s *StudioServer) Start() error {
 	mux.HandleFunc("/api/edge/create", s.handleCreateEdge)
 	mux.HandleFunc("/api/search", s.handleSearch)
 	mux.HandleFunc("/api/neighbors", s.handleNeighbors)
+	mux.HandleFunc("/api/sqlite", s.handleSQLite)
 
 	addr := ":" + strconv.Itoa(s.port)
 	fmt.Printf("raph Studio active at http://localhost:%d\n", s.port)
+	verbose.Printf("studio routes ready at %s", addr)
 	return http.ListenAndServe(addr, mux)
 }
 
@@ -88,6 +95,7 @@ func (s *StudioServer) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 	for idx := range nodes {
 		nodes[idx].Content = previewContent(nodes[idx].Content, 640)
 	}
+	verbose.Printf("studio graph request served nodes=%d edges=%d", len(nodes), len(edges))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(GraphPayload{Nodes: nodes, Edges: edges})
 }
@@ -111,6 +119,7 @@ func (s *StudioServer) handleGetNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	verbose.Printf("studio node request id=%s", id)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(node)
 }
@@ -136,6 +145,7 @@ func (s *StudioServer) handleDeleteNode(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	verbose.Printf("studio delete node id=%s", req.ID)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -158,6 +168,7 @@ func (s *StudioServer) handleCreateEdge(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	verbose.Printf("studio create edge %s -> %s type=%s", edge.SourceID, edge.TargetID, edge.Type)
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -182,6 +193,7 @@ func (s *StudioServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := SearchResponse{Mode: "keyword"}
+	verbose.Printf("studio search query=%q limit=%d", query, req.Limit)
 
 	// Try semantic search first if embeddings are configured
 	if s.config != nil && s.config.HasEmbeddingProvider() {
@@ -191,6 +203,7 @@ func (s *StudioServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 			if searchErr == nil && len(nodes) > 0 {
 				resp.Mode = "semantic"
 				resp.Matches = nodes
+				verbose.Printf("studio search semantic hits=%d", len(nodes))
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(resp)
 				return
@@ -205,6 +218,7 @@ func (s *StudioServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.Matches = nodes
+	verbose.Printf("studio search keyword hits=%d", len(nodes))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -230,10 +244,32 @@ func (s *StudioServer) handleNeighbors(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	verbose.Printf("studio neighbors node=%s nodes=%d edges=%d", req.NodeID, len(nodes), len(edges))
 
 	resp := NeighborResponse{Nodes: nodes, Edges: edges}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (s *StudioServer) handleSQLite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 250
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	tables, err := s.store.InspectTables(r.Context(), limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	verbose.Printf("studio sqlite request tables=%d limit=%d", len(tables), limit)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(SQLiteResponse{Tables: tables})
 }
 
 func previewContent(content string, maxRunes int) string {

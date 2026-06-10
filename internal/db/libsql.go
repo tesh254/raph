@@ -55,6 +55,12 @@ type LibSQLStore struct {
 	db *sql.DB
 }
 
+type TableDump struct {
+	Name    string              `json:"name"`
+	Columns []string            `json:"columns"`
+	Rows    []map[string]string `json:"rows"`
+}
+
 func InitStorage() (*LibSQLStore, error) {
 	paths, err := config.EnsureBaseLayout()
 	if err != nil {
@@ -160,6 +166,111 @@ func (s *LibSQLStore) ensureNodePathColumn() error {
 		return fmt.Errorf("add nodes path column: %w", err)
 	}
 	return nil
+}
+
+func (s *LibSQLStore) InspectTables(ctx context.Context, limit int) ([]TableDump, error) {
+	if limit <= 0 {
+		limit = 250
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan table name: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tables: %w", err)
+	}
+
+	var dumps []TableDump
+	for _, name := range names {
+		dump, err := s.inspectTable(ctx, name, limit)
+		if err != nil {
+			return nil, err
+		}
+		dumps = append(dumps, dump)
+	}
+	return dumps, nil
+}
+
+func (s *LibSQLStore) inspectTable(ctx context.Context, name string, limit int) (TableDump, error) {
+	infoRows, err := s.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, quoteIdentifier(name)))
+	if err != nil {
+		return TableDump{}, fmt.Errorf("inspect %s columns: %w", name, err)
+	}
+	defer infoRows.Close()
+
+	dump := TableDump{Name: name}
+	for infoRows.Next() {
+		var cid int
+		var column string
+		var columnType string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if err := infoRows.Scan(&cid, &column, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return TableDump{}, fmt.Errorf("scan %s columns: %w", name, err)
+		}
+		dump.Columns = append(dump.Columns, column)
+	}
+	if err := infoRows.Err(); err != nil {
+		return TableDump{}, fmt.Errorf("iterate %s columns: %w", name, err)
+	}
+
+	query := fmt.Sprintf(`SELECT * FROM %s LIMIT %d`, quoteIdentifier(name), limit)
+	dataRows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return TableDump{}, fmt.Errorf("read %s rows: %w", name, err)
+	}
+	defer dataRows.Close()
+
+	columns, err := dataRows.Columns()
+	if err != nil {
+		return TableDump{}, fmt.Errorf("columns for %s: %w", name, err)
+	}
+	values := make([]any, len(columns))
+	pointers := make([]any, len(columns))
+	for i := range values {
+		pointers[i] = &values[i]
+	}
+
+	for dataRows.Next() {
+		if err := dataRows.Scan(pointers...); err != nil {
+			return TableDump{}, fmt.Errorf("scan %s row: %w", name, err)
+		}
+		row := make(map[string]string, len(columns))
+		for i, column := range columns {
+			row[column] = stringifySQLiteValue(values[i])
+		}
+		dump.Rows = append(dump.Rows, row)
+	}
+	if err := dataRows.Err(); err != nil {
+		return TableDump{}, fmt.Errorf("iterate %s rows: %w", name, err)
+	}
+	return dump, nil
+}
+
+func quoteIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func stringifySQLiteValue(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return "NULL"
+	case []byte:
+		return string(typed)
+	default:
+		return fmt.Sprint(typed)
+	}
 }
 
 func (s *LibSQLStore) SaveNode(ctx context.Context, node Node) error {
