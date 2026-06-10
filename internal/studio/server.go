@@ -1,22 +1,28 @@
 package studio
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
 	"raph/internal/config"
+	"raph/internal/crawler"
 	"raph/internal/db"
+	"raph/internal/indexer"
 	"raph/internal/verbose"
 )
 
 type StudioServer struct {
-	store  *db.LibSQLStore
-	config *config.Config
-	port   int
+	store         *db.LibSQLStore
+	config        *config.Config
+	port          int
+	workspaceRoot string
+	seedURL       string
 }
 
 type GraphPayload struct {
@@ -48,11 +54,34 @@ type SQLiteResponse struct {
 }
 
 func NewStudioServer(store *db.LibSQLStore, port int) *StudioServer {
-	return &StudioServer{store: store, port: port}
+	workspaceRoot, err := os.Getwd()
+	if err != nil {
+		workspaceRoot = "."
+	}
+	return &StudioServer{
+		store:         store,
+		port:          port,
+		workspaceRoot: workspaceRoot,
+		seedURL:       "https://example.com",
+	}
 }
 
 func (s *StudioServer) SetConfig(cfg *config.Config) {
 	s.config = cfg
+}
+
+func (s *StudioServer) SetWorkspaceRoot(root string) {
+	root = strings.TrimSpace(root)
+	if root != "" {
+		s.workspaceRoot = root
+	}
+}
+
+func (s *StudioServer) SetSeedURL(rawURL string) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL != "" {
+		s.seedURL = rawURL
+	}
 }
 
 func (s *StudioServer) Start() error {
@@ -65,6 +94,8 @@ func (s *StudioServer) Start() error {
 	mux.HandleFunc("/api/search", s.handleSearch)
 	mux.HandleFunc("/api/neighbors", s.handleNeighbors)
 	mux.HandleFunc("/api/sqlite", s.handleSQLite)
+	mux.HandleFunc("/api/actions/clear", s.handleClearDB)
+	mux.HandleFunc("/api/actions/init", s.handleInitDemo)
 
 	addr := ":" + strconv.Itoa(s.port)
 	fmt.Printf("raph Studio active at http://localhost:%d\n", s.port)
@@ -110,7 +141,7 @@ func (s *StudioServer) handleGetNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
-	node, err := s.store.GetNodeByID(r.Context(), id)
+	details, err := s.store.GetStudioNodeDetails(r.Context(), id)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			http.Error(w, "node not found", http.StatusNotFound)
@@ -121,7 +152,7 @@ func (s *StudioServer) handleGetNode(w http.ResponseWriter, r *http.Request) {
 	}
 	verbose.Printf("studio node request id=%s", id)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(node)
+	_ = json.NewEncoder(w).Encode(details)
 }
 
 func (s *StudioServer) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
@@ -270,6 +301,82 @@ func (s *StudioServer) handleSQLite(w http.ResponseWriter, r *http.Request) {
 	verbose.Printf("studio sqlite request tables=%d limit=%d", len(tables), limit)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(SQLiteResponse{Tables: tables})
+}
+
+func (s *StudioServer) handleClearDB(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.store.ClearAll(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	verbose.Printf("studio clear db")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": "Cleared local graph database",
+	})
+}
+
+func (s *StudioServer) handleInitDemo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	result, err := s.initDemoData(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	verbose.Printf("studio init workspace=%s seed=%s files=%d pages=%d", result.WorkspaceRoot, result.SeedURL, result.Index.FilesIndexed, result.Crawl.PagesIndexed)
+	writeJSON(w, http.StatusOK, result)
+}
+
+type InitDemoResponse struct {
+	OK            bool          `json:"ok"`
+	WorkspaceRoot string        `json:"workspace_root"`
+	SeedURL       string        `json:"seed_url"`
+	Index         indexer.Stats `json:"index"`
+	Crawl         crawler.Stats `json:"crawl"`
+}
+
+func (s *StudioServer) initDemoData(ctx context.Context) (InitDemoResponse, error) {
+	if err := s.store.ClearAll(ctx); err != nil {
+		return InitDemoResponse{}, fmt.Errorf("clear local graph database: %w", err)
+	}
+
+	idx, err := indexer.New(s.store, s.config, s.workspaceRoot, false)
+	if err != nil {
+		return InitDemoResponse{}, fmt.Errorf("prepare indexer: %w", err)
+	}
+	indexStats, err := idx.Run(ctx)
+	if err != nil {
+		return InitDemoResponse{}, fmt.Errorf("index workspace: %w", err)
+	}
+
+	docCrawler, err := crawler.NewDocumentationCrawler(s.store, s.config, s.seedURL)
+	if err != nil {
+		return InitDemoResponse{}, fmt.Errorf("prepare crawler: %w", err)
+	}
+	if err := docCrawler.Run(ctx); err != nil {
+		return InitDemoResponse{}, fmt.Errorf("crawl seed URL: %w", err)
+	}
+
+	return InitDemoResponse{
+		OK:            true,
+		WorkspaceRoot: s.workspaceRoot,
+		SeedURL:       s.seedURL,
+		Index:         indexStats,
+		Crawl:         docCrawler.Stats(),
+	}, nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 func previewContent(content string, maxRunes int) string {

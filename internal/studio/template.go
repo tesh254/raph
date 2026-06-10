@@ -718,6 +718,8 @@ const indexHTML = `<!DOCTYPE html>
         <button id="fit">Fit</button>
         <button id="zoom-out">-</button>
         <button id="zoom-in">+</button>
+        <button id="init-demo">Init Raph + example.com</button>
+        <button id="clear-db" class="danger">Clear DB</button>
         <button id="reload" class="primary">Reload</button>
       </div>
       <small id="summary">Loading</small>
@@ -796,7 +798,7 @@ const indexHTML = `<!DOCTYPE html>
       <div id="focus-chip" aria-hidden="true"></div>
       <div id="empty" class="empty-state" hidden>
         <strong>No graph data yet</strong>
-        <span>Run raph init or raph crawl, then reload Studio.</span>
+        <span>Use Init Raph + example.com, or run raph init / raph crawl and then reload Studio.</span>
       </div>
     </main>
   </div>
@@ -869,6 +871,8 @@ const indexHTML = `<!DOCTYPE html>
       fit: document.getElementById('fit'),
       zoomOut: document.getElementById('zoom-out'),
       zoomIn: document.getElementById('zoom-in'),
+      initDemo: document.getElementById('init-demo'),
+      clearDB: document.getElementById('clear-db'),
       summary: document.getElementById('summary'),
       nodeCount: document.getElementById('node-count'),
       edgeCount: document.getElementById('edge-count'),
@@ -1837,6 +1841,11 @@ const indexHTML = `<!DOCTYPE html>
       return content ? '<pre>' + escapeHTML(content.slice(0, 5000)) + '</pre>' : '<div class="property wide"><label>Content</label><div>Empty</div></div>';
     }
 
+    function renderTagList(tags) {
+      if (!tags || !tags.length) return 'None';
+      return tags.map(function(tag) { return escapeHTML(tag); }).join(', ');
+    }
+
     function showProperties(id, skipFetch) {
       var node = state.details[id] || state.byId[id];
       if (!node) return;
@@ -1854,6 +1863,9 @@ const indexHTML = `<!DOCTYPE html>
       }).filter(function(item) { return item.node; });
 
       var content = node.content || '';
+      var memory = node.memory || null;
+      var webCorpus = node.web_corpus || null;
+      var webCrawlVersion = node.web_crawl_version || null;
       var relationsHTML = incoming.concat(outgoing).slice(0, 80).map(function(item) {
         return '<div class="relation" data-id="' + escapeHTML(item.node.id) + '">' +
           '<span>' + escapeHTML(item.dir) + '<br>' + escapeHTML(item.type) + '</span>' +
@@ -1861,6 +1873,34 @@ const indexHTML = `<!DOCTYPE html>
         '</div>';
       }).join('');
       if (!relationsHTML) relationsHTML = '<div class="property wide"><label>Relations</label><div>None</div></div>';
+
+      var memoryHTML = memory ? '' +
+        '<div class="property"><label>Scope</label><div>' + escapeHTML(memory.scope_type || '') + ' · ' + escapeHTML(memory.scope_id || '') + '</div></div>' +
+        '<div class="property"><label>Knowledge</label><div>' + escapeHTML(memory.knowledge_type || '') + '</div></div>' +
+        '<div class="property"><label>Lifecycle</label><div>' + escapeHTML(memory.lifecycle_state || '') + '</div></div>' +
+        '<div class="property"><label>Revision</label><div>' + escapeHTML(memory.revision || 0) + '</div></div>' +
+        '<div class="property"><label>Source</label><div>' + escapeHTML(memory.source || '') + '</div></div>' +
+        '<div class="property"><label>Writer</label><div>' + escapeHTML(memory.writer_id || '') + '</div></div>' +
+        '<div class="property wide"><label>Memory Key</label><div>' + escapeHTML(memory.memory_key || '') + '</div></div>' +
+        '<div class="property wide"><label>Display Tags</label><div>' + renderTagList(memory.display_tags) + '</div></div>' +
+        '<div class="property wide"><label>Normalized Tags</label><div>' + renderTagList(memory.normalized_tags) + '</div></div>' +
+        '<div class="property"><label>Created</label><div>' + escapeHTML(memory.created_at || '') + '</div></div>' +
+        '<div class="property"><label>Updated</label><div>' + escapeHTML(memory.updated_at || '') + '</div></div>' +
+        (memory.replaced_by_node_id ? '<div class="property wide"><label>Replaced By</label><div>' + escapeHTML(memory.replaced_by_node_id) + '</div></div>' : '') +
+        (memory.deprecated_message ? '<div class="property wide"><label>Deprecation</label><div>' + escapeHTML(memory.deprecated_message) + '</div></div>' : '')
+        : '';
+
+      var webHTML = webCorpus ? '' +
+        '<div class="property"><label>Corpus Scope</label><div>' + escapeHTML(webCorpus.scope_type || '') + ' · ' + escapeHTML(webCorpus.scope_id || '') + '</div></div>' +
+        '<div class="property"><label>Corpus Source</label><div>' + escapeHTML(webCorpus.source || '') + '</div></div>' +
+        '<div class="property wide"><label>Corpus ID</label><div>' + escapeHTML(webCorpus.id || '') + '</div></div>' +
+        '<div class="property wide"><label>Base URL</label><div>' + escapeHTML(webCorpus.base_url || '') + '</div></div>' +
+        '<div class="property"><label>Corpus Created</label><div>' + escapeHTML(webCorpus.created_at || '') + '</div></div>' +
+        '<div class="property"><label>Corpus Updated</label><div>' + escapeHTML(webCorpus.updated_at || '') + '</div></div>' +
+        (webCrawlVersion ? '<div class="property wide"><label>Latest Crawl</label><div>' + escapeHTML(webCrawlVersion.id || '') + '</div></div>' : '') +
+        (webCrawlVersion ? '<div class="property wide"><label>Seed URL</label><div>' + escapeHTML(webCrawlVersion.seed_url || '') + '</div></div>' : '') +
+        (webCrawlVersion ? '<div class="property"><label>Crawled At</label><div>' + escapeHTML(webCrawlVersion.created_at || '') + '</div></div>' : '')
+        : '';
 
       els.propertiesBody.innerHTML =
         '<div class="property-grid">' +
@@ -1871,6 +1911,8 @@ const indexHTML = `<!DOCTYPE html>
           '<div class="property wide"><label>ID</label><div>' + escapeHTML(node.id || '') + '</div></div>' +
           (node.path ? '<div class="property wide"><label>Codebase path</label><div>' + escapeHTML(node.path) + '</div></div>' : '') +
           (node.url ? '<div class="property wide"><label>URL</label><div>' + escapeHTML(node.url) + '</div></div>' : '') +
+          memoryHTML +
+          webHTML +
         '</div>' +
         '<div class="tabs">' +
           '<button data-tab="content" class="' + (state.tab === 'content' ? 'active' : '') + '">Content</button>' +
@@ -2030,6 +2072,49 @@ const indexHTML = `<!DOCTYPE html>
       }, 2600);
     }
 
+    function setActionBusy(busy, label) {
+      els.initDemo.disabled = busy;
+      els.clearDB.disabled = busy;
+      els.reload.disabled = busy;
+      if (busy) {
+        els.summary.textContent = label || 'Working';
+      }
+    }
+
+    async function clearDatabase() {
+      if (!window.confirm('Clear the local raph database?')) return;
+      setActionBusy(true, 'Clearing database...');
+      var res = await fetch('/api/actions/clear', { method: 'POST' });
+      var text = res.ok ? '' : await res.text();
+      setActionBusy(false, '');
+      if (!res.ok) {
+        toast('Clear failed: ' + text);
+        return;
+      }
+      toast('Local database cleared');
+      recordActivity('clear', '', 'database wiped');
+      reloadGraph();
+    }
+
+    async function initDemo() {
+      if (!window.confirm('Clear the database, index this workspace, and crawl example.com?')) return;
+      setActionBusy(true, 'Indexing workspace and crawling example.com...');
+      var res = await fetch('/api/actions/init', { method: 'POST' });
+      var text = await res.text();
+      setActionBusy(false, '');
+      if (!res.ok) {
+        toast('Init failed: ' + text);
+        return;
+      }
+      var data = {};
+      try {
+        data = JSON.parse(text);
+      } catch (error) {}
+      toast('Studio init finished');
+      recordActivity('init', '', (data.workspace_root || 'workspace') + ' + ' + (data.seed_url || 'seed'));
+      reloadGraph();
+    }
+
     function makeDraggable(panel, handle) {
       var dragging = false;
       var offsetX = 0;
@@ -2054,6 +2139,8 @@ const indexHTML = `<!DOCTYPE html>
     els.fit.addEventListener('click', function() { fitToView(false); });
     els.zoomOut.addEventListener('click', function() { zoomFromCenter(0.82); });
     els.zoomIn.addEventListener('click', function() { zoomFromCenter(1.22); });
+    els.initDemo.addEventListener('click', initDemo);
+    els.clearDB.addEventListener('click', clearDatabase);
     els.panelClose.addEventListener('click', function() { els.properties.classList.remove('visible'); });
     els.panelCollapse.addEventListener('click', function() {
       state.panelCollapsed = !state.panelCollapsed;

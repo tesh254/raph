@@ -27,6 +27,8 @@ type DocumentationCrawler struct {
 	seedURL     string
 	hostname    string
 	basePrefix  string
+	corpusID    string
+	versionID   string
 	workspaceID string
 	runCtx      context.Context
 	knownPages  map[string]struct{}
@@ -86,6 +88,8 @@ func newDocumentationCrawler(store db.GraphStore, cfg *config.Config, rawURL str
 		seedURL:     seedURL,
 		hostname:    parsedURL.Hostname(),
 		basePrefix:  prefixBase(parsedURL),
+		corpusID:    corpusID(parsedURL),
+		versionID:   crawlVersionID(seedURL),
 		workspaceID: workspaceID(parsedURL),
 		runCtx:      context.Background(),
 		knownPages:  make(map[string]struct{}),
@@ -111,6 +115,9 @@ func (c *DocumentationCrawler) Run(ctx context.Context) error {
 	}
 	c.runCtx = ctx
 
+	if err := c.registerCorpus(ctx); err != nil {
+		return err
+	}
 	if err := c.ensureSiteNode(ctx); err != nil {
 		return err
 	}
@@ -124,6 +131,30 @@ func (c *DocumentationCrawler) Run(ctx context.Context) error {
 		return err
 	}
 	return ctx.Err()
+}
+
+func (c *DocumentationCrawler) registerCorpus(ctx context.Context) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := c.store.SaveWebCorpus(ctx, db.WebCorpus{
+		ID:        c.corpusID,
+		ScopeType: "web",
+		ScopeID:   c.basePrefix,
+		Source:    "crawl",
+		BaseURL:   c.basePrefix,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		return fmt.Errorf("save web corpus: %w", err)
+	}
+	if err := c.store.SaveWebCrawlVersion(ctx, db.WebCrawlVersion{
+		ID:        c.versionID,
+		CorpusID:  c.corpusID,
+		SeedURL:   c.seedURL,
+		CreatedAt: now,
+	}); err != nil {
+		return fmt.Errorf("save web crawl version: %w", err)
+	}
+	return nil
 }
 
 func (c *DocumentationCrawler) registerCallbacks() {
@@ -516,6 +547,16 @@ func siteDisplayName(raw string) string {
 func workspaceID(u *url.URL) string {
 	h := sha1.Sum([]byte(prefixBase(u)))
 	return "crawl:" + hex.EncodeToString(h[:])
+}
+
+func corpusID(u *url.URL) string {
+	h := sha1.Sum([]byte(prefixBase(u)))
+	return "web_corpus:" + hex.EncodeToString(h[:])
+}
+
+func crawlVersionID(seedURL string) string {
+	h := sha1.Sum([]byte(seedURL + "|" + time.Now().UTC().Format(time.RFC3339Nano)))
+	return "web_crawl:" + hex.EncodeToString(h[:])
 }
 
 func chunkID(pageURL string, index int) string {

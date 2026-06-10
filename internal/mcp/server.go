@@ -42,13 +42,45 @@ type NeighborArgs struct {
 }
 
 type StoreMemoryArgs struct {
-	Key     string `json:"key,omitempty" jsonschema:"Stable optional key used to update the same memory later"`
-	Title   string `json:"title,omitempty" jsonschema:"Short descriptive title"`
-	Content string `json:"content" jsonschema:"Durable information for coding agents to remember"`
+	ScopeType     string   `json:"scope_type" jsonschema:"Memory scope type such as project, shared, or global"`
+	ScopeID       string   `json:"scope_id,omitempty" jsonschema:"Stable scope identifier. Project scope can infer this from the current workspace when omitted"`
+	KnowledgeType string   `json:"knowledge_type" jsonschema:"Knowledge category such as decision, workflow, preference, or incident"`
+	Title         string   `json:"title" jsonschema:"Short descriptive title"`
+	Content       string   `json:"content" jsonschema:"Durable information to remember"`
+	Source        string   `json:"source" jsonschema:"Origin of the memory, such as conversation, docs, or user"`
+	WriterID      string   `json:"writer_id" jsonschema:"Stable identifier for the writer updating this memory"`
+	Tags          []string `json:"tags,omitempty" jsonschema:"Optional tags for retrieval and display"`
+	MemoryKey     string   `json:"memory_key" jsonschema:"Stable key within the immutable scope and knowledge type"`
 }
 
-type DeleteMemoryArgs struct {
-	NodeID string `json:"node_id" jsonschema:"The memory node ID to delete"`
+type UpdateMemoryArgs struct {
+	ScopeType     string   `json:"scope_type" jsonschema:"Immutable memory scope type"`
+	ScopeID       string   `json:"scope_id,omitempty" jsonschema:"Immutable scope identifier. Project scope can infer this from the current workspace when omitted"`
+	KnowledgeType string   `json:"knowledge_type" jsonschema:"Immutable knowledge category"`
+	Title         string   `json:"title" jsonschema:"Updated short descriptive title"`
+	Content       string   `json:"content" jsonschema:"Updated durable information"`
+	Source        string   `json:"source" jsonschema:"Origin of the update"`
+	WriterID      string   `json:"writer_id" jsonschema:"Stable identifier for the writer updating this memory"`
+	Tags          []string `json:"tags,omitempty" jsonschema:"Optional replacement tag set"`
+	MemoryKey     string   `json:"memory_key" jsonschema:"Stable immutable key used to locate the memory"`
+}
+
+type DeprecateMemoryArgs struct {
+	NodeID            string `json:"node_id" jsonschema:"The memory node ID to deprecate"`
+	ReplacementNodeID string `json:"replacement_node_id,omitempty" jsonschema:"Optional replacement memory node ID"`
+	WriterID          string `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer performing the deprecation"`
+	Reason            string `json:"reason,omitempty" jsonschema:"Why this memory was deprecated or replaced"`
+}
+
+type SearchKnowledgeArgs struct {
+	Query         string `json:"query" jsonschema:"The search query"`
+	KnowledgeType string `json:"knowledge_type,omitempty" jsonschema:"Optional knowledge type filter"`
+	ScopeID       string `json:"scope_id,omitempty" jsonschema:"Required for shared knowledge lookups"`
+	Limit         int    `json:"limit,omitempty" jsonschema:"Maximum result count"`
+}
+
+type GetMemoryHistoryArgs struct {
+	NodeID string `json:"node_id" jsonschema:"The memory node ID whose revision history should be returned"`
 }
 
 type CrawlURLArgs struct {
@@ -67,8 +99,13 @@ type IndexCodebaseArgs struct {
 	NoEmbeddings bool   `json:"no_embeddings,omitempty" jsonschema:"Skip embedding generation while indexing"`
 }
 
-type DeleteMemoryOutput struct {
-	DeletedNodeID string `json:"deleted_node_id"`
+type SearchCodebaseArgs struct {
+	Query        string   `json:"query" jsonschema:"The code search query"`
+	Path         string   `json:"path,omitempty" jsonschema:"Indexed codebase directory. Defaults to the MCP server working directory."`
+	IncludePaths []string `json:"include_paths,omitempty" jsonschema:"Only include matches whose file path contains one of these substrings"`
+	ExcludePaths []string `json:"exclude_paths,omitempty" jsonschema:"Exclude matches whose file path contains one of these substrings"`
+	NodeTypes    []string `json:"node_types,omitempty" jsonschema:"Filter to specific node types such as file, func, type, markdown_chunk, or file_chunk"`
+	Limit        int      `json:"limit,omitempty" jsonschema:"Maximum result count"`
 }
 
 type CrawlURLOutput struct {
@@ -120,6 +157,33 @@ type BestVectorMatchOutput struct {
 type NeighborOutput struct {
 	Nodes []db.Node `json:"nodes"`
 	Edges []db.Edge `json:"edges"`
+}
+
+type ScopedMemorySearchOutput struct {
+	ScopeType string            `json:"scope_type"`
+	ScopeID   string            `json:"scope_id"`
+	Matches   []db.MemoryRecord `json:"matches"`
+}
+
+type MemoryHistoryOutput struct {
+	NodeID    string              `json:"node_id"`
+	Revisions []db.MemoryRevision `json:"revisions"`
+}
+
+type SearchCodebaseOutput struct {
+	Path       string    `json:"path"`
+	Workspace  string    `json:"workspace_id"`
+	Mode       string    `json:"mode"`
+	Symbols    []db.Node `json:"symbols"`
+	Files      []db.Node `json:"files"`
+	Chunks     []db.Node `json:"chunks"`
+	Unassigned []db.Node `json:"unassigned,omitempty"`
+}
+
+type CrossCorpusNeighborOutput struct {
+	QueryNodeID string    `json:"query_node_id"`
+	Mode        string    `json:"mode"`
+	Matches     []db.Node `json:"matches"`
 }
 
 func NewMCPServerWrapper(store db.GraphStore, cfg *config.Config) *MCPServerWrapper {
@@ -207,7 +271,7 @@ func (m *MCPServerWrapper) registerTools() {
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "graph_neighbors",
-		Description: "Returns neighboring nodes and edges for a given graph node.",
+		Description: "Returns structural neighboring nodes and edges for a given graph node.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args NeighborArgs) (*mcpsdk.CallToolResult, NeighborOutput, error) {
 		if strings.TrimSpace(args.NodeID) == "" {
 			return nil, NeighborOutput{}, fmt.Errorf("node_id is required")
@@ -222,13 +286,37 @@ func (m *MCPServerWrapper) registerTools() {
 	})
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
-		Name:        "memory_store",
-		Description: "Stores or updates durable agent memory. Generates an embedding when an embedding provider is configured.",
+		Name:        "graph_neighbors_cross_corpus",
+		Description: "Performs explicit semantic expansion from one node into similar nodes from other corpora or workspaces.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args struct {
+		NodeID string `json:"node_id"`
+		Limit  int    `json:"limit,omitempty"`
+	}) (*mcpsdk.CallToolResult, CrossCorpusNeighborOutput, error) {
+		output, err := m.crossCorpusNeighbors(ctx, args.NodeID, args.Limit)
+		if err != nil {
+			return nil, CrossCorpusNeighborOutput{}, err
+		}
+		return textResult(renderJSON(output)), output, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "store_memory",
+		Description: "Stores a new scoped memory record. Project scope can infer scope_id from the current workspace.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args StoreMemoryArgs) (*mcpsdk.CallToolResult, memory.StoreOutput, error) {
+		scopeID, err := m.resolveScopeID(args.ScopeType, args.ScopeID)
+		if err != nil {
+			return nil, memory.StoreOutput{}, err
+		}
 		output, err := memory.Store(ctx, m.store, m.config, memory.StoreInput{
-			Key:     args.Key,
-			Title:   args.Title,
-			Content: args.Content,
+			ScopeType:     args.ScopeType,
+			ScopeID:       scopeID,
+			KnowledgeType: args.KnowledgeType,
+			Title:         args.Title,
+			Content:       args.Content,
+			Source:        args.Source,
+			WriterID:      args.WriterID,
+			Tags:          args.Tags,
+			MemoryKey:     args.MemoryKey,
 		})
 		if err != nil {
 			return nil, memory.StoreOutput{}, err
@@ -237,17 +325,96 @@ func (m *MCPServerWrapper) registerTools() {
 	})
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
-		Name:        "memory_delete",
-		Description: "Deletes a durable memory node by ID.",
-	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args DeleteMemoryArgs) (*mcpsdk.CallToolResult, DeleteMemoryOutput, error) {
-		nodeID := strings.TrimSpace(args.NodeID)
-		if !strings.HasPrefix(nodeID, "memory:") {
-			return nil, DeleteMemoryOutput{}, fmt.Errorf("node_id must identify a memory node")
+		Name:        "update_memory",
+		Description: "Updates the current contents of an existing scoped memory record and saves the previous version to revision history.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args UpdateMemoryArgs) (*mcpsdk.CallToolResult, memory.StoreOutput, error) {
+		scopeID, err := m.resolveScopeID(args.ScopeType, args.ScopeID)
+		if err != nil {
+			return nil, memory.StoreOutput{}, err
 		}
-		if err := m.store.DeleteNodeByID(ctx, nodeID); err != nil {
-			return nil, DeleteMemoryOutput{}, err
+		output, err := memory.Update(ctx, m.store, m.config, memory.UpdateInput{
+			ScopeType:     args.ScopeType,
+			ScopeID:       scopeID,
+			KnowledgeType: args.KnowledgeType,
+			Title:         args.Title,
+			Content:       args.Content,
+			Source:        args.Source,
+			WriterID:      args.WriterID,
+			Tags:          args.Tags,
+			MemoryKey:     args.MemoryKey,
+		})
+		if err != nil {
+			return nil, memory.StoreOutput{}, err
 		}
-		output := DeleteMemoryOutput{DeletedNodeID: nodeID}
+		return textResult(renderJSON(output)), output, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "deprecate_memory",
+		Description: "Marks a memory as deprecated or replaced while preserving its revision history.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args DeprecateMemoryArgs) (*mcpsdk.CallToolResult, db.MemoryRecord, error) {
+		output, err := memory.Deprecate(ctx, m.store, memory.DeprecateInput{
+			NodeID:            args.NodeID,
+			ReplacementNodeID: args.ReplacementNodeID,
+			WriterID:          args.WriterID,
+			Reason:            args.Reason,
+		})
+		if err != nil {
+			return nil, db.MemoryRecord{}, err
+		}
+		return textResult(renderJSON(output)), output, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "search_project_knowledge",
+		Description: "Searches active project-scoped knowledge for the current workspace's project identity.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchKnowledgeArgs) (*mcpsdk.CallToolResult, ScopedMemorySearchOutput, error) {
+		scopeID, err := m.resolveScopeID("project", "")
+		if err != nil {
+			return nil, ScopedMemorySearchOutput{}, err
+		}
+		output, err := m.searchKnowledge(ctx, "project", scopeID, args.KnowledgeType, args.Query, args.Limit)
+		if err != nil {
+			return nil, ScopedMemorySearchOutput{}, err
+		}
+		return textResult(renderJSON(output)), output, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "search_shared_knowledge",
+		Description: "Searches active shared knowledge for an explicit shared scope.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchKnowledgeArgs) (*mcpsdk.CallToolResult, ScopedMemorySearchOutput, error) {
+		scopeID := strings.TrimSpace(args.ScopeID)
+		if scopeID == "" {
+			return nil, ScopedMemorySearchOutput{}, fmt.Errorf("scope_id is required for shared knowledge")
+		}
+		output, err := m.searchKnowledge(ctx, "shared", scopeID, args.KnowledgeType, args.Query, args.Limit)
+		if err != nil {
+			return nil, ScopedMemorySearchOutput{}, err
+		}
+		return textResult(renderJSON(output)), output, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "search_global_preferences",
+		Description: "Searches active global preference memories.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchKnowledgeArgs) (*mcpsdk.CallToolResult, ScopedMemorySearchOutput, error) {
+		output, err := m.searchKnowledge(ctx, "global", "preferences", "preference", args.Query, args.Limit)
+		if err != nil {
+			return nil, ScopedMemorySearchOutput{}, err
+		}
+		return textResult(renderJSON(output)), output, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "get_memory_history",
+		Description: "Returns revision history for a memory record.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args GetMemoryHistoryArgs) (*mcpsdk.CallToolResult, MemoryHistoryOutput, error) {
+		revisions, err := memory.History(ctx, m.store, args.NodeID)
+		if err != nil {
+			return nil, MemoryHistoryOutput{}, err
+		}
+		output := MemoryHistoryOutput{NodeID: strings.TrimSpace(args.NodeID), Revisions: revisions}
 		return textResult(renderJSON(output)), output, nil
 	})
 
@@ -333,6 +500,17 @@ func (m *MCPServerWrapper) registerTools() {
 		output := IndexCodebaseOutput{Path: absPath, WorkspaceID: idx.WorkspaceID(), Stats: stats}
 		return textResult(renderJSON(output)), output, nil
 	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "search_codebase",
+		Description: "Searches indexed codebase nodes with explicit file, symbol, and chunk result groups.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchCodebaseArgs) (*mcpsdk.CallToolResult, SearchCodebaseOutput, error) {
+		output, err := m.searchCodebase(ctx, args)
+		if err != nil {
+			return nil, SearchCodebaseOutput{}, err
+		}
+		return textResult(renderJSON(output)), output, nil
+	})
 }
 
 func (m *MCPServerWrapper) hybridSearch(ctx context.Context, query string, limit int) (SearchOutput, error) {
@@ -375,6 +553,202 @@ func (m *MCPServerWrapper) searchWorkspace(ctx context.Context, workspace string
 		return "keyword", nil, err
 	}
 	return "keyword", nodes, nil
+}
+
+func (m *MCPServerWrapper) resolveScopeID(scopeType string, provided string) (string, error) {
+	scopeType = strings.TrimSpace(scopeType)
+	provided = strings.TrimSpace(provided)
+	if scopeType == "" {
+		return "", fmt.Errorf("scope_type is required")
+	}
+	if provided != "" {
+		return provided, nil
+	}
+	if scopeType != "project" {
+		return "", fmt.Errorf("scope_id is required for %s scope", scopeType)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolve current workspace: %w", err)
+	}
+	projectID, err := indexer.ResolveProjectIdentity(m.config, cwd)
+	if err != nil {
+		return "", err
+	}
+	return projectID, nil
+}
+
+func (m *MCPServerWrapper) searchKnowledge(ctx context.Context, scopeType string, scopeID string, knowledgeType string, query string, limit int) (ScopedMemorySearchOutput, error) {
+	output, err := memory.Search(ctx, m.store, memory.SearchInput{
+		Query:         query,
+		ScopeType:     scopeType,
+		ScopeID:       scopeID,
+		KnowledgeType: knowledgeType,
+		Limit:         searchLimit(limit),
+	})
+	if err != nil {
+		return ScopedMemorySearchOutput{}, err
+	}
+	return ScopedMemorySearchOutput{
+		ScopeType: scopeType,
+		ScopeID:   scopeID,
+		Matches:   output.Matches,
+	}, nil
+}
+
+func (m *MCPServerWrapper) crossCorpusNeighbors(ctx context.Context, nodeID string, limit int) (CrossCorpusNeighborOutput, error) {
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return CrossCorpusNeighborOutput{}, fmt.Errorf("node_id is required")
+	}
+	node, err := m.store.GetNodeByID(ctx, nodeID)
+	if err != nil {
+		return CrossCorpusNeighborOutput{}, err
+	}
+	output := CrossCorpusNeighborOutput{QueryNodeID: nodeID, Mode: "keyword"}
+	if m.config == nil || !m.config.HasEmbeddingProvider() {
+		return output, nil
+	}
+	vec, err := config.GenerateEmbedding(ctx, m.config, node.Name+"\n\n"+node.Content)
+	if err != nil {
+		return CrossCorpusNeighborOutput{}, err
+	}
+	matches, err := m.store.VectorSearch(ctx, vec, searchLimit(limit)*4)
+	if err != nil {
+		return CrossCorpusNeighborOutput{}, err
+	}
+	for _, match := range matches {
+		if match.ID == node.ID || match.Workspace == node.Workspace {
+			continue
+		}
+		output.Matches = append(output.Matches, match)
+		if len(output.Matches) == searchLimit(limit) {
+			break
+		}
+	}
+	if len(output.Matches) > 0 {
+		output.Mode = "semantic"
+	}
+	return output, nil
+}
+
+func (m *MCPServerWrapper) searchCodebase(ctx context.Context, args SearchCodebaseArgs) (SearchCodebaseOutput, error) {
+	query := strings.TrimSpace(args.Query)
+	if query == "" {
+		return SearchCodebaseOutput{}, fmt.Errorf("query is required")
+	}
+	path := strings.TrimSpace(args.Path)
+	if path == "" {
+		path = "."
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return SearchCodebaseOutput{}, fmt.Errorf("resolve codebase path: %w", err)
+	}
+	idx, err := indexer.New(m.store, m.config, absPath, true)
+	if err != nil {
+		return SearchCodebaseOutput{}, err
+	}
+	mode, nodes, err := m.searchWorkspace(ctx, idx.WorkspaceID(), query, searchLimit(args.Limit)*5)
+	if err != nil {
+		return SearchCodebaseOutput{}, err
+	}
+	filtered := filterCodeResults(nodes, args.IncludePaths, args.ExcludePaths, args.NodeTypes)
+	output := SearchCodebaseOutput{
+		Path:      absPath,
+		Workspace: idx.WorkspaceID(),
+		Mode:      mode,
+	}
+	for _, node := range filtered {
+		switch node.Type {
+		case "func", "type":
+			output.Symbols = append(output.Symbols, node)
+		case "file":
+			output.Files = append(output.Files, node)
+		case "markdown_chunk", "file_chunk":
+			output.Chunks = append(output.Chunks, node)
+		default:
+			output.Unassigned = append(output.Unassigned, node)
+		}
+	}
+	trimNodeGroups(&output, searchLimit(args.Limit))
+	return output, nil
+}
+
+func filterCodeResults(nodes []db.Node, includePaths []string, excludePaths []string, nodeTypes []string) []db.Node {
+	typeSet := make(map[string]struct{}, len(nodeTypes))
+	for _, nodeType := range nodeTypes {
+		nodeType = strings.TrimSpace(nodeType)
+		if nodeType != "" {
+			typeSet[nodeType] = struct{}{}
+		}
+	}
+	out := make([]db.Node, 0, len(nodes))
+	for _, node := range nodes {
+		if len(typeSet) > 0 {
+			if _, ok := typeSet[node.Type]; !ok {
+				continue
+			}
+		}
+		nodePath := firstNonEmpty(node.URL, node.Name)
+		if !matchesPathFilters(nodePath, includePaths, excludePaths) {
+			continue
+		}
+		out = append(out, node)
+	}
+	return out
+}
+
+func matchesPathFilters(path string, includePaths []string, excludePaths []string) bool {
+	path = strings.ToLower(path)
+	if len(includePaths) > 0 {
+		matched := false
+		for _, include := range includePaths {
+			include = strings.ToLower(strings.TrimSpace(include))
+			if include != "" && strings.Contains(path, include) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	for _, exclude := range excludePaths {
+		exclude = strings.ToLower(strings.TrimSpace(exclude))
+		if exclude != "" && strings.Contains(path, exclude) {
+			return false
+		}
+	}
+	return true
+}
+
+func trimNodeGroups(output *SearchCodebaseOutput, limit int) {
+	if limit <= 0 {
+		limit = 5
+	}
+	if len(output.Symbols) > limit {
+		output.Symbols = output.Symbols[:limit]
+	}
+	if len(output.Files) > limit {
+		output.Files = output.Files[:limit]
+	}
+	if len(output.Chunks) > limit {
+		output.Chunks = output.Chunks[:limit]
+	}
+	if len(output.Unassigned) > limit {
+		output.Unassigned = output.Unassigned[:limit]
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func compactMatches(nodes []db.Node, maxChars int) []CompactMatch {

@@ -357,6 +357,9 @@ func newStudioCmd() *cobra.Command {
 
 			srv := studio.NewStudioServer(store, port)
 			srv.SetConfig(cfg)
+			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+				srv.SetWorkspaceRoot(cwd)
+			}
 			verbose.Printf("launching studio on port=%d", port)
 			return srv.Start()
 		},

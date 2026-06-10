@@ -12,6 +12,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -38,6 +39,7 @@ type Indexer struct {
 	cfg            *config.Config
 	root           string
 	workspaceID    string
+	projectID      string
 	skipEmbeddings bool
 }
 
@@ -47,11 +49,17 @@ func New(store db.GraphStore, cfg *config.Config, root string, skipEmbeddings bo
 		return nil, fmt.Errorf("resolve root path: %w", err)
 	}
 
+	projectID, err := ResolveProjectIdentity(cfg, absRoot)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Indexer{
 		store:          store,
 		cfg:            cfg,
 		root:           absRoot,
 		workspaceID:    workspaceID(absRoot),
+		projectID:      projectID,
 		skipEmbeddings: skipEmbeddings,
 	}, nil
 }
@@ -122,6 +130,10 @@ func (i *Indexer) RemoveFile(ctx context.Context, relativePath string) error {
 
 func (i *Indexer) WorkspaceID() string {
 	return i.workspaceID
+}
+
+func (i *Indexer) ProjectID() string {
+	return i.projectID
 }
 
 func CollectFileStates(root string) (map[string]FileState, error) {
@@ -216,6 +228,10 @@ func (i *Indexer) indexFile(ctx context.Context, path string, stats *Stats) erro
 		}
 	case ".go":
 		if err := i.indexGoFile(ctx, relPath, fileNode.ID, contentBytes, stats); err != nil {
+			return err
+		}
+	default:
+		if err := i.indexFallbackChunks(ctx, relPath, fileNode.ID, content, stats); err != nil {
 			return err
 		}
 	}
@@ -331,6 +347,38 @@ func (i *Indexer) indexGoFile(ctx context.Context, relPath string, parentID stri
 	return nil
 }
 
+func (i *Indexer) indexFallbackChunks(ctx context.Context, relPath string, parentID string, content string, stats *Stats) error {
+	chunks := splitFallbackChunks(content, 1800)
+	for idx, chunk := range chunks {
+		node := db.Node{
+			ID:        i.nodeID("file_chunk", fmt.Sprintf("%s#%d", relPath, idx)),
+			Workspace: i.workspaceID,
+			Domain:    detectDomain(relPath),
+			Type:      "file_chunk",
+			Name:      fmt.Sprintf("%s chunk %d", relPath, idx+1),
+			Content:   truncateRunes(chunk, maxStoredContent),
+			URL:       fmt.Sprintf("%s#chunk-%d", relPath, idx+1),
+			Path:      i.root,
+		}
+		embedding, err := i.embed(ctx, chunk, stats)
+		if err != nil {
+			return fmt.Errorf("embed fallback chunk %q: %w", relPath, err)
+		}
+		if len(embedding) > 0 {
+			node.Embedding = embedding
+		}
+		if err := i.store.SaveNode(ctx, node); err != nil {
+			return err
+		}
+		if err := i.store.SaveEdge(ctx, db.Edge{SourceID: parentID, TargetID: node.ID, Type: "HAS_CHUNK"}); err != nil {
+			return err
+		}
+		stats.NodesSaved++
+		stats.EdgesSaved++
+	}
+	return nil
+}
+
 func (i *Indexer) embed(ctx context.Context, text string, stats *Stats) ([]float32, error) {
 	if i.skipEmbeddings || i.cfg == nil || !i.cfg.HasEmbeddingProvider() {
 		return nil, nil
@@ -359,6 +407,33 @@ func workspaceID(root string) string {
 	return "ws:" + hex.EncodeToString(h[:])
 }
 
+func ResolveProjectIdentity(cfg *config.Config, root string) (string, error) {
+	if cfg != nil && strings.TrimSpace(cfg.Project.IdentityOverride) != "" {
+		return "project:" + strings.TrimSpace(cfg.Project.IdentityOverride), nil
+	}
+	gitTopLevel, err := gitRoot(root)
+	if err == nil && gitTopLevel != "" {
+		sum := sha1.Sum([]byte(gitTopLevel))
+		return "project:" + hex.EncodeToString(sum[:]), nil
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve project identity root: %w", err)
+	}
+	sum := sha1.Sum([]byte(absRoot))
+	return "project:" + hex.EncodeToString(sum[:]), nil
+}
+
+func gitRoot(root string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = root
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
 func shouldSkipDir(name string) bool {
 	switch name {
 	case ".git", ".svn", ".hg", "node_modules", "vendor", "dist", "build", ".next", ".turbo", ".raph":
@@ -381,10 +456,10 @@ func detectDomain(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".go":
 		return "code"
-	case ".md", ".markdown", ".rst":
+	case ".md", ".markdown", ".rst", ".txt":
 		return "documentation"
 	default:
-		return "memory"
+		return "code"
 	}
 }
 
@@ -464,5 +539,28 @@ func truncateRunes(s string, limit int) string {
 			break
 		}
 	}
-	return string(out) + "\n…"
+	return string(out) + "\n..."
+}
+
+func splitFallbackChunks(content string, maxRunes int) []string {
+	content = strings.TrimSpace(content)
+	if content == "" || maxRunes <= 0 {
+		return nil
+	}
+	runes := []rune(content)
+	if len(runes) <= maxRunes {
+		return []string{content}
+	}
+	chunks := make([]string, 0, (len(runes)/maxRunes)+1)
+	for start := 0; start < len(runes); start += maxRunes {
+		end := start + maxRunes
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunk := strings.TrimSpace(string(runes[start:end]))
+		if chunk != "" {
+			chunks = append(chunks, chunk)
+		}
+	}
+	return chunks
 }

@@ -12,7 +12,12 @@ import (
 var ErrConfigNotFound = errors.New("raph config file not found")
 
 type Config struct {
-	Vector VectorSettings `json:"vector"`
+	Vector  VectorSettings  `json:"vector"`
+	Project ProjectSettings `json:"project,omitempty"`
+}
+
+type ProjectSettings struct {
+	IdentityOverride string `json:"identity_override,omitempty"`
 }
 
 type VectorSettings struct {
@@ -70,6 +75,15 @@ const DefaultSchemaJSON = `{
         }
       },
       "required": ["current_provider", "providers"]
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "identity_override": {
+          "type": "string",
+          "description": "Optional stable project identity used to share project-scoped memory across different checkouts."
+        }
+      }
     }
   },
   "required": ["vector"]
@@ -86,6 +100,9 @@ const DefaultConfigJSON = `{
         "model": "openai/text-embedding-3-small"
       }
     }
+  },
+  "project": {
+    "identity_override": ""
   }
 }
 `
@@ -192,6 +209,7 @@ func (c *Config) resolveEnv() {
 	c.Vector.Providers.OpenRouter.APIKey = strings.TrimSpace(os.ExpandEnv(c.Vector.Providers.OpenRouter.APIKey))
 	c.Vector.Providers.OpenRouter.Model = strings.TrimSpace(c.Vector.Providers.OpenRouter.Model)
 	c.Vector.Providers.OpenRouter.BaseURL = strings.TrimSpace(os.ExpandEnv(c.Vector.Providers.OpenRouter.BaseURL))
+	c.Project.IdentityOverride = strings.TrimSpace(os.ExpandEnv(c.Project.IdentityOverride))
 }
 
 func (c *Config) Validate() error {
