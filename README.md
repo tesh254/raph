@@ -191,14 +191,23 @@ go build ./cmd/raph
 
 ## Release
 
-Releases use semantic version tags. Create and push a tag such as:
+Merges to `main` now auto-create and push a semantic version tag through `.github/workflows/version-tag.yml`.
+
+Bump rules follow conventional commits across commits since the previous tag:
+
+- `BREAKING CHANGE` or `type!:` -> major
+- `feat:` -> minor
+- `fix:`, `perf:`, or `refactor:` -> patch
+- anything else falls back to patch so merged work still ships
+
+`.github/workflows/release.yml` validates the generated tag, runs tests, and runs GoReleaser. GoReleaser publishes release archives, `checksums.txt`, changelog notes, and the Homebrew cask in this repository.
+
+Manual tags still work when needed:
 
 ```sh
 git tag v0.1.0
 git push origin v0.1.0
 ```
-
-`.github/workflows/release.yml` validates the tag, runs tests, and runs GoReleaser. GoReleaser publishes release archives, `checksums.txt`, changelog notes, and the Homebrew cask in this repository.
 
 Validate release config locally:
 

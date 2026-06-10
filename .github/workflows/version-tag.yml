@@ -1,0 +1,87 @@
+name: version-tag
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: version-tag-main
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine next semantic version
+        id: semver
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          last_tag="$(git tag -l 'v*' --sort=-v:refname | head -n1)"
+          if [[ -n "$last_tag" ]]; then
+            range="${last_tag}..HEAD"
+            current="${last_tag#v}"
+          else
+            range="HEAD"
+            current="0.0.0"
+          fi
+
+          mapfile -t commits < <(git log "$range" --pretty=%s%n%b)
+          commit_text="$(printf '%s\n' "${commits[@]}")"
+
+          bump="patch"
+          if grep -Eq 'BREAKING CHANGE|^[^[:space:]].*!:' <<<"$commit_text"; then
+            bump="major"
+          elif grep -Eq '^feat(\(.+\))?:' <<<"$commit_text"; then
+            bump="minor"
+          elif grep -Eq '^(fix|perf|refactor)(\(.+\))?:' <<<"$commit_text"; then
+            bump="patch"
+          fi
+
+          IFS='.' read -r major minor patch <<<"$current"
+          case "$bump" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+          esac
+
+          next="v${major}.${minor}.${patch}"
+          echo "last_tag=${last_tag}" >> "$GITHUB_OUTPUT"
+          echo "next_tag=${next}" >> "$GITHUB_OUTPUT"
+          echo "bump=${bump}" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        env:
+          NEXT_TAG: ${{ steps.semver.outputs.next_tag }}
+          LAST_TAG: ${{ steps.semver.outputs.last_tag }}
+          BUMP: ${{ steps.semver.outputs.bump }}
+        run: |
+          set -euo pipefail
+          git tag -a "$NEXT_TAG" -m "release: $NEXT_TAG"
+          git push origin "$NEXT_TAG"
+          echo "Created $NEXT_TAG from ${LAST_TAG:-initial release} using $BUMP bump"
+
