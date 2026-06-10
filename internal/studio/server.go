@@ -293,6 +293,9 @@ func (s *StudioServer) handleSQLite(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
+	if limit > 1000 {
+		limit = 1000
+	}
 	tables, err := s.store.InspectTables(r.Context(), limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

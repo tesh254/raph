@@ -13,6 +13,8 @@ This repository now includes:
 - a cross-platform background repository synchronizer in `internal/syncer`
 - an MCP server in `internal/mcp`
 - a zero-dependency Studio UI in `internal/studio`
+- scoped durable memory with lifecycle metadata for agent preferences, facts, procedures, and project knowledge
+- codebase chunk indexing for non-Go files so README, docs, config, and other text assets are searchable alongside symbols
 - GoReleaser releases for macOS, Linux, and Windows
 - verified POSIX and PowerShell installers
 - an in-repository Homebrew tap
@@ -63,6 +65,8 @@ To skip embeddings during indexing:
 raph init --path . --no-embeddings
 ```
 
+`init` also registers the repository for background synchronization. The worker keeps supported files in sync, updates changed nodes, and removes graph data for deleted files.
+
 ### 3. Run the MCP server
 
 ```sh
@@ -80,9 +84,11 @@ Coding agents connected over MCP can use:
 - `index_codebase` to index the agent's current codebase or another local repository
 - `graph_neighbors` to traverse related graph nodes
 
+`memory_store` accepts scoped memory metadata so agents can distinguish global, project, repository, and task knowledge. Memories include lifecycle state, knowledge type, source, writer, revision, tags, and timestamps. `memory_delete` retires matching active memory instead of silently deleting unrelated graph nodes.
+
 Every node has a stable unique `id`. Nodes indexed from a local repository also expose the absolute codebase `path`, allowing agents to prefer results from the repository they are currently working in. Re-index existing repositories once to populate `path` on nodes created before this field was added.
 
-`index_codebase` defaults to the MCP server working directory when `path` is omitted. It replaces existing indexed nodes for that codebase. Pass `no_embeddings: true` to index without remote embedding calls.
+`index_codebase` defaults to the MCP server working directory when `path` is omitted. It replaces existing indexed nodes for that codebase. Pass `no_embeddings: true` to index without remote embedding calls. Go files are indexed as symbols and relationships; supported non-Go files are indexed as chunk nodes connected to their source file.
 
 `crawl_website` returns at most 3 compact matches by default, with excerpts capped at 600 characters. Agents can request up to 10 matches and 2,000 characters per excerpt when more context is needed.
 
@@ -116,6 +122,14 @@ raph studio --port 4545
 
 Then visit `http://localhost:4545`.
 
+Studio exposes graph browsing, keyword/semantic search, neighbor expansion, node details, SQLite table inspection, and local-only maintenance actions. The init action clears the local database, indexes the current workspace, and crawls the configured seed URL. The clear action wipes local graph data. Use Studio only on trusted local machines.
+
+For operational troubleshooting, pass `--verbose` to any command:
+
+```sh
+raph --verbose start
+```
+
 ## Commands
 
 ```text
@@ -127,6 +141,7 @@ raph sync            Index and continuously synchronize a repository
 raph sync --status   Show the worker and registered repositories
 raph sync --remove   Unregister a repository and clean its graph data
 raph sync --stop     Stop the background sync worker
+raph clear --yes     Clear all local graph data
 raph config init     Create ~/.raph/schema.json and ~/.raph/raph.json
 raph config path     Print config/data paths
 raph config check    Validate the current config file
@@ -187,6 +202,25 @@ raph update
 ```sh
 go test ./...
 go build ./cmd/raph
+```
+
+Before merging feature work, run:
+
+```sh
+go test ./...
+go build ./cmd/raph
+```
+
+For changes touching Studio, also smoke test:
+
+```sh
+raph studio --port 4545
+```
+
+For changes touching MCP behavior, start the stdio server from a configured agent or run:
+
+```sh
+raph start
 ```
 
 ## Release

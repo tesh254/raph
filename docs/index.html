@@ -311,7 +311,7 @@
     <div class="eyebrow">Usage docs</div>
     <h1>Local-first graph memory for coding agents.</h1>
     <p class="lead">
-      raph indexes code, docs, and notes into a local graph, then serves that graph over MCP and Studio so agents can search, traverse, and keep context close to the repo.
+      raph indexes code, docs, and scoped memory into a local graph, then serves that graph over MCP and Studio so agents can search, traverse, and keep context close to the repo.
     </p>
     <div class="cta-row">
       <a class="button primary" href="#start">Start here</a>
@@ -330,12 +330,12 @@
       <article class="card">
         <div class="label">agent ready</div>
         <h3>MCP tools expose memory + graph traversal</h3>
-        <p>Agents can store memory, search semantically, crawl docs, and walk node neighborhoods.</p>
+        <p>Agents can store scoped memory, search semantically, crawl docs, index the current codebase, and walk node neighborhoods.</p>
       </article>
       <article class="card">
         <div class="label">studio</div>
         <h3>Inspect graph with live UI</h3>
-        <p>Explore nodes, edges, and properties in the Studio graph explorer at <code>localhost:4545</code>.</p>
+        <p>Explore nodes, edges, metadata, search, SQLite tables, and maintenance actions in Studio at <code>localhost:4545</code>.</p>
       </article>
     </section>
 
@@ -365,6 +365,23 @@ irm https://raw.githubusercontent.com/tesh254/raph/main/install.ps1 | iex</code>
             Tip: disable auto-update checks with <code>RAPH_NO_AUTO_UPDATE=1</code> if you want fully manual release control.
           </div>
         </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>MCP tools</h2>
+      <p class="subhead">Coding agents connected over stdio can use these tools against local storage.</p>
+      <div class="grid cols-2">
+        <article class="card">
+          <h3>Memory and search</h3>
+          <p><code>memory_store</code> records scoped facts, preferences, procedures, and project knowledge with lifecycle metadata, tags, revision, source, and writer details. <code>memory_delete</code> retires active memories by scope and key.</p>
+          <p><code>hybrid_semantic_search</code>, <code>multi_query_search</code>, and <code>best_vector_match</code> search memory, code, and documentation with keyword fallback when embeddings are unavailable.</p>
+        </article>
+        <article class="card">
+          <h3>Code and docs</h3>
+          <p><code>index_codebase</code> defaults to the MCP server working directory, replaces existing nodes for that codebase, and can skip remote embeddings with <code>no_embeddings</code>.</p>
+          <p><code>crawl_url</code> fetches one URL. <code>crawl_website</code> returns compact relevant excerpts, with bounded result and excerpt limits. <code>graph_neighbors</code> expands related graph nodes.</p>
+        </article>
       </div>
     </section>
 
@@ -502,7 +519,7 @@ args = ["start"]</code></pre>
     <section id="studio">
       <h2>Studio</h2>
       <p class="subhead">
-        Studio is the local graph explorer. It now focuses on a smoother network view, keeps node details live as you click, and adds attribution analytics so you can see which agent touched the graph.
+        Studio is the local graph explorer. It keeps node details live as you click, shows memory and crawl metadata, supports search and neighbor expansion, and includes local-only database maintenance actions.
       </p>
       <div class="grid cols-2">
         <article class="card">
@@ -512,7 +529,15 @@ args = ["start"]</code></pre>
         </article>
         <article class="card">
           <div class="kicker">Graph behavior</div>
-          <p>All nodes stay visible, node clicks refresh properties, links stay interconnected, and the panel tracks recent agent activity.</p>
+          <p>All nodes stay visible, node clicks refresh properties, links stay interconnected, and table inspection is capped to keep the page responsive.</p>
+        </article>
+        <article class="card">
+          <div class="kicker">Maintenance actions</div>
+          <p>The init action clears local graph data, indexes the current workspace, and crawls the configured seed URL. The clear action wipes local graph data. Use Studio only on trusted local machines.</p>
+        </article>
+        <article class="card">
+          <div class="kicker">Troubleshooting</div>
+          <pre><code>raph --verbose studio --port 4545</code></pre>
         </article>
       </div>
     </section>
@@ -530,6 +555,8 @@ raph crawl --single https://example.com/docs/page</code></pre>
           <pre><code>raph sync --path .
 raph sync --status
 raph sync --remove --path .
+raph sync --stop
+raph clear --yes
 raph config init
 raph config check
 raph update</code></pre>

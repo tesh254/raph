@@ -31,6 +31,19 @@ Examples:
 - Keep changes focused
 - Run tests before opening PR
 - Include manual verification notes for UI, sync, or release-flow changes
+- Document user-facing command, MCP tool, schema, storage, or Studio behavior changes
+- Call out destructive operations, migrations, background workers, and network calls in the PR description
+
+## Review Checklist
+
+- `go test ./...` passes
+- `go build ./cmd/raph` passes
+- New MCP tools or arguments are documented in `README.md`
+- Database schema changes are backward compatible for existing `~/.raph/data/raph.db` files or include a migration path
+- Background workers shut down cleanly and avoid duplicate long-running processes
+- Networked features have bounded crawl/search limits and work without an embedding provider when possible
+- Studio changes keep destructive actions explicit and local-only
+- No real API keys, tokens, or local absolute paths are committed
 
 ## Release Flow
 
@@ -50,4 +63,3 @@ git push origin v0.1.0
 
 - Update `README.md` when commands, release behavior, or install flow changes
 - Update `docs/` when public usage docs or landing page content changes
-

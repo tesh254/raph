@@ -3,6 +3,7 @@ package studio
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -174,5 +175,47 @@ func TestStudioNodeEndpointIncludesMetadata(t *testing.T) {
 	}
 	if payload["web_crawl_version"] == nil {
 		t.Fatalf("expected web crawl version metadata in payload, got %+v", payload)
+	}
+}
+
+func TestStudioSQLiteEndpointCapsRequestedLimit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for i := 0; i < 1005; i++ {
+		if err := store.SaveNode(context.Background(), db.Node{
+			ID:        fmt.Sprintf("node:%04d", i),
+			Workspace: "ws:test",
+			Domain:    "test",
+			Type:      "chunk",
+			Name:      "Test node",
+			Content:   "SQLite cap test",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv := NewStudioServer(store, 0)
+	req := httptest.NewRequest(http.MethodGet, "/api/sqlite?limit=5000", nil)
+	rec := httptest.NewRecorder()
+	srv.handleSQLite(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp SQLiteResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range resp.Tables {
+		if table.Name == "nodes" && len(table.Rows) != 1000 {
+			t.Fatalf("expected nodes table capped to 1000 rows, got %d", len(table.Rows))
+		}
 	}
 }
