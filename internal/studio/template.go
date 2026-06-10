@@ -105,6 +105,10 @@ const indexHTML = `<!DOCTYPE html>
     }
     .brand span { color: var(--doc); }
     .searchbox { flex: 1; max-width: 520px; }
+    .actorbox {
+      width: 170px;
+      flex: 0 0 170px;
+    }
     #summary {
       color: var(--muted);
       font-size: 13px;
@@ -175,6 +179,43 @@ const indexHTML = `<!DOCTYPE html>
       color: var(--muted);
       font-size: 11px;
     }
+    .activity-card {
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.78);
+      padding: 10px;
+    }
+    .activity-summary {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .activity-pill {
+      border-radius: 999px;
+      padding: 3px 8px;
+      background: #eef1eb;
+      color: #4d5b55;
+      font-size: 11px;
+    }
+    .activity-list {
+      display: grid;
+      gap: 6px;
+      margin-top: 8px;
+      max-height: 240px;
+      overflow: auto;
+    }
+    .activity-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.8);
+      padding: 8px 9px;
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--muted);
+    }
+    .activity-item strong { color: var(--ink); }
     .agent-card {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -215,8 +256,8 @@ const indexHTML = `<!DOCTYPE html>
     }
     .node-card {
       position: absolute;
-      width: 230px;
-      min-height: 72px;
+      width: 208px;
+      min-height: 66px;
       border: 1px solid #cdd5cf;
       border-radius: 8px;
       background: rgba(255,255,252,0.94);
@@ -234,6 +275,14 @@ const indexHTML = `<!DOCTYPE html>
     .node-card.selected {
       border-color: #203029;
       box-shadow: 0 0 0 3px rgba(32, 48, 41, 0.12), var(--shadow);
+    }
+    .node-card.related {
+      border-color: rgba(47, 133, 90, 0.44);
+      box-shadow: 0 0 0 2px rgba(47, 133, 90, 0.08);
+    }
+    .node-card.dimmed {
+      opacity: 0.42;
+      filter: saturate(0.82);
     }
     .node-head {
       display: flex;
@@ -273,7 +322,7 @@ const indexHTML = `<!DOCTYPE html>
       font-size: 12px;
       line-height: 1.35;
       display: -webkit-box;
-      -webkit-line-clamp: 2;
+      -webkit-line-clamp: 1;
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
@@ -284,6 +333,9 @@ const indexHTML = `<!DOCTYPE html>
       stroke: rgba(246,247,243,0.9);
       stroke-width: 5px;
       stroke-linejoin: round;
+    }
+    .edge-dimmed {
+      opacity: 0.12;
     }
     .empty-state {
       position: absolute;
@@ -465,6 +517,7 @@ const indexHTML = `<!DOCTYPE html>
     <div id="topbar">
       <div class="brand">raph<span>Studio</span></div>
       <div class="searchbox"><input id="filter" type="search" placeholder="Filter knowledge"></div>
+      <div class="actorbox"><input id="actor" type="search" placeholder="Agent tag"></div>
       <button id="fit">Fit</button>
       <button id="zoom-out">-</button>
       <button id="zoom-in">+</button>
@@ -483,8 +536,14 @@ const indexHTML = `<!DOCTYPE html>
         </div>
       </div>
 
+      <div class="activity-card">
+        <div class="section-title">Attribution</div>
+        <div id="activity-summary" class="activity-summary"></div>
+        <div id="activity-list" class="activity-list"></div>
+      </div>
+
       <div>
-        <div class="section-title">Parents</div>
+        <div class="section-title">Anchors</div>
         <div id="root-list" class="root-list"></div>
       </div>
 
@@ -543,7 +602,9 @@ const indexHTML = `<!DOCTYPE html>
       panOriginX: 0,
       panOriginY: 0,
       panMoved: false,
-      tab: 'content'
+      tab: 'content',
+      actor: '',
+      activity: []
     };
 
     var els = {
@@ -552,6 +613,7 @@ const indexHTML = `<!DOCTYPE html>
       edges: document.getElementById('edges'),
       empty: document.getElementById('empty'),
       filter: document.getElementById('filter'),
+      actor: document.getElementById('actor'),
       reload: document.getElementById('reload'),
       fit: document.getElementById('fit'),
       zoomOut: document.getElementById('zoom-out'),
@@ -572,6 +634,8 @@ const indexHTML = `<!DOCTYPE html>
       agentSearch: document.getElementById('agent-search'),
       agentNeighbors: document.getElementById('agent-neighbors'),
       agentOutput: document.getElementById('agent-output'),
+      activitySummary: document.getElementById('activity-summary'),
+      activityList: document.getElementById('activity-list'),
       toast: document.getElementById('toast')
     };
 
@@ -596,6 +660,68 @@ const indexHTML = `<!DOCTYPE html>
       return node.domain === 'code' ? 'code' : node.domain === 'documentation' ? 'documentation' : 'memory';
     }
 
+    function storageKey() {
+      return 'raph-studio-activity';
+    }
+
+    function loadActivity() {
+      try {
+        var raw = window.localStorage.getItem(storageKey());
+        return raw ? JSON.parse(raw) : [];
+      } catch (error) {
+        return [];
+      }
+    }
+
+    function saveActivity() {
+      try {
+        window.localStorage.setItem(storageKey(), JSON.stringify(state.activity.slice(0, 40)));
+      } catch (error) {}
+    }
+
+    function actorName() {
+      var value = String(els.actor.value || '').trim();
+      return value || 'browser';
+    }
+
+    function recordActivity(action, id, note) {
+      var entry = {
+        action: action,
+        id: id || '',
+        note: note || '',
+        actor: actorName(),
+        node: id && state.byId[id] ? nodeName(state.byId[id]) : '',
+        at: new Date().toISOString()
+      };
+      state.activity.unshift(entry);
+      state.activity = state.activity.slice(0, 40);
+      saveActivity();
+      renderActivity();
+    }
+
+    function renderActivity() {
+      var counts = {};
+      state.activity.forEach(function(entry) {
+        counts[entry.actor] = (counts[entry.actor] || 0) + 1;
+      });
+
+      var summary = Object.keys(counts).sort(function(a, b) {
+        return counts[b] - counts[a];
+      }).map(function(actor) {
+        return '<span class="activity-pill">' + escapeHTML(actor) + ' · ' + counts[actor] + '</span>';
+      }).join('');
+      if (!summary) summary = '<span class="activity-pill">No activity yet</span>';
+      els.activitySummary.innerHTML = summary;
+
+      els.activityList.innerHTML = state.activity.slice(0, 14).map(function(entry) {
+        return '<div class="activity-item">' +
+          '<strong>' + escapeHTML(entry.actor) + '</strong> ' +
+          escapeHTML(entry.action) + (entry.node ? ' · ' + escapeHTML(entry.node) : '') +
+          (entry.note ? '<br>' + escapeHTML(entry.note) : '') +
+        '</div>';
+      }).join('') || '<div class="activity-item">No graph activity yet.</div>';
+    }
+
     function childCount(id) {
       return (state.children[id] || []).length;
     }
@@ -612,6 +738,76 @@ const indexHTML = `<!DOCTYPE html>
       return '';
     }
 
+    function degreeOf(id) {
+      return parentCount(id) + childCount(id);
+    }
+
+    function neighborsOf(id) {
+      var set = {};
+      (state.children[id] || []).forEach(function(childID) {
+        set[childID] = true;
+      });
+      (state.parents[id] || []).forEach(function(parentID) {
+        set[parentID] = true;
+      });
+      return Object.keys(set);
+    }
+
+    function buildComponent(start, allowed) {
+      var component = [];
+      var queue = [start];
+      var seen = {};
+      while (queue.length) {
+        var next = queue.shift();
+        if (seen[next] || !allowed[next]) continue;
+        seen[next] = true;
+        component.push(next);
+        neighborsOf(next).forEach(function(neighbor) {
+          if (!seen[neighbor] && allowed[neighbor]) queue.push(neighbor);
+        });
+      }
+      return component;
+    }
+
+    function connectedComponents(list) {
+      var allowed = {};
+      list.forEach(function(node) {
+        allowed[node.id] = true;
+      });
+      var remaining = list.map(function(node) { return node.id; });
+      var components = [];
+      while (remaining.length) {
+        var start = remaining.shift();
+        if (!allowed[start]) continue;
+        var component = buildComponent(start, allowed);
+        components.push(component);
+        component.forEach(function(id) {
+          delete allowed[id];
+        });
+        remaining = remaining.filter(function(id) {
+          return allowed[id];
+        });
+      }
+      return components;
+    }
+
+    function distanceMap(start, allowed) {
+      var distances = {};
+      var queue = [{ id: start, distance: 0 }];
+      while (queue.length) {
+        var item = queue.shift();
+        if (distances[item.id] != null) continue;
+        if (allowed && !allowed[item.id]) continue;
+        distances[item.id] = item.distance;
+        neighborsOf(item.id).forEach(function(neighbor) {
+          if (distances[neighbor] == null && (!allowed || allowed[neighbor])) {
+            queue.push({ id: neighbor, distance: item.distance + 1 });
+          }
+        });
+      }
+      return distances;
+    }
+
     function ingestGraph(data) {
       state.nodes = data.nodes || [];
       state.edges = data.edges || [];
@@ -625,9 +821,11 @@ const indexHTML = `<!DOCTYPE html>
       state.details = {};
       state.selected = '';
       state.activeRoot = '';
+      state.activity = loadActivity();
 
       state.nodes.forEach(function(node) {
         state.byId[node.id] = node;
+        state.visible[node.id] = true;
       });
       state.edges.forEach(function(edge) {
         if (!state.children[edge.source_id]) state.children[edge.source_id] = [];
@@ -635,6 +833,12 @@ const indexHTML = `<!DOCTYPE html>
         state.children[edge.source_id].push(edge.target_id);
         state.parents[edge.target_id].push(edge.source_id);
       });
+
+      if (!els.actor.value) {
+        els.actor.value = window.localStorage.getItem('raph-studio-actor') || '';
+      }
+      state.actor = actorName();
+      window.localStorage.setItem('raph-studio-actor', state.actor);
 
       state.roots = state.nodes.filter(function(node) {
         return parentCount(node.id) === 0 || node.type === 'doc_site' || node.type === 'file';
@@ -651,6 +855,7 @@ const indexHTML = `<!DOCTYPE html>
       }
       updateStats();
       renderRoots();
+      renderActivity();
       render();
     }
 
@@ -680,63 +885,33 @@ const indexHTML = `<!DOCTYPE html>
 
     function focusRoot(id, shouldRender) {
       state.activeRoot = id;
-      state.visible = {};
-      state.expanded = {};
-      state.visible[id] = true;
-      state.expanded[id] = true;
-      (state.children[id] || []).forEach(function(childID) {
-        state.visible[childID] = true;
-      });
+      state.selected = id;
       if (shouldRender) {
-        state.selected = id;
         renderRoots();
         render();
         showProperties(id);
+        recordActivity('focus', id, 'anchor selected');
       }
     }
 
     function toggleNode(id) {
       if (!state.byId[id]) return;
       state.selected = id;
-      if (childCount(id) > 0) {
-        if (state.expanded[id]) {
-          collapse(id);
-        } else {
-          expand(id);
-        }
-      }
+      state.activeRoot = id;
+      renderRoots();
       render();
       showProperties(id);
+      recordActivity('select', id, 'node clicked');
     }
 
     function expand(id) {
       state.visible[id] = true;
       state.expanded[id] = true;
-      (state.children[id] || []).forEach(function(childID) {
-        state.visible[childID] = true;
-      });
     }
 
     function collapse(id) {
       delete state.expanded[id];
-      getDescendants(id).forEach(function(descID) {
-        delete state.expanded[descID];
-        delete state.visible[descID];
-      });
       state.visible[id] = true;
-    }
-
-    function getDescendants(id) {
-      var result = [];
-      var queue = (state.children[id] || []).slice();
-      while (queue.length) {
-        var next = queue.shift();
-        result.push(next);
-        (state.children[next] || []).forEach(function(childID) {
-          queue.push(childID);
-        });
-      }
-      return result;
     }
 
     function visibleNodes() {
@@ -757,6 +932,15 @@ const indexHTML = `<!DOCTYPE html>
       return list;
     }
 
+    function isRelatedToSelected(id) {
+      if (!state.selected) return false;
+      if (id === state.selected) return true;
+      return (state.children[state.selected] || []).indexOf(id) !== -1 ||
+        (state.parents[state.selected] || []).indexOf(id) !== -1 ||
+        (state.children[id] || []).indexOf(state.selected) !== -1 ||
+        (state.parents[id] || []).indexOf(state.selected) !== -1;
+    }
+
     function depthOf(id) {
       var depth = 0;
       var seen = {};
@@ -773,37 +957,75 @@ const indexHTML = `<!DOCTYPE html>
 
     function computeLayout(list) {
       var stageRect = els.stage.getBoundingClientRect();
-      var columns = {};
-      list.forEach(function(node) {
-        var d = Math.min(depthOf(node.id), 6);
-        if (!columns[d]) columns[d] = [];
-        columns[d].push(node);
-      });
-      var colKeys = Object.keys(columns).map(Number).sort(function(a, b) { return a - b; });
-      var cardW = 230;
-      var colGap = 76;
-      var rowGap = 24;
-      var maxRows = 0;
-      colKeys.forEach(function(k) { maxRows = Math.max(maxRows, columns[k].length); });
-      var contentW = Math.max(stageRect.width - 40, colKeys.length * (cardW + colGap) + 80);
-      var contentH = Math.max(stageRect.height - 40, maxRows * (96 + rowGap) + 80);
+      var cardW = 208;
+      var cardH = 74;
+      var components = connectedComponents(list);
+      var cols = Math.max(1, Math.ceil(Math.sqrt(components.length || 1)));
+      var rows = Math.max(1, Math.ceil((components.length || 1) / cols));
+      var slotW = Math.max(360, stageRect.width / cols);
+      var slotH = Math.max(280, stageRect.height / rows);
 
-      colKeys.forEach(function(k, colIndex) {
-        var nodes = columns[k];
-        var x = 40 + colIndex * (cardW + colGap);
-        var totalH = nodes.length * 96 + Math.max(nodes.length - 1, 0) * rowGap;
-        var y = Math.max(40, (contentH - totalH) / 2);
-        nodes.forEach(function(node, rowIndex) {
-          state.positions[node.id] = { x: x, y: y + rowIndex * (96 + rowGap), w: cardW, h: 82 };
+      state.positions = {};
+      components.forEach(function(component, index) {
+        var row = Math.floor(index / cols);
+        var col = index % cols;
+        var centerX = col * slotW + slotW / 2;
+        var centerY = row * slotH + slotH / 2;
+        var allowed = {};
+        component.forEach(function(id) {
+          allowed[id] = true;
+        });
+
+        var anchor = component[0];
+        if (state.selected && allowed[state.selected]) {
+          anchor = state.selected;
+        } else {
+          anchor = component.slice().sort(function(a, b) {
+            var da = degreeOf(a);
+            var db = degreeOf(b);
+            if (da !== db) return db - da;
+            return nodeName(state.byId[a]).localeCompare(nodeName(state.byId[b]));
+          })[0];
+        }
+
+        var distances = distanceMap(anchor, allowed);
+        var layers = {};
+        component.forEach(function(id) {
+          var d = distances[id] == null ? 4 : Math.min(distances[id], 4);
+          if (!layers[d]) layers[d] = [];
+          layers[d].push(id);
+        });
+
+        state.positions[anchor] = { x: centerX - cardW / 2, y: centerY - cardH / 2, w: cardW, h: cardH };
+        Object.keys(layers).map(Number).sort(function(a, b) { return a - b; }).forEach(function(depth) {
+          if (depth === 0) return;
+          var ring = layers[depth];
+          var bandSize = depth === 1 ? 8 : depth === 2 ? 10 : 12;
+          ring.forEach(function(id, idx) {
+            if (id === anchor) return;
+            var band = Math.floor(idx / bandSize);
+            var within = idx % bandSize;
+            var chunk = ring.slice(band * bandSize, band * bandSize + bandSize);
+            var angleStep = (Math.PI * 2) / Math.max(1, chunk.length);
+            var angle = within * angleStep - Math.PI / 2 + (band % 2) * 0.18;
+            var radius = 152 + depth * 112 + band * 148;
+            var jitter = ((id.length * 17) % 19) - 9;
+            state.positions[id] = {
+              x: centerX + Math.cos(angle) * radius - cardW / 2 + jitter,
+              y: centerY + Math.sin(angle) * radius - cardH / 2 + (jitter / 2),
+              w: cardW,
+              h: cardH
+            };
+          });
         });
       });
 
       if (state.scale === 1 && state.panX === 0 && state.panY === 0) {
-        state.panX = Math.max(16, (stageRect.width - Math.min(contentW, stageRect.width)) / 2);
-        state.panY = 18;
+        state.panX = Math.max(16, stageRect.width / 12);
+        state.panY = Math.max(18, stageRect.height / 12);
       }
       els.edges.setAttribute('viewBox', '0 0 ' + stageRect.width + ' ' + stageRect.height);
-      return { width: contentW, height: contentH };
+      return { width: stageRect.width, height: stageRect.height };
     }
 
     function applyTransform() {
@@ -845,12 +1067,16 @@ const indexHTML = `<!DOCTYPE html>
       list.forEach(function(node) {
         var pos = state.positions[node.id];
         var card = document.createElement('article');
-        card.className = 'node-card' + (state.selected === node.id ? ' selected' : '');
+        var related = isRelatedToSelected(node.id);
+        card.className = 'node-card' +
+          (state.selected === node.id ? ' selected' : '') +
+          (state.selected && related && state.selected !== node.id ? ' related' : '') +
+          (state.selected && !related ? ' dimmed' : '');
         card.style.left = pos.x + 'px';
         card.style.top = pos.y + 'px';
         card.dataset.id = node.id;
         var count = childCount(node.id);
-        var expandedText = count ? (state.expanded[node.id] ? 'open ' : 'closed ') + count : 'leaf';
+        var expandedText = count ? count + ' links' : 'leaf';
         var snippet = String(node.content || node.url || node.id || '').trim().slice(0, 180);
         card.innerHTML =
           '<div class="node-head">' +
@@ -894,6 +1120,9 @@ const indexHTML = `<!DOCTYPE html>
         path.setAttribute('stroke', edge.type === 'DECLARES' ? '#7fa8c9' : edge.type === 'LINKS_TO' ? '#aab1ad' : '#8ec19f');
         path.setAttribute('stroke-width', edge.type === 'HAS_SECTION' ? '1.4' : '1.8');
         path.setAttribute('stroke-linecap', 'round');
+        if (state.selected && !(isRelatedToSelected(edge.source_id) && isRelatedToSelected(edge.target_id))) {
+          path.setAttribute('class', 'edge-dimmed');
+        }
         els.edges.appendChild(path);
 
         var label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -901,6 +1130,9 @@ const indexHTML = `<!DOCTYPE html>
         label.setAttribute('y', (y1 + y2) / 2 - 4);
         label.setAttribute('text-anchor', 'middle');
         label.setAttribute('class', 'edge-label');
+        if (state.selected && !(isRelatedToSelected(edge.source_id) && isRelatedToSelected(edge.target_id))) {
+          label.setAttribute('class', 'edge-label edge-dimmed');
+        }
         label.textContent = edge.type;
         els.edges.appendChild(label);
       });
@@ -1025,6 +1257,7 @@ const indexHTML = `<!DOCTYPE html>
       }
       els.properties.classList.remove('visible');
       toast('Node deleted');
+      recordActivity('delete', id, 'node removed');
       reloadGraph();
     }
 
@@ -1036,6 +1269,7 @@ const indexHTML = `<!DOCTYPE html>
         toast(await res.text());
         return;
       }
+      recordActivity('reload', '', 'graph refreshed');
       ingestGraph(await res.json());
     }
 
@@ -1054,6 +1288,7 @@ const indexHTML = `<!DOCTYPE html>
         var data = JSON.parse(text);
         focusMatches(data.matches || []);
       }
+      recordActivity('search', '', query);
     }
 
     async function runAgentNeighbors() {
@@ -1066,24 +1301,17 @@ const indexHTML = `<!DOCTYPE html>
         body: JSON.stringify({ node_id: id })
       });
       els.agentOutput.textContent = res.ok ? JSON.stringify(await res.json(), null, 2) : await res.text();
+      recordActivity('neighbors', id, 'neighbor lookup');
     }
 
     function focusMatches(matches) {
-      state.visible = {};
-      state.expanded = {};
       matches.forEach(function(node) {
         state.visible[node.id] = true;
-        (state.parents[node.id] || []).forEach(function(parentID) {
-          state.visible[parentID] = true;
-          state.expanded[parentID] = true;
-        });
-        (state.children[node.id] || []).forEach(function(childID) {
-          state.visible[childID] = true;
-        });
       });
       if (matches[0]) {
         state.selected = matches[0].id;
         showProperties(matches[0].id);
+        recordActivity('result', matches[0].id, 'top search match');
       }
       render();
     }
@@ -1093,6 +1321,7 @@ const indexHTML = `<!DOCTYPE html>
       state.panX = 16;
       state.panY = 18;
       render();
+      recordActivity('fit', '', 'reset viewport');
     }
 
     function startStagePan(event) {
@@ -1160,6 +1389,12 @@ const indexHTML = `<!DOCTYPE html>
     els.filter.addEventListener('input', function() {
       state.filter = els.filter.value.trim().toLowerCase();
       render();
+    });
+    els.actor.value = window.localStorage.getItem('raph-studio-actor') || '';
+    els.actor.addEventListener('change', function() {
+      state.actor = actorName();
+      window.localStorage.setItem('raph-studio-actor', state.actor);
+      recordActivity('actor', '', 'tag set to ' + state.actor);
     });
     els.stage.addEventListener('wheel', function(event) {
       event.preventDefault();

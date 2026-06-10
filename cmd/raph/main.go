@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"time"
 
+	"raph/internal/agentsetup"
 	"raph/internal/config"
 	"raph/internal/crawler"
 	"raph/internal/db"
@@ -53,6 +54,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newStartCmd())
 	rootCmd.AddCommand(newStudioCmd())
 	rootCmd.AddCommand(newSyncCmd())
+	rootCmd.AddCommand(newAgentsCmd())
 	rootCmd.AddCommand(newClearCmd())
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newUpdateCmd())
@@ -416,4 +418,56 @@ func newConfigCmd() *cobra.Command {
 	})
 
 	return configCmd
+}
+
+func newAgentsCmd() *cobra.Command {
+	agentsCmd := &cobra.Command{
+		Use:   "agents",
+		Short: "Manage coding-agent integrations",
+	}
+
+	var path string
+	var dryRun bool
+	mcpCmd := &cobra.Command{
+		Use:   "mcp",
+		Short: "Manage MCP setup across supported coding agents",
+	}
+	setupCmd := &cobra.Command{
+		Use:   "setup",
+		Short: "Install or refresh project MCP config for supported coding agents",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := agentsetup.Setup(agentsetup.Options{Root: path, DryRun: dryRun})
+			if err != nil {
+				return err
+			}
+
+			if dryRun {
+				fmt.Fprintf(cmd.OutOrStdout(), "Preview only for %s\n", result.Root)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Updated project MCP config under %s\n", result.Root)
+			}
+
+			for _, outcome := range result.Outcomes {
+				status := "missing"
+				if outcome.Installed {
+					status = "installed"
+				}
+				change := "unchanged"
+				if outcome.Changed {
+					change = "updated"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: %s (%s) -> %s\n", outcome.Name, status, change, outcome.ConfigPath)
+				if outcome.Message != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", outcome.Message)
+				}
+			}
+			return nil
+		},
+	}
+	setupCmd.Flags().StringVar(&path, "path", ".", "Project root to update")
+	setupCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview changes without writing files")
+
+	mcpCmd.AddCommand(setupCmd)
+	agentsCmd.AddCommand(mcpCmd)
+	return agentsCmd
 }

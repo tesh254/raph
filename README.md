@@ -51,6 +51,12 @@ export OPENROUTER_API_KEY="your-key"
 raph init --path .
 ```
 
+Then install project MCP entries for supported coding agents:
+
+```sh
+raph agents mcp setup --path .
+```
+
 To skip embeddings during indexing:
 
 ```sh
@@ -116,6 +122,7 @@ Then visit `http://localhost:4545`.
 raph init            Scan a workspace and build graph relationships
 raph start           Start the MCP server over stdio
 raph studio          Launch the local graph explorer UI
+raph agents mcp setup Install or refresh project MCP config for supported coding agents
 raph sync            Index and continuously synchronize a repository
 raph sync --status   Show the worker and registered repositories
 raph sync --remove   Unregister a repository and clean its graph data
