@@ -3,592 +3,134 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="raph usage docs for coding-agent MCP setup and graph Studio.">
-  <title>raph | usage docs</title>
-  <style>
-    :root {
-      --ink: #15221d;
-      --muted: #5e6b64;
-      --paper: #f4f0e6;
-      --card: rgba(255, 253, 248, 0.94);
-      --line: #d8d2c5;
-      --accent: #166d53;
-      --accent-2: #355f86;
-      --dark: #11241c;
-      --shadow: 0 24px 60px rgba(24, 38, 32, 0.12);
-    }
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
-    body {
-      margin: 0;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at 15% 10%, rgba(122, 189, 144, 0.22), transparent 28rem),
-        radial-gradient(circle at 85% 0%, rgba(108, 149, 194, 0.16), transparent 24rem),
-        linear-gradient(180deg, #f7f2e8 0%, #f3efe4 100%);
-      font: 16px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
-    }
-    a { color: var(--accent); }
-    code {
-      padding: 0 .25rem;
-      border-radius: 6px;
-      background: rgba(22, 109, 83, 0.08);
-      color: #103226;
-    }
-    pre {
-      margin: 0;
-      padding: 18px 20px;
-      overflow: auto;
-      border: 1px solid #223a31;
-      border-radius: 14px;
-      background: linear-gradient(180deg, #12251d 0%, #0f1c16 100%);
-      color: #d9efe3;
-      box-shadow: var(--shadow);
-    }
-    pre code {
-      padding: 0;
-      background: transparent;
-      color: inherit;
-    }
-    .wrap {
-      width: min(1140px, calc(100% - 32px));
-      margin: 0 auto;
-    }
-    nav {
-      position: sticky;
-      top: 0;
-      z-index: 20;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 18px;
-      padding: 18px 0 14px;
-      background: linear-gradient(180deg, rgba(244, 240, 230, 0.96) 0%, rgba(244, 240, 230, 0.74) 100%);
-      backdrop-filter: blur(14px);
-    }
-    .brand {
-      display: flex;
-      align-items: baseline;
-      gap: 8px;
-      font-family: Georgia, serif;
-      font-size: 1.4rem;
-      font-weight: 700;
-      letter-spacing: -0.04em;
-    }
-    .brand span { color: var(--accent); }
-    .nav-links {
-      display: flex;
-      gap: 16px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-      color: var(--muted);
-      font-size: .95rem;
-    }
-    .hero {
-      padding: 72px 0 44px;
-    }
-    .eyebrow {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      border: 1px solid rgba(22, 109, 83, 0.18);
-      border-radius: 999px;
-      padding: 7px 12px;
-      color: var(--accent);
-      background: rgba(255,255,255,.5);
-      font-weight: 700;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      font-size: .78rem;
-    }
-    h1 {
-      margin: .35rem 0 1rem;
-      max-width: 920px;
-      font-family: Georgia, serif;
-      font-size: clamp(3.1rem, 8.5vw, 7rem);
-      line-height: .92;
-      letter-spacing: -0.07em;
-    }
-    .lead {
-      max-width: 760px;
-      margin: 0;
-      color: var(--muted);
-      font-size: 1.15rem;
-    }
-    .cta-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 28px;
-    }
-    .button {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      min-height: 44px;
-      padding: 0 16px;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,.8);
-      color: var(--ink);
-      text-decoration: none;
-      box-shadow: 0 10px 28px rgba(21, 34, 29, 0.06);
-    }
-    .button.primary {
-      border-color: var(--dark);
-      background: var(--dark);
-      color: #fff;
-    }
-    main {
-      padding: 16px 0 88px;
-    }
-    section {
-      margin-top: 58px;
-    }
-    h2 {
-      margin: 0 0 18px;
-      font-family: Georgia, serif;
-      font-size: clamp(2rem, 4.1vw, 3rem);
-      line-height: 1.05;
-      letter-spacing: -0.04em;
-    }
-    .subhead {
-      margin: 0 0 22px;
-      max-width: 820px;
-      color: var(--muted);
-    }
-    .grid {
-      display: grid;
-      gap: 16px;
-    }
-    .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .card {
-      padding: 22px;
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      background: var(--card);
-      box-shadow: var(--shadow);
-      min-width: 0;
-    }
-    .card h3 {
-      margin: 0 0 8px;
-      font-size: 1rem;
-      line-height: 1.3;
-    }
-    .card p {
-      margin: 0;
-      color: var(--muted);
-    }
-    .card .label {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
-      margin-bottom: 12px;
-      color: var(--accent);
-      font-size: .78rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: .08em;
-    }
-    .callout {
-      border: 1px solid rgba(53, 95, 134, 0.2);
-      background: linear-gradient(180deg, rgba(255,255,255,.78), rgba(243, 248, 252, .8));
-    }
-    .split {
-      display: grid;
-      grid-template-columns: 1.2fr .8fr;
-      gap: 16px;
-      align-items: start;
-    }
-    .terminal {
-      border-radius: 18px;
-      overflow: hidden;
-      border: 1px solid rgba(17, 36, 28, 0.16);
-      box-shadow: var(--shadow);
-    }
-    .terminal-head {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 12px 16px;
-      background: #0f1c16;
-      color: #8dc9ae;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
-      font-size: .82rem;
-      text-transform: uppercase;
-      letter-spacing: .08em;
-    }
-    .dots { display: flex; gap: 6px; margin-right: 10px; }
-    .dots span {
-      width: 10px; height: 10px; border-radius: 999px;
-      background: rgba(255,255,255,0.26);
-    }
-    .terminal-body {
-      padding: 0;
-    }
-    .terminal-body pre {
-      border: 0;
-      border-radius: 0;
-      box-shadow: none;
-    }
-    .matrix {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-      gap: 14px;
-    }
-    .agent {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      min-width: 0;
-    }
-    .agent strong {
-      display: block;
-      font-size: 1rem;
-    }
-    .agent small {
-      color: var(--muted);
-      font-size: .85rem;
-    }
-    .agent pre {
-      min-height: 220px;
-      font-size: 12px;
-      line-height: 1.55;
-    }
-    .stack {
-      display: grid;
-      gap: 14px;
-    }
-    .kicker {
-      color: var(--accent-2);
-      font-weight: 700;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      font-size: .78rem;
-    }
-    .path {
-      display: block;
-      margin-top: 8px;
-      color: #31413a;
-      font-size: .92rem;
-      word-break: break-word;
-    }
-    .note {
-      padding: 16px 18px;
-      border-left: 4px solid var(--accent);
-      background: rgba(22, 109, 83, 0.06);
-      border-radius: 14px;
-      color: var(--muted);
-    }
-    footer {
-      padding: 28px 0 40px;
-      border-top: 1px solid rgba(216, 210, 197, 0.9);
-      color: var(--muted);
-      font-size: .95rem;
-    }
-    @media (max-width: 980px) {
-      .grid.cols-3, .grid.cols-2, .split, .matrix { grid-template-columns: 1fr; }
-      nav { position: static; flex-direction: column; align-items: flex-start; }
-      .nav-links { justify-content: flex-start; }
-      .hero { padding-top: 38px; }
-    }
-  </style>
+  <meta name="description" content="raph documentation hub for installation, MCP setup, Studio, and command reference.">
+  <title>raph docs</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <nav class="wrap">
-    <div class="brand">raph<span>docs</span></div>
-    <div class="nav-links">
-      <a href="#start">start</a>
-      <a href="#agents">agents</a>
-      <a href="#studio">studio</a>
-      <a href="#commands">commands</a>
-      <a href="https://github.com/tesh254/raph">github</a>
-    </div>
-  </nav>
-
-  <header class="wrap hero">
-    <div class="eyebrow">Usage docs</div>
-    <h1>Local-first graph memory for coding agents.</h1>
-    <p class="lead">
-      raph indexes code, docs, and scoped memory into a local graph, then serves that graph over MCP and Studio so agents can search, traverse, and keep context close to the repo.
-    </p>
-    <div class="cta-row">
-      <a class="button primary" href="#start">Start here</a>
-      <a class="button" href="#agents">MCP setup</a>
-      <a class="button" href="#studio">Open Studio</a>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="index.html">raph<span>docs</span></a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="index.html" aria-current="page">Overview</a>
+        <a href="getting-started.html">Getting started</a>
+        <a href="mcp-agents.html">MCP and agents</a>
+        <a href="studio.html">Studio</a>
+        <a href="reference.html">Reference</a>
+        <a href="https://github.com/tesh254/raph">GitHub</a>
+      </nav>
     </div>
   </header>
 
-  <main class="wrap">
-    <section class="grid cols-3">
+  <main class="wrap page">
+    <section class="hero">
+      <div class="eyebrow">Documentation hub</div>
+      <h1>Documentation with room to explain the system.</h1>
+      <p class="lead">
+        raph indexes local code, docs, and scoped memory into a graph under <code>~/.raph/</code>, then exposes that graph through MCP and Studio so coding agents can search, traverse, and keep context close to the repo.
+      </p>
+      <div class="cta-row">
+        <a class="button primary" href="getting-started.html">Start here</a>
+        <a class="button" href="mcp-agents.html">Set up MCP</a>
+        <a class="button" href="reference.html">See commands</a>
+      </div>
+    </section>
+
+    <section class="grid three">
       <article class="card">
-        <div class="label">local first</div>
-        <h3>Graph lives under <code>~/.raph/</code></h3>
-        <p>Single binary. Embedded database. No remote graph service needed to get started.</p>
+        <div class="label">Local first</div>
+        <h3>Single-binary graph storage</h3>
+        <p class="muted">The graph lives locally, uses an embedded SQLite-compatible backend, and does not need a hosted graph service to start working.</p>
       </article>
       <article class="card">
-        <div class="label">agent ready</div>
-        <h3>MCP tools expose memory + graph traversal</h3>
-        <p>Agents can store scoped memory, search semantically, crawl docs, index the current codebase, and walk node neighborhoods.</p>
+        <div class="label">Agent ready</div>
+        <h3>MCP tools for memory and retrieval</h3>
+        <p class="muted">Agents can store scoped memory, run hybrid search, index codebases, crawl docs, and walk related nodes from the same local store.</p>
       </article>
       <article class="card">
-        <div class="label">studio</div>
-        <h3>Inspect graph with live UI</h3>
-        <p>Explore nodes, edges, metadata, search, SQLite tables, and maintenance actions in Studio at <code>localhost:4545</code>.</p>
+        <div class="label">Inspectable</div>
+        <h3>Studio for graph exploration</h3>
+        <p class="muted">Open the local UI to inspect nodes, tables, metadata, neighbor relationships, and maintenance actions without leaving your machine.</p>
       </article>
     </section>
 
-    <section id="start">
-      <h2>Start</h2>
-      <p class="subhead">One-time config, then index your repo, start MCP, and open Studio.</p>
-      <div class="split">
-        <div class="stack">
-          <div class="card">
-            <div class="kicker">Install</div>
-            <pre><code>curl -fsSL https://raw.githubusercontent.com/tesh254/raph/main/install.sh | sh</code></pre>
+    <section class="section">
+      <div class="panel callout">
+        <div class="kicker">Why the docs changed</div>
+        <h2>One landing page, several focused guides.</h2>
+        <p class="section-intro">
+          The docs are now broken into topic pages so each area can be more descriptive without forcing readers through one long scroll. Use the pages below as your entry points.
+        </p>
+      </div>
+    </section>
+
+    <section class="section cards-nav">
+      <a href="getting-started.html">
+        <article class="card">
+          <div class="label">Guide 01</div>
+          <h3>Getting started</h3>
+          <p class="muted">Install raph, initialize config, index a repository, start the MCP server, and open Studio.</p>
+        </article>
+      </a>
+      <a href="mcp-agents.html">
+        <article class="card">
+          <div class="label">Guide 02</div>
+          <h3>MCP and coding agents</h3>
+          <p class="muted">See the MCP tools, supported agent config targets, and the exact config shape each agent expects.</p>
+        </article>
+      </a>
+      <a href="studio.html">
+        <article class="card">
+          <div class="label">Guide 03</div>
+          <h3>Studio</h3>
+          <p class="muted">Understand the graph explorer, local maintenance actions, and what to expect when inspecting nodes and tables.</p>
+        </article>
+      </a>
+      <a href="reference.html">
+        <article class="card">
+          <div class="label">Guide 04</div>
+          <h3>Reference and troubleshooting</h3>
+          <p class="muted">Use the command cheat sheet, install options, update behavior, and quick fixes for common setup issues.</p>
+        </article>
+      </a>
+    </section>
+
+    <section class="section split">
+      <div class="panel">
+        <div class="kicker">Current shape</div>
+        <h2>What ships in this repository</h2>
+        <ul class="feature-list">
+          <li>A Go CLI in <code>cmd/raph</code>.</li>
+          <li>Config bootstrapping in <code>internal/config</code>.</li>
+          <li>An embedded local database in <code>internal/db</code>.</li>
+          <li>A workspace indexer in <code>internal/indexer</code>.</li>
+          <li>A background repository synchronizer in <code>internal/syncer</code>.</li>
+          <li>An MCP server in <code>internal/mcp</code>.</li>
+          <li>A zero-dependency Studio UI in <code>internal/studio</code>.</li>
+          <li>Scoped durable memory plus searchable non-Go document chunks.</li>
+        </ul>
+      </div>
+      <div class="stack">
+        <article class="card">
+          <div class="label">Storage note</div>
+          <h3>SQLite-compatible for now</h3>
+          <p class="muted">The first implementation stays local-first with a pure-Go embedded backend so macOS, Linux, and Windows builds work cleanly from day one.</p>
+        </article>
+        <article class="card">
+          <div class="label">Site map</div>
+          <div class="mini-index">
+            <a href="getting-started.html">Install, configure, and index a repo</a>
+            <a href="mcp-agents.html">MCP tools and agent config layout</a>
+            <a href="studio.html">Studio workflows and maintenance actions</a>
+            <a href="reference.html">Commands, updates, and troubleshooting</a>
           </div>
-          <div class="card">
-            <div class="kicker">Bootstrap</div>
-            <pre><code>raph config init
-export OPENROUTER_API_KEY="your-key"
-raph init --path .</code></pre>
-          </div>
-        </div>
-        <div class="stack">
-          <div class="card">
-            <div class="kicker">Optional installs</div>
-            <pre><code>brew install --cask tesh254/raph/raph
-irm https://raw.githubusercontent.com/tesh254/raph/main/install.ps1 | iex</code></pre>
-          </div>
-          <div class="note">
-            Tip: disable auto-update checks with <code>RAPH_NO_AUTO_UPDATE=1</code> if you want fully manual release control.
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section>
-      <h2>MCP tools</h2>
-      <p class="subhead">Coding agents connected over stdio can use these tools against local storage.</p>
-      <div class="grid cols-2">
-        <article class="card">
-          <h3>Memory and search</h3>
-          <p><code>memory_store</code> records scoped facts, preferences, procedures, and project knowledge with lifecycle metadata, tags, revision, source, and writer details. <code>memory_delete</code> retires active memories by scope and key.</p>
-          <p><code>hybrid_semantic_search</code>, <code>multi_query_search</code>, and <code>best_vector_match</code> search memory, code, and documentation with keyword fallback when embeddings are unavailable.</p>
-        </article>
-        <article class="card">
-          <h3>Code and docs</h3>
-          <p><code>index_codebase</code> defaults to the MCP server working directory, replaces existing nodes for that codebase, and can skip remote embeddings with <code>no_embeddings</code>.</p>
-          <p><code>crawl_url</code> fetches one URL. <code>crawl_website</code> returns compact relevant excerpts, with bounded result and excerpt limits. <code>graph_neighbors</code> expands related graph nodes.</p>
         </article>
       </div>
-    </section>
-
-    <section id="agents">
-      <h2>MCP setup</h2>
-      <p class="subhead">
-        New command: <code>raph agents mcp setup --path .</code>. It checks whether each agent is installed, then writes project-scoped MCP config for whichever agents are present. It still stages config for missing ones so setup stays ready.
-      </p>
-      <div class="grid cols-2">
-        <article class="card callout">
-          <div class="kicker">Command</div>
-          <pre><code>raph agents mcp setup --path .
-raph agents mcp setup --path . --dry-run</code></pre>
-        </article>
-        <article class="card">
-          <div class="kicker">Live terminal sample</div>
-          <pre><code>opencode=/Users/wchr/.opencode/bin/opencode
-claude=/Users/wchr/.local/bin/claude
-codex=/Applications/Codex.app/Contents/Resources/codex
-cursor=missing
-pi=/Users/wchr/.nvm/versions/node/v25.2.1/bin/pi</code></pre>
-        </article>
-      </div>
-      <div class="grid cols-3" style="margin-top:16px">
-        <article class="card">
-          <div class="label">priority 1</div>
-          <h3>OpenCode</h3>
-          <p>Project file: <code>opencode.json</code></p>
-          <span class="path">Global: <code>~/.config/opencode/opencode.json</code></span>
-          <span class="path">MCP entry uses <code>mcp.raph</code> with <code>command: ["raph","start"]</code>.</span>
-        </article>
-        <article class="card">
-          <div class="label">priority 2</div>
-          <h3>Claude Code</h3>
-          <p>Project file: <code>.mcp.json</code></p>
-          <span class="path">User file: <code>~/.claude.json</code></span>
-          <span class="path">MCP entry uses <code>mcpServers.raph</code> with <code>type: "stdio"</code>.</span>
-        </article>
-        <article class="card">
-          <div class="label">priority 3</div>
-          <h3>Codex</h3>
-          <p>Project file: <code>.codex/config.toml</code></p>
-          <span class="path">Global: <code>~/.codex/config.toml</code></span>
-          <span class="path">Setup writes <code>[mcp_servers.raph]</code> with <code>command = "raph"</code>.</span>
-        </article>
-      </div>
-      <div class="grid cols-2" style="margin-top:16px">
-        <article class="card">
-          <div class="label">priority 4</div>
-          <h3>Cursor</h3>
-          <p>Project file: <code>.cursor/mcp.json</code></p>
-          <span class="path">Global: <code>~/.cursor/mcp.json</code></span>
-          <span class="path">If Cursor is not installed, keep config ready for later import.</span>
-        </article>
-        <article class="card">
-          <div class="label">experimental</div>
-          <h3>Pi</h3>
-          <p>Project file: <code>.pi/mcp.json</code></p>
-          <span class="path">Known path from community docs: <code>~/.pi/agent/mcp.json</code></span>
-          <span class="path">No official stable MCP placement doc found, so this stays best-effort.</span>
-        </article>
-      </div>
-    </section>
-
-    <section>
-      <h2>Config layout</h2>
-      <p class="subhead">Each agent wants the same MCP payload, but each stores it in a different file and format.</p>
-      <div class="matrix">
-        <article class="card agent">
-          <strong>OpenCode</strong>
-          <small>Config under <code>mcp</code> in <code>opencode.json</code>.</small>
-          <pre><code>{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "raph": {
-      "type": "local",
-      "command": ["raph", "start"],
-      "enabled": true
-    }
-  }
-}</code></pre>
-        </article>
-        <article class="card agent">
-          <strong>Claude Code</strong>
-          <small>Project <code>.mcp.json</code> or user <code>~/.claude.json</code>.</small>
-          <pre><code>{
-  "mcpServers": {
-    "raph": {
-      "type": "stdio",
-      "command": "raph",
-      "args": ["start"],
-      "env": {}
-    }
-  }
-}</code></pre>
-        </article>
-        <article class="card agent">
-          <strong>Codex</strong>
-          <small>Project <code>.codex/config.toml</code> or user <code>~/.codex/config.toml</code>.</small>
-          <pre><code>[mcp_servers.raph]
-command = "raph"
-args = ["start"]</code></pre>
-        </article>
-        <article class="card agent">
-          <strong>Cursor</strong>
-          <small>Project <code>.cursor/mcp.json</code> or user <code>~/.cursor/mcp.json</code>.</small>
-          <pre><code>{
-  "mcpServers": {
-    "raph": {
-      "type": "stdio",
-      "command": "raph",
-      "args": ["start"],
-      "env": {}
-    }
-  }
-}</code></pre>
-        </article>
-        <article class="card agent">
-          <strong>Pi</strong>
-          <small>Project <code>.pi/mcp.json</code> or user <code>~/.pi/agent/mcp.json</code>.</small>
-          <pre><code>{
-  "mcpServers": {
-    "raph": {
-      "type": "stdio",
-      "command": "raph",
-      "args": ["start"],
-      "env": {}
-    }
-  }
-}</code></pre>
-        </article>
-      </div>
-    </section>
-
-    <section id="studio">
-      <h2>Studio</h2>
-      <p class="subhead">
-        Studio is the local graph explorer. It keeps node details live as you click, shows memory and crawl metadata, supports search and neighbor expansion, and includes local-only database maintenance actions.
-      </p>
-      <div class="grid cols-2">
-        <article class="card">
-          <div class="kicker">Run</div>
-          <pre><code>raph studio --port 4545</code></pre>
-          <span class="path">Open <code>http://localhost:4545</code>.</span>
-        </article>
-        <article class="card">
-          <div class="kicker">Graph behavior</div>
-          <p>All nodes stay visible, node clicks refresh properties, links stay interconnected, and table inspection is capped to keep the page responsive.</p>
-        </article>
-        <article class="card">
-          <div class="kicker">Maintenance actions</div>
-          <p>The init action clears local graph data, indexes the current workspace, and crawls the configured seed URL. The clear action wipes local graph data. Use Studio only on trusted local machines.</p>
-        </article>
-        <article class="card">
-          <div class="kicker">Troubleshooting</div>
-          <pre><code>raph --verbose studio --port 4545</code></pre>
-        </article>
-      </div>
-    </section>
-
-    <section id="commands">
-      <h2>Commands</h2>
-      <div class="grid cols-2">
-        <article class="card">
-          <pre><code>raph init --path .
-raph init --path . --no-embeddings
-raph start
-raph crawl --single https://example.com/docs/page</code></pre>
-        </article>
-        <article class="card">
-          <pre><code>raph sync --path .
-raph sync --status
-raph sync --remove --path .
-raph sync --stop
-raph clear --yes
-raph config init
-raph config check
-raph update</code></pre>
-        </article>
-      </div>
-    </section>
-
-    <section>
-      <h2>Troubleshooting</h2>
-      <div class="grid cols-2">
-        <article class="card">
-          <h3>No embeddings</h3>
-          <p>Run <code>raph config init</code>, then set <code>OPENROUTER_API_KEY</code>. Without it, raph falls back to keyword search.</p>
-        </article>
-        <article class="card">
-          <h3>Need a fresh MCP install</h3>
-          <p>Run <code>raph agents mcp setup --path . --dry-run</code> first to preview file targets, then rerun without <code>--dry-run</code>.</p>
-        </article>
-      </div>
-    </section>
-
-    <section>
-      <h2>License</h2>
-      <p class="subhead">
-        Raph is source-available for private, non-commercial, personal use only. Commercial use, business use, monetization, selling, and reselling require a separate written license.
-      </p>
-      <p><a href="https://github.com/tesh254/raph/blob/main/LICENSE">Read full license.</a></p>
     </section>
   </main>
 
-  <footer>
-    <div class="wrap">raph docs: install, MCP setup, Studio, and graph workflows for coding agents.</div>
+  <footer class="site-footer">
+    <div class="wrap">raph docs: a multi-page guide for install, MCP setup, Studio, and graph workflows for coding agents.</div>
   </footer>
 </body>
 </html>

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Get started with raph: install, configure, index a repo, and start MCP or Studio.">
+  <title>raph docs | getting started</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="index.html">raph<span>docs</span></a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="index.html">Overview</a>
+        <a href="getting-started.html" aria-current="page">Getting started</a>
+        <a href="mcp-agents.html">MCP and agents</a>
+        <a href="studio.html">Studio</a>
+        <a href="reference.html">Reference</a>
+        <a href="https://github.com/tesh254/raph">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap page">
+    <section class="hero">
+      <div class="eyebrow">Getting started</div>
+      <h1>Install once, then point it at your repo.</h1>
+      <p class="lead">This guide covers the first-run flow: create config, set your embedding key, index a codebase, start the MCP server, and optionally run continuous sync.</p>
+      <div class="page-links">
+        <a href="#install">Install</a>
+        <a href="#bootstrap">Bootstrap</a>
+        <a href="#index">Index</a>
+        <a href="#sync">Sync</a>
+      </div>
+    </section>
+
+    <section class="section split" id="install">
+      <div class="panel">
+        <div class="kicker">Install</div>
+        <h2>Pick the install path that fits your machine.</h2>
+        <div class="grid two">
+          <article class="card">
+            <h3>curl</h3>
+            <pre><code>curl -fsSL https://raw.githubusercontent.com/tesh254/raph/main/install.sh | sh</code></pre>
+          </article>
+          <article class="card">
+            <h3>wget</h3>
+            <pre><code>wget -qO- https://raw.githubusercontent.com/tesh254/raph/main/install.sh | sh</code></pre>
+          </article>
+          <article class="card">
+            <h3>PowerShell</h3>
+            <pre><code>irm https://raw.githubusercontent.com/tesh254/raph/main/install.ps1 | iex</code></pre>
+          </article>
+          <article class="card">
+            <h3>Homebrew</h3>
+            <pre><code>brew install --cask tesh254/raph/raph</code></pre>
+          </article>
+        </div>
+      </div>
+      <div class="stack">
+        <article class="card">
+          <div class="label">Version override</div>
+          <pre><code>RAPH_REPO=tesh254/raph \
+RAPH_VERSION=v0.1.0 \
+curl -fsSL https://raw.githubusercontent.com/tesh254/raph/main/install.sh | sh</code></pre>
+        </article>
+        <div class="note">Release builds can check for newer stable versions automatically. If you want a fully manual setup, see the update controls on the reference page.</div>
+      </div>
+    </section>
+
+    <section class="section" id="bootstrap">
+      <div class="panel">
+        <div class="kicker">Bootstrap</div>
+        <h2>Create the local config and data directories.</h2>
+        <p class="section-intro">The first command sets up the files and folders under <code>~/.raph/</code>. Then you provide the OpenRouter key used for embeddings.</p>
+        <div class="grid two">
+          <article class="card">
+            <pre><code>raph config init</code></pre>
+            <ul class="plain-list">
+              <li><code>~/.raph/schema.json</code></li>
+              <li><code>~/.raph/raph.json</code></li>
+              <li><code>~/.raph/data/</code></li>
+            </ul>
+          </article>
+          <article class="card">
+            <pre><code>export OPENROUTER_API_KEY="your-key"</code></pre>
+            <p class="muted">Without an embedding provider, raph falls back to keyword-oriented behavior where possible.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="index">
+      <div class="panel">
+        <div class="kicker">Index</div>
+        <h2>Index a repository and prepare agent config.</h2>
+        <div class="grid two">
+          <article class="card">
+            <h3>Initial scan</h3>
+            <pre><code>raph init --path .</code></pre>
+            <p class="muted">This scans supported files, builds graph relationships, and registers the repository for future background synchronization.</p>
+          </article>
+          <article class="card">
+            <h3>Skip embeddings</h3>
+            <pre><code>raph init --path . --no-embeddings</code></pre>
+            <p class="muted">Use this if you want a faster local pass or do not want remote embedding calls during indexing.</p>
+          </article>
+          <article class="card">
+            <h3>Install project MCP entries</h3>
+            <pre><code>raph agents mcp setup --path .</code></pre>
+            <p class="muted">This writes project-scoped MCP config for whichever supported agents are detected.</p>
+          </article>
+          <article class="card">
+            <h3>Start the MCP server</h3>
+            <pre><code>raph start</code></pre>
+            <p class="muted">Use this when you want a coding agent to talk to raph over stdio.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="sync">
+      <div class="panel">
+        <div class="kicker">Continuous sync</div>
+        <h2>Keep the indexed repository up to date.</h2>
+        <p class="section-intro">The sync worker performs an initial index, tracks supported file changes, updates changed nodes, and removes graph data for deleted files.</p>
+        <div class="grid two">
+          <article class="card">
+            <pre><code>raph sync --path .</code></pre>
+            <p class="muted">Starts one detached background worker after registering the repository path.</p>
+          </article>
+          <article class="card">
+            <pre><code>raph sync --status
+raph sync --remove --path .
+raph sync --stop</code></pre>
+            <p class="muted">Unregistering a repository removes its graph data by default. Pass <code>--keep-data</code> if you only want to stop tracking it.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">Next: <a href="mcp-agents.html">MCP and coding agents</a></div>
+  </footer>
+</body>
+</html>

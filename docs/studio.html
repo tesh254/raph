@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="raph Studio guide for graph inspection and local maintenance actions.">
+  <title>raph docs | Studio</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="index.html">raph<span>docs</span></a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="index.html">Overview</a>
+        <a href="getting-started.html">Getting started</a>
+        <a href="mcp-agents.html">MCP and agents</a>
+        <a href="studio.html" aria-current="page">Studio</a>
+        <a href="reference.html">Reference</a>
+        <a href="https://github.com/tesh254/raph">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap page">
+    <section class="hero">
+      <div class="eyebrow">Studio</div>
+      <h1>Inspect the graph with a local UI built for exploration.</h1>
+      <p class="lead">Studio is the local graph explorer for nodes, edges, search, metadata, table inspection, and explicit maintenance actions.</p>
+      <div class="cta-row">
+        <a class="button primary" href="#run">Run Studio</a>
+        <a class="button" href="#behavior">Graph behavior</a>
+      </div>
+    </section>
+
+    <section class="section split" id="run">
+      <div class="panel">
+        <div class="kicker">Run</div>
+        <h2>Start Studio on a local port.</h2>
+        <pre><code>raph studio --port 4545</code></pre>
+        <p class="section-intro">Then open <code>http://localhost:4545</code>. For troubleshooting, use <code>raph --verbose studio --port 4545</code>.</p>
+      </div>
+      <article class="card callout">
+        <div class="label">Trust boundary</div>
+        <p class="muted">Studio includes local-only maintenance actions that can clear graph data. Use it on trusted local machines only.</p>
+      </article>
+    </section>
+
+    <section class="section" id="behavior">
+      <div class="panel">
+        <div class="kicker">Behavior</div>
+        <h2>What the UI is designed to show.</h2>
+        <div class="grid two">
+          <article class="card">
+            <h3>Graph exploration</h3>
+            <p class="muted">Node clicks refresh properties, links stay interconnected, and neighbor expansion helps you move through related memories, files, chunks, and crawl results.</p>
+          </article>
+          <article class="card">
+            <h3>Node details</h3>
+            <p class="muted">Studio keeps node details live as you click so memory metadata, crawl attributes, and relationships are immediately visible.</p>
+          </article>
+          <article class="card">
+            <h3>Search and tables</h3>
+            <p class="muted">Keyword and semantic search are available from the same interface, and SQLite table inspection stays bounded to keep the page responsive.</p>
+          </article>
+          <article class="card">
+            <h3>Maintenance actions</h3>
+            <p class="muted">The init action clears local graph data, indexes the current workspace, and crawls the configured seed URL. The clear action wipes local graph data.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="panel">
+        <div class="kicker">Typical flow</div>
+        <h2>Use Studio when you want to verify what agents will see.</h2>
+        <ul class="feature-list">
+          <li>Inspect whether a repository indexed the expected files and chunks.</li>
+          <li>Confirm durable memories have the scope and metadata you expect.</li>
+          <li>Follow graph neighbors to understand why a search result was connected.</li>
+          <li>Look at table state directly when debugging indexing or crawl behavior.</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">Next: <a href="reference.html">Reference and troubleshooting</a></div>
+  </footer>
+</body>
+</html>
