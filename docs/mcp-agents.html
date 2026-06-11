@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="raph MCP tools and agent configuration guide.">
+  <title>raph docs | MCP and agents</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="index.html">raph<span>docs</span></a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="index.html">Overview</a>
+        <a href="getting-started.html">Getting started</a>
+        <a href="mcp-agents.html" aria-current="page">MCP and agents</a>
+        <a href="studio.html">Studio</a>
+        <a href="reference.html">Reference</a>
+        <a href="https://github.com/tesh254/raph">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap page">
+    <section class="hero">
+      <div class="eyebrow">MCP and agents</div>
+      <h1>Connect raph once, then let agents search and store context locally.</h1>
+      <p class="lead">This page collects the MCP tool surface, the setup command, and the config file layout used by supported coding agents.</p>
+    </section>
+
+    <section class="section split">
+      <div class="panel">
+        <div class="kicker">Setup command</div>
+        <h2>Generate project-scoped MCP config.</h2>
+        <pre><code>raph agents mcp setup --path .
+raph agents mcp setup --path . --dry-run</code></pre>
+        <p class="section-intro">The setup command checks whether each supported agent is installed, writes project-scoped config for the ones it finds, and can still stage config for missing targets so the repo stays ready.</p>
+      </div>
+      <div class="stack">
+        <article class="card">
+          <div class="label">Terminal sample</div>
+          <pre><code>opencode=/Users/wchr/.opencode/bin/opencode
+claude=/Users/wchr/.local/bin/claude
+codex=/Applications/Codex.app/Contents/Resources/codex
+cursor=missing
+pi=/Users/wchr/.nvm/versions/node/v25.2.1/bin/pi</code></pre>
+        </article>
+        <article class="card">
+          <div class="label">Default server command</div>
+          <pre><code>command: raph
+args: ["start"]</code></pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="panel">
+        <div class="kicker">Tool surface</div>
+        <h2>What agents can do through MCP.</h2>
+        <div class="grid two">
+          <article class="card">
+            <h3>Memory and retrieval</h3>
+            <ul class="plain-list">
+              <li><code>memory_store</code> writes scoped memory with lifecycle metadata, source, writer, revision, tags, and timestamps.</li>
+              <li><code>memory_delete</code> retires matching active memory instead of deleting unrelated graph nodes.</li>
+              <li><code>hybrid_semantic_search</code>, <code>multi_query_search</code>, and <code>best_vector_match</code> search memory, code, and docs.</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Code and documentation</h3>
+            <ul class="plain-list">
+              <li><code>index_codebase</code> defaults to the MCP working directory and replaces existing nodes for that codebase.</li>
+              <li><code>crawl_url</code> fetches one page; <code>crawl_website</code> returns compact relevant excerpts with bounded limits.</li>
+              <li><code>graph_neighbors</code> expands related graph nodes.</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="panel">
+        <div class="kicker">Agent targets</div>
+        <h2>Supported config locations.</h2>
+        <div class="grid three">
+          <article class="card">
+            <div class="label">Priority 1</div>
+            <h3>OpenCode</h3>
+            <p class="muted">Project file: <code>opencode.json</code></p>
+            <p class="muted">Global file: <code>~/.config/opencode/opencode.json</code></p>
+          </article>
+          <article class="card">
+            <div class="label">Priority 2</div>
+            <h3>Claude Code</h3>
+            <p class="muted">Project file: <code>.mcp.json</code></p>
+            <p class="muted">User file: <code>~/.claude.json</code></p>
+          </article>
+          <article class="card">
+            <div class="label">Priority 3</div>
+            <h3>Codex</h3>
+            <p class="muted">Project file: <code>.codex/config.toml</code></p>
+            <p class="muted">Global file: <code>~/.codex/config.toml</code></p>
+          </article>
+          <article class="card">
+            <div class="label">Priority 4</div>
+            <h3>Cursor</h3>
+            <p class="muted">Project file: <code>.cursor/mcp.json</code></p>
+            <p class="muted">Global file: <code>~/.cursor/mcp.json</code></p>
+          </article>
+          <article class="card">
+            <div class="label">Experimental</div>
+            <h3>Pi</h3>
+            <p class="muted">Project file: <code>.pi/mcp.json</code></p>
+            <p class="muted">Known user path: <code>~/.pi/agent/mcp.json</code></p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="panel">
+        <div class="kicker">Config layout</div>
+        <h2>The config differs by file format, not by behavior.</h2>
+        <div class="table-like">
+          <div class="row">
+            <div><strong>OpenCode</strong></div>
+            <pre><code>{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "raph": {
+      "type": "local",
+      "command": ["raph", "start"],
+      "enabled": true
+    }
+  }
+}</code></pre>
+          </div>
+          <div class="row">
+            <div><strong>Claude Code</strong></div>
+            <pre><code>{
+  "mcpServers": {
+    "raph": {
+      "type": "stdio",
+      "command": "raph",
+      "args": ["start"],
+      "env": {}
+    }
+  }
+}</code></pre>
+          </div>
+          <div class="row">
+            <div><strong>Codex</strong></div>
+            <pre><code>[mcp_servers.raph]
+command = "raph"
+args = ["start"]</code></pre>
+          </div>
+          <div class="row">
+            <div><strong>Cursor / Pi</strong></div>
+            <pre><code>{
+  "mcpServers": {
+    "raph": {
+      "type": "stdio",
+      "command": "raph",
+      "args": ["start"],
+      "env": {}
+    }
+  }
+}</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">Next: <a href="studio.html">Studio guide</a></div>
+  </footer>
+</body>
+</html>

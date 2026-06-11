@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="raph command reference, updates, build notes, and troubleshooting.">
+  <title>raph docs | reference</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="index.html">raph<span>docs</span></a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="index.html">Overview</a>
+        <a href="getting-started.html">Getting started</a>
+        <a href="mcp-agents.html">MCP and agents</a>
+        <a href="studio.html">Studio</a>
+        <a href="reference.html" aria-current="page">Reference</a>
+        <a href="https://github.com/tesh254/raph">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap page">
+    <section class="hero">
+      <div class="eyebrow">Reference</div>
+      <h1>Commands, update behavior, and quick fixes in one place.</h1>
+      <p class="lead">Use this page as the practical reference when you need command reminders, local build steps, or the fastest route through a setup issue.</p>
+    </section>
+
+    <section class="section">
+      <div class="panel">
+        <div class="kicker">Command cheat sheet</div>
+        <h2>Core commands.</h2>
+        <div class="grid two">
+          <article class="card">
+            <pre><code>raph init --path .
+raph init --path . --no-embeddings
+raph start
+raph crawl --single https://example.com/docs/page</code></pre>
+          </article>
+          <article class="card">
+            <pre><code>raph sync --path .
+raph sync --status
+raph sync --remove --path .
+raph sync --stop
+raph clear --yes
+raph config init
+raph config check
+raph update
+raph version</code></pre>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section split">
+      <div class="panel">
+        <div class="kicker">Updates</div>
+        <h2>Stable release updates are built in.</h2>
+        <p class="section-intro">Installed release builds check for newer stable versions at most once every 24 hours and replace themselves when one exists. Development builds do not check.</p>
+        <pre><code>export RAPH_NO_AUTO_UPDATE=1
+raph update</code></pre>
+      </div>
+      <article class="card">
+        <div class="label">Docs site</div>
+        <p class="muted">Public usage docs deploy from <code>docs/</code> to <a href="https://raph.madebyknnls.com/">raph.madebyknnls.com</a> through the GitHub Pages workflow.</p>
+      </article>
+    </section>
+
+    <section class="section">
+      <div class="panel">
+        <div class="kicker">Troubleshooting</div>
+        <h2>Common setup issues.</h2>
+        <div class="grid two">
+          <article class="card">
+            <h3>No embeddings</h3>
+            <p class="muted">Run <code>raph config init</code>, then set <code>OPENROUTER_API_KEY</code>. Without it, raph falls back to keyword-oriented retrieval where possible.</p>
+          </article>
+          <article class="card">
+            <h3>Need a fresh MCP install</h3>
+            <p class="muted">Use <code>raph agents mcp setup --path . --dry-run</code> first to preview target files, then rerun without <code>--dry-run</code>.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="panel">
+        <div class="kicker">Build locally</div>
+        <h2>Verification before merging.</h2>
+        <div class="grid two">
+          <article class="card">
+            <pre><code>go test ./...
+go build ./cmd/raph</code></pre>
+          </article>
+          <article class="card">
+            <pre><code>raph studio --port 4545</code></pre>
+            <p class="muted">Run the Studio smoke test as well for changes that touch the local UI.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="panel">
+        <div class="kicker">License</div>
+        <h2>Usage terms.</h2>
+        <p class="section-intro">Raph is source-available for private, non-commercial, personal use only. Commercial use, business use, monetization, selling, and reselling require a separate written license.</p>
+        <p><a href="https://github.com/tesh254/raph/blob/main/LICENSE">Read the full license.</a></p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap"><a href="index.html">Back to overview</a></div>
+  </footer>
+</body>
+</html>
