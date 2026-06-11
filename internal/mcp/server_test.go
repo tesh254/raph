@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,12 +18,16 @@ import (
 
 type protocolStore struct {
 	nodes             map[string]db.Node
+	records           map[string]db.MemoryRecord
 	vectorSearchLimit int
 	vectorSearchNodes []db.Node
 }
 
 func newProtocolStore() *protocolStore {
-	return &protocolStore{nodes: make(map[string]db.Node)}
+	return &protocolStore{
+		nodes:   make(map[string]db.Node),
+		records: make(map[string]db.MemoryRecord),
+	}
 }
 
 func (s *protocolStore) SaveNode(_ context.Context, node db.Node) error {
@@ -56,6 +61,50 @@ func (*protocolStore) GetNeighbors(context.Context, string) ([]db.Node, []db.Edg
 func (*protocolStore) GetAllGraphElements(context.Context) ([]db.Node, []db.Edge, error) {
 	return nil, nil, nil
 }
+func (s *protocolStore) UpsertMemoryRecord(_ context.Context, record db.MemoryRecord) error {
+	s.records[record.Node.ID] = record
+	return nil
+}
+func (s *protocolStore) GetMemoryRecord(_ context.Context, nodeID string) (db.MemoryRecord, error) {
+	record, ok := s.records[nodeID]
+	if !ok {
+		return db.MemoryRecord{}, sql.ErrNoRows
+	}
+	return record, nil
+}
+func (s *protocolStore) GetMemoryRecordByKey(_ context.Context, scopeType string, scopeID string, knowledgeType string, memoryKey string) (db.MemoryRecord, error) {
+	for _, record := range s.records {
+		if record.ScopeType == scopeType && record.ScopeID == scopeID && record.KnowledgeType == knowledgeType && record.MemoryKey == memoryKey {
+			return record, nil
+		}
+	}
+	return db.MemoryRecord{}, sql.ErrNoRows
+}
+func (*protocolStore) InsertMemoryRevision(context.Context, db.MemoryRevision) error { return nil }
+func (*protocolStore) ListMemoryRevisions(context.Context, string) ([]db.MemoryRevision, error) {
+	return nil, nil
+}
+func (s *protocolStore) SearchMemoryRecords(_ context.Context, filter db.MemorySearchFilter) ([]db.MemoryRecord, error) {
+	var out []db.MemoryRecord
+	for _, record := range s.records {
+		if filter.ScopeType != "" && record.ScopeType != filter.ScopeType {
+			continue
+		}
+		if filter.ScopeID != "" && record.ScopeID != filter.ScopeID {
+			continue
+		}
+		if filter.KnowledgeType != "" && record.KnowledgeType != filter.KnowledgeType {
+			continue
+		}
+		out = append(out, record)
+	}
+	return out, nil
+}
+func (*protocolStore) SetMemoryLifecycle(context.Context, string, string, string, string) error {
+	return nil
+}
+func (*protocolStore) SaveWebCorpus(context.Context, db.WebCorpus) error             { return nil }
+func (*protocolStore) SaveWebCrawlVersion(context.Context, db.WebCrawlVersion) error { return nil }
 func (s *protocolStore) DeleteNodeByID(_ context.Context, id string) error {
 	delete(s.nodes, id)
 	return nil
@@ -90,25 +139,30 @@ func TestMCPProtocolListsAndCallsMemoryTools(t *testing.T) {
 	for _, tool := range tools.Tools {
 		names[tool.Name] = true
 	}
-	for _, name := range []string{"hybrid_semantic_search", "multi_query_search", "best_vector_match", "graph_neighbors", "memory_store", "memory_delete", "crawl_url", "crawl_website", "index_codebase"} {
+	for _, name := range []string{"hybrid_semantic_search", "multi_query_search", "best_vector_match", "graph_neighbors", "graph_neighbors_cross_corpus", "store_memory", "update_memory", "deprecate_memory", "search_project_knowledge", "search_shared_knowledge", "search_global_preferences", "get_memory_history", "crawl_url", "crawl_website", "index_codebase", "search_codebase"} {
 		if !names[name] {
 			t.Fatalf("expected MCP tool %q, got %v", name, names)
 		}
 	}
 
 	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
-		Name: "memory_store",
+		Name: "store_memory",
 		Arguments: map[string]any{
-			"key":     "test",
-			"title":   "Test memory",
-			"content": "Remember protocol behavior.",
+			"scope_type":     "shared",
+			"scope_id":       "team",
+			"knowledge_type": "decision",
+			"memory_key":     "test",
+			"title":          "Test memory",
+			"content":        "Remember protocol behavior.",
+			"source":         "user",
+			"writer_id":      "agent:test",
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.IsError {
-		t.Fatalf("memory_store returned tool error: %+v", result.Content)
+		t.Fatalf("store_memory returned tool error: %+v", result.Content)
 	}
 
 	result, err = session.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -159,6 +213,20 @@ func TestMCPProtocolListsAndCallsMemoryTools(t *testing.T) {
 	}
 	if !foundCodebaseNode {
 		t.Fatalf("expected indexed node with codebase path %q", codebase)
+	}
+
+	result, err = session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "search_codebase",
+		Arguments: map[string]any{
+			"path":  codebase,
+			"query": "Agent-indexed",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("search_codebase returned tool error: %+v", result.Content)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"time"
 
+	"raph/internal/agentsetup"
 	"raph/internal/config"
 	"raph/internal/crawler"
 	"raph/internal/db"
@@ -16,6 +17,7 @@ import (
 	"raph/internal/studio"
 	"raph/internal/syncer"
 	"raph/internal/updater"
+	"raph/internal/verbose"
 	"raph/internal/version"
 
 	"github.com/spf13/cobra"
@@ -29,6 +31,7 @@ func main() {
 }
 
 func newRootCmd() *cobra.Command {
+	var verboseFlag bool
 	rootCmd := &cobra.Command{
 		Use:           "raph",
 		Short:         "raph is a local-first graph-vector brain for coding agents",
@@ -36,6 +39,11 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		Version:       version.Full(),
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			verbose.Set(verboseFlag)
+			if verboseFlag {
+				_ = os.Setenv("RAPH_VERBOSE", "1")
+				verbose.Printf("command=%s args=%v", cmd.CommandPath(), args)
+			}
 			if cmd.Name() == "update" || version.Version == "dev" || !updater.ShouldAutoCheck() {
 				return
 			}
@@ -47,12 +55,14 @@ func newRootCmd() *cobra.Command {
 			}
 		},
 	}
+	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Print verbose operational logs")
 
 	rootCmd.AddCommand(newInitCmd())
 	rootCmd.AddCommand(newCrawlCmd())
 	rootCmd.AddCommand(newStartCmd())
 	rootCmd.AddCommand(newStudioCmd())
 	rootCmd.AddCommand(newSyncCmd())
+	rootCmd.AddCommand(newAgentsCmd())
 	rootCmd.AddCommand(newClearCmd())
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newUpdateCmd())
@@ -222,8 +232,23 @@ func newInitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			verbose.Printf("index complete path=%s files=%d nodes=%d edges=%d embeddings=%d", scanPath, stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
+			repo, err := syncer.Register(scanPath, noEmbeddings)
+			if err != nil {
+				return err
+			}
+			started, err := syncer.Start(2 * time.Second)
+			if err != nil {
+				return err
+			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "Indexed %d files, %d nodes, %d edges, %d embeddings\n", stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
+			fmt.Fprintf(cmd.OutOrStdout(), "Watcher armed for %s\n", repo.Path)
+			if started {
+				fmt.Fprintln(cmd.OutOrStdout(), "Background sync worker started")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "Background sync worker already running")
+			}
 			if !noEmbeddings && (cfg == nil || !cfg.HasEmbeddingProvider()) {
 				fmt.Fprintln(cmd.OutOrStdout(), "No resolved embedding provider key found; graph was indexed without embeddings. Run `raph config init` and set OPENROUTER_API_KEY to enable semantic search.")
 			}
@@ -287,8 +312,14 @@ func newStartCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			verbose.Printf("loaded config for MCP start: enabled=%t", cfg != nil)
 			if cfg == nil {
 				fmt.Fprintln(os.Stderr, "raph: no config found, semantic embeddings disabled; keyword search fallback remains available")
+			}
+			if started, err := syncer.Start(2 * time.Second); err != nil {
+				verbose.Printf("sync worker start skipped: %v", err)
+			} else if started {
+				verbose.Printf("sync worker started for MCP session")
 			}
 
 			store, err := db.InitStorage()
@@ -326,6 +357,10 @@ func newStudioCmd() *cobra.Command {
 
 			srv := studio.NewStudioServer(store, port)
 			srv.SetConfig(cfg)
+			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+				srv.SetWorkspaceRoot(cwd)
+			}
+			verbose.Printf("launching studio on port=%d", port)
 			return srv.Start()
 		},
 	}
@@ -416,4 +451,56 @@ func newConfigCmd() *cobra.Command {
 	})
 
 	return configCmd
+}
+
+func newAgentsCmd() *cobra.Command {
+	agentsCmd := &cobra.Command{
+		Use:   "agents",
+		Short: "Manage coding-agent integrations",
+	}
+
+	var path string
+	var dryRun bool
+	mcpCmd := &cobra.Command{
+		Use:   "mcp",
+		Short: "Manage MCP setup across supported coding agents",
+	}
+	setupCmd := &cobra.Command{
+		Use:   "setup",
+		Short: "Install or refresh project MCP config for supported coding agents",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := agentsetup.Setup(agentsetup.Options{Root: path, DryRun: dryRun})
+			if err != nil {
+				return err
+			}
+
+			if dryRun {
+				fmt.Fprintf(cmd.OutOrStdout(), "Preview only for %s\n", result.Root)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Updated project MCP config under %s\n", result.Root)
+			}
+
+			for _, outcome := range result.Outcomes {
+				status := "missing"
+				if outcome.Installed {
+					status = "installed"
+				}
+				change := "unchanged"
+				if outcome.Changed {
+					change = "updated"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: %s (%s) -> %s\n", outcome.Name, status, change, outcome.ConfigPath)
+				if outcome.Message != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", outcome.Message)
+				}
+			}
+			return nil
+		},
+	}
+	setupCmd.Flags().StringVar(&path, "path", ".", "Project root to update")
+	setupCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview changes without writing files")
+
+	mcpCmd.AddCommand(setupCmd)
+	agentsCmd.AddCommand(mcpCmd)
+	return agentsCmd
 }

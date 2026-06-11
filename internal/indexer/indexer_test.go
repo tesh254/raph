@@ -39,11 +39,30 @@ func (*indexCaptureStore) GetNeighbors(context.Context, string) ([]db.Node, []db
 func (*indexCaptureStore) GetAllGraphElements(context.Context) ([]db.Node, []db.Edge, error) {
 	return nil, nil, nil
 }
-func (*indexCaptureStore) DeleteNodeByID(context.Context, string) error          { return nil }
-func (*indexCaptureStore) DeleteFileNodes(context.Context, string, string) error { return nil }
-func (*indexCaptureStore) DeleteWorkspace(context.Context, string) error         { return nil }
-func (*indexCaptureStore) ClearAll(context.Context) error                        { return nil }
-func (*indexCaptureStore) Close() error                                          { return nil }
+func (*indexCaptureStore) UpsertMemoryRecord(context.Context, db.MemoryRecord) error { return nil }
+func (*indexCaptureStore) GetMemoryRecord(context.Context, string) (db.MemoryRecord, error) {
+	return db.MemoryRecord{}, nil
+}
+func (*indexCaptureStore) GetMemoryRecordByKey(context.Context, string, string, string, string) (db.MemoryRecord, error) {
+	return db.MemoryRecord{}, nil
+}
+func (*indexCaptureStore) InsertMemoryRevision(context.Context, db.MemoryRevision) error { return nil }
+func (*indexCaptureStore) ListMemoryRevisions(context.Context, string) ([]db.MemoryRevision, error) {
+	return nil, nil
+}
+func (*indexCaptureStore) SearchMemoryRecords(context.Context, db.MemorySearchFilter) ([]db.MemoryRecord, error) {
+	return nil, nil
+}
+func (*indexCaptureStore) SetMemoryLifecycle(context.Context, string, string, string, string) error {
+	return nil
+}
+func (*indexCaptureStore) SaveWebCorpus(context.Context, db.WebCorpus) error             { return nil }
+func (*indexCaptureStore) SaveWebCrawlVersion(context.Context, db.WebCrawlVersion) error { return nil }
+func (*indexCaptureStore) DeleteNodeByID(context.Context, string) error                  { return nil }
+func (*indexCaptureStore) DeleteFileNodes(context.Context, string, string) error         { return nil }
+func (*indexCaptureStore) DeleteWorkspace(context.Context, string) error                 { return nil }
+func (*indexCaptureStore) ClearAll(context.Context) error                                { return nil }
+func (*indexCaptureStore) Close() error                                                  { return nil }
 
 func TestSplitDocumentSections(t *testing.T) {
 	t.Parallel()

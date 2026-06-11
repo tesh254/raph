@@ -42,11 +42,30 @@ func (*crawlStore) GetNeighbors(context.Context, string) ([]db.Node, []db.Edge, 
 func (*crawlStore) GetAllGraphElements(context.Context) ([]db.Node, []db.Edge, error) {
 	return nil, nil, nil
 }
-func (*crawlStore) DeleteNodeByID(context.Context, string) error          { return nil }
-func (*crawlStore) DeleteFileNodes(context.Context, string, string) error { return nil }
-func (*crawlStore) DeleteWorkspace(context.Context, string) error         { return nil }
-func (*crawlStore) ClearAll(context.Context) error                        { return nil }
-func (*crawlStore) Close() error                                          { return nil }
+func (*crawlStore) UpsertMemoryRecord(context.Context, db.MemoryRecord) error { return nil }
+func (*crawlStore) GetMemoryRecord(context.Context, string) (db.MemoryRecord, error) {
+	return db.MemoryRecord{}, nil
+}
+func (*crawlStore) GetMemoryRecordByKey(context.Context, string, string, string, string) (db.MemoryRecord, error) {
+	return db.MemoryRecord{}, nil
+}
+func (*crawlStore) InsertMemoryRevision(context.Context, db.MemoryRevision) error { return nil }
+func (*crawlStore) ListMemoryRevisions(context.Context, string) ([]db.MemoryRevision, error) {
+	return nil, nil
+}
+func (*crawlStore) SearchMemoryRecords(context.Context, db.MemorySearchFilter) ([]db.MemoryRecord, error) {
+	return nil, nil
+}
+func (*crawlStore) SetMemoryLifecycle(context.Context, string, string, string, string) error {
+	return nil
+}
+func (*crawlStore) SaveWebCorpus(context.Context, db.WebCorpus) error             { return nil }
+func (*crawlStore) SaveWebCrawlVersion(context.Context, db.WebCrawlVersion) error { return nil }
+func (*crawlStore) DeleteNodeByID(context.Context, string) error                  { return nil }
+func (*crawlStore) DeleteFileNodes(context.Context, string, string) error         { return nil }
+func (*crawlStore) DeleteWorkspace(context.Context, string) error                 { return nil }
+func (*crawlStore) ClearAll(context.Context) error                                { return nil }
+func (*crawlStore) Close() error                                                  { return nil }
 
 func TestSinglePageCrawlerDoesNotFollowLinksAndEmbedsChunks(t *testing.T) {
 	var linkedPageRequests int
