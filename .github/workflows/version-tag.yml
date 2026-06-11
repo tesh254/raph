@@ -15,6 +15,8 @@ concurrency:
 jobs:
   tag:
     runs-on: ubuntu-latest
+    outputs:
+      next_tag: ${{ steps.semver.outputs.next_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -85,3 +87,9 @@ jobs:
           git push origin "$NEXT_TAG"
           echo "Created $NEXT_TAG from ${LAST_TAG:-initial release} using $BUMP bump"
 
+  release:
+    needs: tag
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.next_tag }}
+    secrets: inherit

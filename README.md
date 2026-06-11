@@ -234,6 +234,8 @@ Bump rules follow conventional commits across commits since the previous tag:
 - `fix:`, `perf:`, or `refactor:` -> patch
 - anything else falls back to patch so merged work still ships
 
+`.github/workflows/version-tag.yml` now calls `.github/workflows/release.yml` immediately after pushing the tag, because tags created by GitHub Actions do not start a second workflow run on their own. Direct manual tag pushes still trigger `.github/workflows/release.yml`.
+
 `.github/workflows/release.yml` validates the generated tag, runs tests, and runs GoReleaser. GoReleaser publishes release archives, `checksums.txt`, changelog notes, and the Homebrew cask in this repository.
 
 Manual tags still work when needed:
