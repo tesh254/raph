@@ -4,6 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Semantic version tag to release
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: Semantic version tag to release
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -15,10 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
     steps:
       - name: Validate semantic version tag
         run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || {
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || {
             echo "Tag must follow semantic versioning: vMAJOR.MINOR.PATCH[-PRERELEASE]"
             exit 1
           }
@@ -27,6 +40,7 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag != '' && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
@@ -80,8 +94,8 @@ jobs:
       - name: Verify release integrity with gh
         run: |
           set -euo pipefail
-          gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
           while IFS= read -r asset; do
-            gh release verify-asset "$GITHUB_REF_NAME" "$asset" --repo "$GITHUB_REPOSITORY"
+            gh release verify-asset "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
             gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY"
           done < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name 'checksums.txt' -o -name 'checksums.txt.minisig' \) | sort)

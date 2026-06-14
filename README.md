@@ -275,7 +275,9 @@ Bump rules follow conventional commits across commits since the previous tag:
 - `fix:`, `perf:`, or `refactor:` -> patch
 - anything else falls back to patch so merged work still ships
 
-`.github/workflows/release.yml` validates the generated tag, requires immutable releases, runs tests, signs `checksums.txt`, publishes release archives, generates GitHub artifact attestations, and verifies the finished release with `gh`.
+`.github/workflows/version-tag.yml` now calls `.github/workflows/release.yml` immediately after pushing the tag, because tags created by GitHub Actions do not start a second workflow run on their own. Direct manual tag pushes still trigger `.github/workflows/release.yml`.
+
+`.github/workflows/release.yml` validates the generated tag, requires immutable releases, runs tests, signs `checksums.txt`, publishes release archives, generates GitHub artifact attestations, verifies the finished release with `gh`, and updates the Homebrew cask in this repository.
 
 Manual tags still work when needed:
 

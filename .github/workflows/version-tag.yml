@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      next_tag: ${{ steps.semver.outputs.next_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -94,3 +96,10 @@ jobs:
           git tag -a "$NEXT_TAG" -m "release: $NEXT_TAG"
           git push origin "$NEXT_TAG"
           echo "Created $NEXT_TAG from ${LAST_TAG:-initial release} using $BUMP bump"
+
+  release:
+    needs: tag
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.next_tag }}
+    secrets: inherit
