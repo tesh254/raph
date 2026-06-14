@@ -36,7 +36,7 @@ func TestStudioInitAndClearActions(t *testing.T) {
 	}))
 	defer site.Close()
 
-	srv := NewStudioServer(store, 0)
+	srv := NewStudioServer(store, "", 0)
 	srv.SetWorkspaceRoot(workspace)
 	srv.SetSeedURL(site.URL)
 
@@ -150,7 +150,7 @@ func TestStudioNodeEndpointIncludesMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := NewStudioServer(store, 0)
+	srv := NewStudioServer(store, "", 0)
 	req := httptest.NewRequest(http.MethodGet, "/api/node?id="+node.ID, nil)
 	rec := httptest.NewRecorder()
 	srv.handleGetNode(rec, req)
@@ -200,7 +200,7 @@ func TestStudioSQLiteEndpointCapsRequestedLimit(t *testing.T) {
 		}
 	}
 
-	srv := NewStudioServer(store, 0)
+	srv := NewStudioServer(store, "", 0)
 	req := httptest.NewRequest(http.MethodGet, "/api/sqlite?limit=5000", nil)
 	rec := httptest.NewRecorder()
 	srv.handleSQLite(rec, req)

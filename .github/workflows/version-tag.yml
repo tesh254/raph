@@ -15,9 +15,11 @@ concurrency:
 jobs:
   tag:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
 
@@ -81,7 +83,14 @@ jobs:
           BUMP: ${{ steps.semver.outputs.bump }}
         run: |
           set -euo pipefail
+          if gh release view "$NEXT_TAG" >/dev/null 2>&1; then
+            echo "Release $NEXT_TAG already exists"
+            exit 1
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/tags?per_page=100" --jq '.[].name' | grep -Fxq "$NEXT_TAG"; then
+            echo "Tag $NEXT_TAG already exists"
+            exit 1
+          fi
           git tag -a "$NEXT_TAG" -m "release: $NEXT_TAG"
           git push origin "$NEXT_TAG"
           echo "Created $NEXT_TAG from ${LAST_TAG:-initial release} using $BUMP bump"
-

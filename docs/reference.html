@@ -59,14 +59,34 @@ raph version</code></pre>
       <div class="panel">
         <div class="kicker">Updates</div>
         <h2>Stable release updates are built in.</h2>
-        <p class="section-intro">Installed release builds check for newer stable versions at most once every 24 hours and replace themselves when one exists. Development builds do not check.</p>
-        <pre><code>export RAPH_NO_AUTO_UPDATE=1
+        <p class="section-intro">Installed release builds update when you run <code>raph update</code>. To opt into automatic update attempts before normal commands, set this environment variable. Development builds do not self-update.</p>
+        <pre><code>export RAPH_AUTO_UPDATE=1
 raph update</code></pre>
+        <p class="muted">Release updates are only trusted when the downloaded <code>checksums.txt</code> file passes minisign verification against the bundled public key and the selected archive matches that signed checksum.</p>
       </div>
       <article class="card">
         <div class="label">Docs site</div>
         <p class="muted">Public usage docs deploy from <code>docs/</code> to <a href="https://raph.madebyknnls.com/">raph.madebyknnls.com</a> through the GitHub Pages workflow.</p>
       </article>
+    </section>
+
+    <section class="section">
+      <div class="panel">
+        <div class="kicker">Release integrity</div>
+        <h2>Verify published tags and assets with <code>gh</code>.</h2>
+        <div class="grid two">
+          <article class="card">
+            <pre><code>./scripts/check-immutable-releases.sh
+./scripts/enable-immutable-releases.sh</code></pre>
+            <p class="muted">Run once with repo-admin credentials before relying on immutable release verification.</p>
+          </article>
+          <article class="card">
+            <pre><code>gh release verify v0.1.1
+./scripts/verify-release.sh v0.1.1 ./raph_linux_amd64.tar.gz ./checksums.txt ./checksums.txt.minisig</code></pre>
+            <p class="muted">This checks GitHub release integrity attestations, local asset matches, and build attestations for the supplied files.</p>
+          </article>
+        </div>
+      </div>
     </section>
 
     <section class="section">
@@ -97,7 +117,7 @@ go build ./cmd/raph</code></pre>
           </article>
           <article class="card">
             <pre><code>raph studio --port 4545</code></pre>
-            <p class="muted">Run the Studio smoke test as well for changes that touch the local UI.</p>
+            <p class="muted">Run the Studio smoke test as well for changes that touch the local UI. Studio binds to <code>127.0.0.1</code> by default.</p>
           </article>
         </div>
       </div>

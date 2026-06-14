@@ -41,6 +41,20 @@ archives:
 checksum:
   name_template: checksums.txt
 
+signs:
+  - artifacts: checksum
+    signature: "${artifact}.minisig"
+    cmd: go
+    args:
+      - run
+      - ./cmd/raph
+      - release
+      - sign
+      - --artifact
+      - "${artifact}"
+      - --signature
+      - "${signature}"
+
 changelog:
   sort: asc
   filters:

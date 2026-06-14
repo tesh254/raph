@@ -7,10 +7,14 @@ on:
 
 permissions:
   contents: write
+  attestations: write
+  id-token: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Validate semantic version tag
         run: |
@@ -20,24 +24,64 @@ jobs:
           }
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
           cache: true
 
+      - name: Require immutable releases
+        run: |
+          set -euo pipefail
+          gh api -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2026-03-10" "repos/${GITHUB_REPOSITORY}/immutable-releases" >/dev/null
+
       - name: Test
         run: go test ./...
 
+      - name: Vet
+        run: go vet ./...
+
+      - name: Ensure signing secrets exist
+        env:
+          RAPH_MINISIGN_PRIVATE_KEY: ${{ secrets.RAPH_MINISIGN_PRIVATE_KEY }}
+          RAPH_MINISIGN_PASSWORD: ${{ secrets.RAPH_MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$RAPH_MINISIGN_PRIVATE_KEY"
+          test -n "$RAPH_MINISIGN_PASSWORD"
+
       - name: Release
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7
         with:
           distribution: goreleaser
           version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RAPH_MINISIGN_PRIVATE_KEY: ${{ secrets.RAPH_MINISIGN_PRIVATE_KEY }}
+          RAPH_MINISIGN_PASSWORD: ${{ secrets.RAPH_MINISIGN_PASSWORD }}
+
+      - name: Attest release archives from checksums
+        uses: actions/attest@281a49d4cbb0a72c9575a50d18f6deb515a11deb # v4
+        with:
+          subject-checksums: dist/checksums.txt
+
+      - name: Attest checksum assets
+        uses: actions/attest@281a49d4cbb0a72c9575a50d18f6deb515a11deb # v4
+        with:
+          subject-path: |
+            dist/checksums.txt
+            dist/checksums.txt.minisig
+
+      - name: Verify release integrity with gh
+        run: |
+          set -euo pipefail
+          gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+          while IFS= read -r asset; do
+            gh release verify-asset "$GITHUB_REF_NAME" "$asset" --repo "$GITHUB_REPOSITORY"
+            gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY"
+          done < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name 'checksums.txt' -o -name 'checksums.txt.minisig' \) | sort)

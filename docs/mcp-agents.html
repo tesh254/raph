@@ -62,8 +62,10 @@ args: ["start"]</code></pre>
           <article class="card">
             <h3>Memory and retrieval</h3>
             <ul class="plain-list">
-              <li><code>memory_store</code> writes scoped memory with lifecycle metadata, source, writer, revision, tags, and timestamps.</li>
-              <li><code>memory_delete</code> retires matching active memory instead of deleting unrelated graph nodes.</li>
+              <li><code>store_memory</code> writes scoped memory with lifecycle metadata, source, writer, revision, tags, and timestamps.</li>
+              <li><code>update_memory</code> keeps stable keys current while preserving previous revisions.</li>
+              <li><code>deprecate_memory</code> retires stale records instead of deleting unrelated graph nodes.</li>
+              <li><code>search_project_knowledge</code>, <code>search_shared_knowledge</code>, and <code>search_global_preferences</code> retrieve scoped memory directly.</li>
               <li><code>hybrid_semantic_search</code>, <code>multi_query_search</code>, and <code>best_vector_match</code> search memory, code, and docs.</li>
             </ul>
           </article>
@@ -76,6 +78,43 @@ args: ["start"]</code></pre>
             </ul>
           </article>
         </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="panel">
+        <div class="kicker">Durable handoff</div>
+        <h2>Make repo memory explicit.</h2>
+        <p class="section-intro">Agents should search project memory at startup, use project scope for repo-specific facts, and write durable decisions before finishing. Project scope can infer <code>scope_id</code> from the current workspace; set <code>project.identity_override</code> when the same repo appears at different checkout paths.</p>
+        <div class="grid two">
+          <article class="card">
+            <h3>Start-of-task lookup</h3>
+            <pre><code>{
+  "tool": "search_project_knowledge",
+  "arguments": {
+    "query": "release signing CI setup gotchas",
+    "limit": 5
+  }
+}</code></pre>
+          </article>
+          <article class="card">
+            <h3>End-of-task memory</h3>
+            <pre><code>{
+  "tool": "store_memory",
+  "arguments": {
+    "scope_type": "project",
+    "knowledge_type": "workflow",
+    "memory_key": "release/signing",
+    "title": "Release signing workflow",
+    "content": "This repo uses minisign signatures, immutable GitHub releases, and verifies release artifacts with `gh release verify`.",
+    "source": "conversation",
+    "writer_id": "agent:opencode",
+    "tags": ["release", "signing", "github"]
+  }
+}</code></pre>
+          </article>
+        </div>
+        <p class="section-intro">Good project keys are stable and path-like: <code>repo/setup</code>, <code>release/signing</code>, <code>ci/known-issues</code>, and <code>agent/constraints</code>. Store decisions, setup facts, gotchas, commands, and constraints; avoid global scope unless the memory applies across repositories.</p>
       </div>
     </section>
 

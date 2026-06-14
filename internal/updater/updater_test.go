@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"testing"
+	"time"
 )
 
 func TestChecksumFor(t *testing.T) {
@@ -70,5 +71,23 @@ func TestExtractTarGzip(t *testing.T) {
 	}
 	if string(got) != "binary" {
 		t.Fatalf("binary = %q, want binary", got)
+	}
+}
+
+func TestReleaseHTTPClientHasTimeout(t *testing.T) {
+	if releaseHTTPClient == nil {
+		t.Fatal("expected release HTTP client")
+	}
+	if releaseHTTPClient.Timeout != 30*time.Second {
+		t.Fatalf("timeout = %s, want %s", releaseHTTPClient.Timeout, 30*time.Second)
+	}
+}
+
+func TestReleaseHTTPClientTransportDefaults(t *testing.T) {
+	if releaseHTTPClient.Transport != nil {
+		t.Fatalf("transport = %#v, want nil to preserve stdlib defaults", releaseHTTPClient.Transport)
+	}
+	if releaseHTTPClient.CheckRedirect != nil {
+		t.Fatal("unexpected custom redirect handler")
 	}
 }

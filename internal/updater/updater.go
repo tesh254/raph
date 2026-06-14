@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"raph/internal/signing"
+
 	"github.com/minio/selfupdate"
 	"golang.org/x/mod/semver"
 )
@@ -27,6 +29,7 @@ const (
 	repository      = "tesh254/raph"
 	checkInterval   = 24 * time.Hour
 	maxDownloadSize = 250 << 20
+	requestTimeout  = 30 * time.Second
 )
 
 type Result struct {
@@ -44,6 +47,8 @@ type asset struct {
 	Name string `json:"name"`
 	URL  string `json:"browser_download_url"`
 }
+
+var releaseHTTPClient = &http.Client{Timeout: requestTimeout}
 
 func Update(ctx context.Context, current string) (Result, error) {
 	result := Result{Current: current}
@@ -69,10 +74,21 @@ func Update(ctx context.Context, current string) (Result, error) {
 	if err != nil {
 		return result, err
 	}
+	checksumsSigURL, err := findAsset(latest.Assets, "checksums.txt.minisig")
+	if err != nil {
+		return result, err
+	}
 
 	checksums, err := download(ctx, checksumsURL)
 	if err != nil {
 		return result, fmt.Errorf("download checksums: %w", err)
+	}
+	checksumsSignature, err := download(ctx, checksumsSigURL)
+	if err != nil {
+		return result, fmt.Errorf("download checksum signature: %w", err)
+	}
+	if err := signing.VerifyTrustedMessage(checksums, checksumsSignature); err != nil {
+		return result, fmt.Errorf("verify checksum signature: %w", err)
 	}
 	want, err := checksumFor(checksums, archiveName)
 	if err != nil {
@@ -140,7 +156,7 @@ func latestRelease(ctx context.Context) (release, error) {
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "raph-updater")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := releaseHTTPClient.Do(req)
 	if err != nil {
 		return value, err
 	}
@@ -179,7 +195,7 @@ func download(ctx context.Context, url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := releaseHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

@@ -14,6 +14,7 @@ import (
 	"raph/internal/db"
 	"raph/internal/indexer"
 	serverpkg "raph/internal/mcp"
+	"raph/internal/signing"
 	"raph/internal/studio"
 	"raph/internal/syncer"
 	"raph/internal/updater"
@@ -22,6 +23,8 @@ import (
 
 	"github.com/spf13/cobra"
 )
+
+const autoUpdateEnvVar = "RAPH_AUTO_UPDATE"
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
@@ -44,7 +47,7 @@ func newRootCmd() *cobra.Command {
 				_ = os.Setenv("RAPH_VERBOSE", "1")
 				verbose.Printf("command=%s args=%v", cmd.CommandPath(), args)
 			}
-			if cmd.Name() == "update" || version.Version == "dev" || !updater.ShouldAutoCheck() {
+			if cmd.Name() == "update" || version.Version == "dev" || os.Getenv(autoUpdateEnvVar) != "1" || !updater.ShouldAutoCheck() {
 				return
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
@@ -66,6 +69,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newClearCmd())
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newUpdateCmd())
+	rootCmd.AddCommand(newReleaseCmd())
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print version, commit, and build date",
@@ -335,6 +339,7 @@ func newStartCmd() *cobra.Command {
 }
 
 func newStudioCmd() *cobra.Command {
+	var host string
 	var port int
 
 	cmd := &cobra.Command{
@@ -355,16 +360,17 @@ func newStudioCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			srv := studio.NewStudioServer(store, port)
+			srv := studio.NewStudioServer(store, host, port)
 			srv.SetConfig(cfg)
 			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
 				srv.SetWorkspaceRoot(cwd)
 			}
-			verbose.Printf("launching studio on port=%d", port)
+			verbose.Printf("launching studio on host=%s port=%d", host, port)
 			return srv.Start()
 		},
 	}
 
+	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "Studio server host interface")
 	cmd.Flags().IntVar(&port, "port", 4545, "Studio server port")
 	return cmd
 }
@@ -503,4 +509,89 @@ func newAgentsCmd() *cobra.Command {
 	mcpCmd.AddCommand(setupCmd)
 	agentsCmd.AddCommand(mcpCmd)
 	return agentsCmd
+}
+
+func newReleaseCmd() *cobra.Command {
+	releaseCmd := &cobra.Command{
+		Use:    "release",
+		Short:  "Manage release integrity artifacts",
+		Hidden: true,
+	}
+
+	var artifactPath string
+	var signaturePath string
+	var keyEnv string
+	var passwordEnv string
+	signCmd := &cobra.Command{
+		Use:   "sign",
+		Short: "Create a detached minisign signature for a release artifact",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if artifactPath == "" || signaturePath == "" {
+				return fmt.Errorf("artifact and signature paths are required")
+			}
+			privateKeyText := []byte(os.Getenv(keyEnv))
+			if len(privateKeyText) == 0 {
+				return fmt.Errorf("%s is required", keyEnv)
+			}
+			password := os.Getenv(passwordEnv)
+			privateKey, err := signing.ParsePrivateKey(privateKeyText, password)
+			if err != nil {
+				return err
+			}
+			artifact, err := os.ReadFile(artifactPath)
+			if err != nil {
+				return fmt.Errorf("read artifact: %w", err)
+			}
+			signature, err := signing.SignMessage(privateKey, artifact, "raph release artifact")
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(signaturePath, signature, 0o644); err != nil {
+				return fmt.Errorf("write signature: %w", err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Signed %s -> %s\n", artifactPath, signaturePath)
+			return nil
+		},
+	}
+	signCmd.Flags().StringVar(&artifactPath, "artifact", "", "Artifact file to sign")
+	signCmd.Flags().StringVar(&signaturePath, "signature", "", "Destination signature file")
+	signCmd.Flags().StringVar(&keyEnv, "key-env", signing.DefaultPrivateKeyEnv, "Environment variable containing the encrypted minisign private key")
+	signCmd.Flags().StringVar(&passwordEnv, "password-env", signing.DefaultPasswordEnv, "Environment variable containing the minisign key password")
+	_ = signCmd.MarkFlagRequired("artifact")
+	_ = signCmd.MarkFlagRequired("signature")
+
+	var verifyArtifactPath string
+	var verifySignaturePath string
+	verifyCmd := &cobra.Command{
+		Use:   "verify-signature",
+		Short: "Verify a detached minisign signature against the bundled public key",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if verifyArtifactPath == "" || verifySignaturePath == "" {
+				return fmt.Errorf("artifact and signature paths are required")
+			}
+			artifact, err := os.ReadFile(verifyArtifactPath)
+			if err != nil {
+				return fmt.Errorf("read artifact: %w", err)
+			}
+			signature, err := os.ReadFile(verifySignaturePath)
+			if err != nil {
+				return fmt.Errorf("read signature: %w", err)
+			}
+			if err := signing.VerifyTrustedMessage(artifact, signature); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Verified %s with %s\n", verifyArtifactPath, verifySignaturePath)
+			return nil
+		},
+	}
+	verifyCmd.Flags().StringVar(&verifyArtifactPath, "artifact", "", "Artifact file to verify")
+	verifyCmd.Flags().StringVar(&verifySignaturePath, "signature", "", "Detached signature file")
+	_ = verifyCmd.MarkFlagRequired("artifact")
+	_ = verifyCmd.MarkFlagRequired("signature")
+
+	releaseCmd.AddCommand(signCmd)
+	releaseCmd.AddCommand(verifyCmd)
+	return releaseCmd
 }

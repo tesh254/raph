@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"raph/internal/config"
 	"raph/internal/crawler"
@@ -20,6 +21,7 @@ import (
 type StudioServer struct {
 	store         *db.LibSQLStore
 	config        *config.Config
+	host          string
 	port          int
 	workspaceRoot string
 	seedURL       string
@@ -53,13 +55,26 @@ type SQLiteResponse struct {
 	Tables []db.TableDump `json:"tables"`
 }
 
-func NewStudioServer(store *db.LibSQLStore, port int) *StudioServer {
+const (
+	defaultStudioHost       = "127.0.0.1"
+	studioReadHeaderTimeout = 5 * time.Second
+	studioReadTimeout       = 15 * time.Second
+	studioWriteTimeout      = 30 * time.Second
+	studioIdleTimeout       = 60 * time.Second
+)
+
+func NewStudioServer(store *db.LibSQLStore, host string, port int) *StudioServer {
 	workspaceRoot, err := os.Getwd()
 	if err != nil {
 		workspaceRoot = "."
 	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		host = defaultStudioHost
+	}
 	return &StudioServer{
 		store:         store,
+		host:          host,
 		port:          port,
 		workspaceRoot: workspaceRoot,
 		seedURL:       "https://example.com",
@@ -97,10 +112,22 @@ func (s *StudioServer) Start() error {
 	mux.HandleFunc("/api/actions/clear", s.handleClearDB)
 	mux.HandleFunc("/api/actions/init", s.handleInitDemo)
 
-	addr := ":" + strconv.Itoa(s.port)
-	fmt.Printf("raph Studio active at http://localhost:%d\n", s.port)
+	addr := s.host + ":" + strconv.Itoa(s.port)
+	displayHost := s.host
+	if displayHost == defaultStudioHost {
+		displayHost = "localhost"
+	}
+	fmt.Printf("raph Studio active at http://%s:%d\n", displayHost, s.port)
 	verbose.Printf("studio routes ready at %s", addr)
-	return http.ListenAndServe(addr, mux)
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: studioReadHeaderTimeout,
+		ReadTimeout:       studioReadTimeout,
+		WriteTimeout:      studioWriteTimeout,
+		IdleTimeout:       studioIdleTimeout,
+	}
+	return server.ListenAndServe()
 }
 
 func (s *StudioServer) handleIndex(w http.ResponseWriter, r *http.Request) {
