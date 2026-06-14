@@ -23,17 +23,36 @@
   </header>
 
   <main class="wrap page">
-    <section class="hero">
-      <div class="eyebrow">Documentation hub</div>
-      <h1>Documentation with room to explain the system.</h1>
-      <p class="lead">
-        raph indexes local code, docs, and scoped memory into a graph under <code>~/.raph/</code>, then exposes that graph through MCP and Studio so coding agents can search, traverse, and keep context close to the repo.
-      </p>
-      <div class="cta-row">
-        <a class="button primary" href="getting-started.html">Start here</a>
-        <a class="button" href="mcp-agents.html">Set up MCP</a>
-        <a class="button" href="reference.html">See commands</a>
+    <section class="hero hero-terminal">
+      <div>
+        <div class="eyebrow">Documentation hub</div>
+        <h1>Documentation with room to explain the system.</h1>
+        <p class="lead">
+          raph indexes local code, docs, and scoped memory into a graph under <code>~/.raph/</code>, then exposes that graph through MCP and Studio so coding agents can search, traverse, and keep context close to the repo.
+        </p>
+        <div class="cta-row">
+          <a class="button primary" href="getting-started.html">Start here</a>
+          <a class="button" href="mcp-agents.html">Set up MCP</a>
+          <a class="button" href="reference.html">See commands</a>
+        </div>
       </div>
+
+      <aside class="terminal-demo" aria-label="Animated raph usage walkthrough">
+        <div class="terminal-bar">
+          <span></span><span></span><span></span>
+          <strong>expected use</strong>
+        </div>
+        <div class="terminal-window">
+          <div class="terminal-line step-one"><span>$</span> raph init</div>
+          <div class="terminal-out step-two">config ready at ~/.raph/config.json</div>
+          <div class="terminal-line step-three"><span>$</span> raph index .</div>
+          <div class="terminal-out step-four">indexed code, docs, notes into local graph</div>
+          <div class="terminal-line step-five"><span>$</span> raph search "auth middleware"</div>
+          <div class="terminal-out step-six">3 related nodes found, ranked by graph + vector</div>
+          <div class="terminal-line step-seven"><span>$</span> raph mcp</div>
+          <div class="terminal-out step-eight">agent tools live on stdin/stdout<span class="cursor" aria-hidden="true"></span></div>
+        </div>
+      </aside>
     </section>
 
     <section class="grid three">
