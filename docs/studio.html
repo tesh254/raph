@@ -40,10 +40,21 @@
         <pre><code>raph studio --port 4545</code></pre>
         <p class="section-intro">Studio binds to <code>127.0.0.1</code> by default. Then open <code>http://localhost:4545</code>. For troubleshooting, use <code>raph --verbose studio --port 4545</code>.</p>
       </div>
-      <article class="card callout">
-        <div class="label">Trust boundary</div>
-        <p class="muted">Studio includes local-only maintenance actions that can clear graph data. Use it on trusted local machines only.</p>
-      </article>
+      <div class="stack">
+        <article class="terminal-card" aria-label="Expected Studio output">
+          <div class="terminal-bar"><span></span><span></span><span></span><strong>studio output</strong></div>
+          <div class="terminal-window compact">
+            <div class="terminal-line step-one"><span>$</span> raph studio --port 4545</div>
+            <div class="terminal-out step-two">Studio listening on 127.0.0.1:4545</div>
+            <div class="terminal-out step-three">open http://localhost:4545</div>
+            <div class="terminal-out step-four">graph, search, tables, and node details ready<span class="cursor" aria-hidden="true"></span></div>
+          </div>
+        </article>
+        <article class="card callout">
+          <div class="label">Trust boundary</div>
+          <p class="muted">Studio includes local-only maintenance actions that can clear graph data. Use it on trusted local machines only.</p>
+        </article>
+      </div>
     </section>
 
     <section class="section" id="behavior">

@@ -85,6 +85,16 @@ raph update</code></pre>
 ./scripts/verify-release.sh v0.1.1 ./raph_linux_amd64.tar.gz ./checksums.txt ./checksums.txt.minisig</code></pre>
             <p class="muted">This checks GitHub release integrity attestations, local asset matches, and build attestations for the supplied files.</p>
           </article>
+          <article class="terminal-card" aria-label="Expected release verification output">
+            <div class="terminal-bar"><span></span><span></span><span></span><strong>release check</strong></div>
+            <div class="terminal-window compact">
+              <div class="terminal-line step-one"><span>$</span> gh release verify v0.1.1</div>
+              <div class="terminal-out step-two">release integrity verified</div>
+              <div class="terminal-line step-three"><span>$</span> gh attestation verify raph_linux_amd64.tar.gz --repo tesh254/raph</div>
+              <div class="terminal-out step-four">Loaded digest sha256:...</div>
+              <div class="terminal-out step-five">Verification succeeded<span class="cursor" aria-hidden="true"></span></div>
+            </div>
+          </article>
         </div>
       </div>
     </section>

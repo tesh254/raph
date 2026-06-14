@@ -65,6 +65,17 @@
 RAPH_VERSION=v0.1.0 \
 curl -fsSL https://raw.githubusercontent.com/tesh254/raph/main/install.sh | sh</code></pre>
         </article>
+        <article class="terminal-card" aria-label="Expected install output">
+          <div class="terminal-bar"><span></span><span></span><span></span><strong>install output</strong></div>
+          <div class="terminal-window compact">
+            <div class="terminal-line step-one"><span>$</span> brew install --cask tesh254/raph/raph</div>
+            <div class="terminal-out step-two">Downloading raph_darwin_arm64.tar.gz</div>
+            <div class="terminal-out step-three">Verifying checksums.txt.minisig</div>
+            <div class="terminal-out step-four">raph installed to /opt/homebrew/bin/raph</div>
+            <div class="terminal-line step-five"><span>$</span> raph version</div>
+            <div class="terminal-out step-six">raph v0.1.1<span class="cursor" aria-hidden="true"></span></div>
+          </div>
+        </article>
         <div class="note">Release builds can check for newer stable versions automatically. If you want a fully manual setup, see the update controls on the reference page.</div>
       </div>
     </section>
@@ -82,6 +93,17 @@ curl -fsSL https://raw.githubusercontent.com/tesh254/raph/main/install.sh | sh</
               <li><code>~/.raph/raph.json</code></li>
               <li><code>~/.raph/data/</code></li>
             </ul>
+          </article>
+          <article class="terminal-card" aria-label="Expected config output">
+            <div class="terminal-bar"><span></span><span></span><span></span><strong>config output</strong></div>
+            <div class="terminal-window compact">
+              <div class="terminal-line step-one"><span>$</span> raph config init</div>
+              <div class="terminal-out step-two">created ~/.raph/schema.json</div>
+              <div class="terminal-out step-three">created ~/.raph/raph.json</div>
+              <div class="terminal-out step-four">created ~/.raph/data/</div>
+              <div class="terminal-line step-five"><span>$</span> raph config check</div>
+              <div class="terminal-out step-six">config valid<span class="cursor" aria-hidden="true"></span></div>
+            </div>
           </article>
           <article class="card">
             <pre><code>export OPENROUTER_API_KEY="your-key"</code></pre>
@@ -111,6 +133,17 @@ curl -fsSL https://raw.githubusercontent.com/tesh254/raph/main/install.sh | sh</
             <pre><code>raph agents mcp setup --path .</code></pre>
             <p class="muted">This writes project-scoped MCP config for whichever supported agents are detected.</p>
           </article>
+          <article class="terminal-card" aria-label="Expected indexing output">
+            <div class="terminal-bar"><span></span><span></span><span></span><strong>index output</strong></div>
+            <div class="terminal-window compact">
+              <div class="terminal-line step-one"><span>$</span> raph init --path .</div>
+              <div class="terminal-out step-two">scanning supported files</div>
+              <div class="terminal-out step-three">writing graph nodes and edges</div>
+              <div class="terminal-out step-four">repository registered for sync</div>
+              <div class="terminal-line step-five"><span>$</span> raph agents mcp setup --path .</div>
+              <div class="terminal-out step-six">project MCP config updated<span class="cursor" aria-hidden="true"></span></div>
+            </div>
+          </article>
           <article class="card">
             <h3>Start the MCP server</h3>
             <pre><code>raph start</code></pre>
@@ -135,6 +168,17 @@ curl -fsSL https://raw.githubusercontent.com/tesh254/raph/main/install.sh | sh</
 raph sync --remove --path .
 raph sync --stop</code></pre>
             <p class="muted">Unregistering a repository removes its graph data by default. Pass <code>--keep-data</code> if you only want to stop tracking it.</p>
+          </article>
+          <article class="terminal-card" aria-label="Expected sync status output">
+            <div class="terminal-bar"><span></span><span></span><span></span><strong>sync status</strong></div>
+            <div class="terminal-window compact">
+              <div class="terminal-line step-one"><span>$</span> raph sync --path .</div>
+              <div class="terminal-out step-two">registered /path/to/repo</div>
+              <div class="terminal-out step-three">worker started</div>
+              <div class="terminal-line step-four"><span>$</span> raph sync --status</div>
+              <div class="terminal-out step-five">worker: running</div>
+              <div class="terminal-out step-six">repositories: 1 synced<span class="cursor" aria-hidden="true"></span></div>
+            </div>
           </article>
         </div>
       </div>

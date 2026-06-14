@@ -43,17 +43,27 @@
           <strong>expected use</strong>
         </div>
         <div class="terminal-window">
-          <div class="terminal-line step-one"><span>$</span> raph init</div>
-          <div class="terminal-out step-two">config ready at ~/.raph/config.json</div>
-          <div class="terminal-line step-three"><span>$</span> raph index .</div>
-          <div class="terminal-out step-four">indexed code, docs, notes into local graph</div>
-          <div class="terminal-line step-five"><span>$</span> raph search "auth middleware"</div>
-          <div class="terminal-out step-six">3 related nodes found, ranked by graph + vector</div>
-          <div class="terminal-line step-seven"><span>$</span> raph mcp</div>
-          <div class="terminal-out step-eight">agent tools live on stdin/stdout<span class="cursor" aria-hidden="true"></span></div>
+          <div class="terminal-line step-one"><span>$</span> raph config init</div>
+          <div class="terminal-out step-two">created ~/.raph/schema.json, ~/.raph/raph.json, ~/.raph/data/</div>
+          <div class="terminal-line step-three"><span>$</span> raph init --path .</div>
+          <div class="terminal-out step-four">indexed code, docs, and notes into the local graph</div>
+          <div class="terminal-line step-five"><span>$</span> raph sync --status</div>
+          <div class="terminal-out step-six">worker running; repository registered</div>
+          <div class="terminal-line step-seven"><span>$</span> raph start</div>
+          <div class="terminal-out step-eight">MCP server ready on stdin/stdout<span class="cursor" aria-hidden="true"></span></div>
         </div>
       </aside>
     </section>
+
+    <nav class="docs-rail" aria-label="Documentation sections">
+      <a href="getting-started.html#install"><span>01</span> Install</a>
+      <a href="getting-started.html#bootstrap"><span>02</span> Bootstrap</a>
+      <a href="getting-started.html#index"><span>03</span> Index</a>
+      <a href="getting-started.html#sync"><span>04</span> Sync status</a>
+      <a href="mcp-agents.html"><span>05</span> MCP setup</a>
+      <a href="studio.html"><span>06</span> Studio</a>
+      <a href="reference.html"><span>07</span> Release checks</a>
+    </nav>
 
     <section class="grid three">
       <article class="card">

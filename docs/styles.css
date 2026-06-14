@@ -212,7 +212,8 @@ h3 {
   color: #fff;
 }
 
-.terminal-demo {
+.terminal-demo,
+.terminal-card {
   overflow: hidden;
   border: 1px solid rgba(18, 35, 29, 0.18);
   border-radius: 22px;
@@ -258,6 +259,11 @@ h3 {
   gap: 10px;
   min-height: 332px;
   padding: 18px;
+}
+
+.terminal-window.compact {
+  min-height: 0;
+  align-content: start;
 }
 
 .terminal-line,
@@ -426,6 +432,32 @@ h3 {
   height: 100%;
 }
 
+.docs-rail {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 10px;
+  margin: 8px 0 52px;
+}
+
+.docs-rail a {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  text-decoration: none;
+  box-shadow: 0 10px 24px rgba(18, 30, 25, 0.07);
+}
+
+.docs-rail span {
+  display: block;
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
 .page-links {
   display: flex;
   flex-wrap: wrap;
@@ -507,6 +539,7 @@ h3 {
   .grid.three,
   .grid.four,
   .cards-nav,
+  .docs-rail,
   .row {
     grid-template-columns: 1fr;
   }
