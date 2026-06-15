@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="raph documentation page with sidebar navigation for setup, MCP, Studio, and reference guides.">
+  <title>raph docs | documentation</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="index.html">raph<span>docs</span></a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="index.html">Overview</a>
+        <a href="docs.html" aria-current="page">Docs</a>
+        <a href="getting-started.html">Getting started</a>
+        <a href="mcp-agents.html">MCP and agents</a>
+        <a href="studio.html">Studio</a>
+        <a href="reference.html">Reference</a>
+        <a href="https://github.com/tesh254/raph">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap page">
+    <section class="hero docs-hero">
+      <div class="eyebrow">Documentation</div>
+      <h1>raph usage docs.</h1>
+      <p class="lead">Use the sidebar to move through install, bootstrap, indexing, MCP setup, Studio, and reference material. The focused guide pages go deeper when a section needs more room.</p>
+    </section>
+
+    <div class="docs-layout docs-hub-layout">
+      <aside class="docs-sidebar" aria-label="Documentation navigation">
+        <div class="sidebar-title">Docs</div>
+        <a href="#quickstart">Quickstart</a>
+        <a href="#setup">Setup flow</a>
+        <a href="#agents">MCP and agents</a>
+        <a href="#studio">Studio</a>
+        <a href="#reference">Reference</a>
+      </aside>
+
+      <div class="docs-content">
+        <section class="section split" id="quickstart">
+          <div class="panel">
+            <div class="kicker">Quickstart</div>
+            <h2>Install, index, connect an agent.</h2>
+            <pre><code>brew install --cask tesh254/raph/raph
+raph config init
+export OPENROUTER_API_KEY="your-key"
+raph init --path .
+raph agents mcp setup --path .
+raph start</code></pre>
+          </div>
+          <article class="card">
+            <div class="label">Full guide</div>
+            <h3>Getting started</h3>
+            <p class="muted">Install options, config bootstrapping, indexing modes, sync status, and first-run expectations.</p>
+            <p><a href="getting-started.html">Open getting started</a></p>
+          </article>
+        </section>
+
+        <section class="section" id="setup">
+          <div class="panel">
+            <div class="kicker">Setup flow</div>
+            <h2>The usual local workflow.</h2>
+            <div class="grid two">
+              <article class="card">
+                <h3>1. Bootstrap config</h3>
+                <pre><code>raph config init
+raph config check</code></pre>
+                <p class="muted">Creates local config and data paths under <code>~/.raph/</code>.</p>
+              </article>
+              <article class="card">
+                <h3>2. Index a repository</h3>
+                <pre><code>raph init --path .
+raph init --path . --no-embeddings</code></pre>
+                <p class="muted">Builds the local graph from code, docs, and supported text files.</p>
+              </article>
+              <article class="card">
+                <h3>3. Keep it current</h3>
+                <pre><code>raph sync --path .
+raph sync --status</code></pre>
+                <p class="muted">Runs the background worker and reports registered repository state.</p>
+              </article>
+              <article class="card">
+                <h3>4. Clear when needed</h3>
+                <pre><code>raph sync --remove --path .
+raph clear --yes</code></pre>
+                <p class="muted">Use explicit cleanup commands when rebuilding local graph state.</p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section class="section split" id="agents">
+          <div class="panel">
+            <div class="kicker">MCP and agents</div>
+            <h2>Expose raph to coding agents over stdio.</h2>
+            <pre><code>raph agents mcp setup --path . --dry-run
+raph agents mcp setup --path .
+raph start</code></pre>
+            <p class="section-intro">Project-scoped MCP config keeps agent setup close to the repo while the graph remains local.</p>
+          </div>
+          <article class="card">
+            <div class="label">Full guide</div>
+            <h3>MCP and agents</h3>
+            <p class="muted">Tool surface, durable memory patterns, supported config targets, and config examples.</p>
+            <p><a href="mcp-agents.html">Open MCP guide</a></p>
+          </article>
+        </section>
+
+        <section class="section split" id="studio">
+          <div class="panel">
+            <div class="kicker">Studio</div>
+            <h2>Inspect what the graph contains.</h2>
+            <pre><code>raph studio --port 4545</code></pre>
+            <p class="section-intro">Studio is useful for checking indexed files, memory scope, node metadata, search results, and graph neighbors.</p>
+          </div>
+          <article class="card">
+            <div class="label">Full guide</div>
+            <h3>Studio</h3>
+            <p class="muted">Graph exploration behavior, maintenance actions, and local trust boundary notes.</p>
+            <p><a href="studio.html">Open Studio guide</a></p>
+          </article>
+        </section>
+
+        <section class="section" id="reference">
+          <div class="panel">
+            <div class="kicker">Reference</div>
+            <h2>Commands, updates, and troubleshooting.</h2>
+            <div class="grid two">
+              <article class="card">
+                <h3>Common commands</h3>
+                <pre><code>raph version
+raph update
+raph crawl --single https://example.com/docs/page
+raph sync --stop</code></pre>
+              </article>
+              <article class="card">
+                <h3>More detail</h3>
+                <p class="muted">Reference covers update behavior, release verification, build checks, and setup fixes.</p>
+                <p><a href="reference.html">Open reference</a></p>
+              </article>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">Next: <a href="getting-started.html">start the full setup guide</a></div>
+  </footer>
+</body>
+</html>

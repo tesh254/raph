@@ -13,6 +13,7 @@
       <a class="brand" href="index.html">raph<span>docs</span></a>
       <nav class="nav-links" aria-label="Primary">
         <a href="index.html">Overview</a>
+        <a href="docs.html">Docs</a>
         <a href="getting-started.html">Getting started</a>
         <a href="mcp-agents.html" aria-current="page">MCP and agents</a>
         <a href="studio.html">Studio</a>
@@ -29,7 +30,18 @@
       <p class="lead">This page collects the MCP tool surface, the setup command, and the config file layout used by supported coding agents.</p>
     </section>
 
-    <section class="section split">
+    <div class="docs-layout">
+      <aside class="docs-sidebar" aria-label="On this page">
+        <div class="sidebar-title">On this page</div>
+        <a href="#setup">Setup command</a>
+        <a href="#tools">Tool surface</a>
+        <a href="#memory">Durable handoff</a>
+        <a href="#targets">Agent targets</a>
+        <a href="#config">Config layout</a>
+      </aside>
+
+      <div class="docs-content">
+    <section class="section split" id="setup">
       <div class="panel">
         <div class="kicker">Setup command</div>
         <h2>Generate project-scoped MCP config.</h2>
@@ -57,7 +69,7 @@ args: ["start"]</code></pre>
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" id="tools">
       <div class="panel">
         <div class="kicker">Tool surface</div>
         <h2>What agents can do through MCP.</h2>
@@ -84,7 +96,7 @@ args: ["start"]</code></pre>
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" id="memory">
       <div class="panel">
         <div class="kicker">Durable handoff</div>
         <h2>Make repo memory explicit.</h2>
@@ -121,7 +133,7 @@ args: ["start"]</code></pre>
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" id="targets">
       <div class="panel">
         <div class="kicker">Agent targets</div>
         <h2>Supported config locations.</h2>
@@ -160,7 +172,7 @@ args: ["start"]</code></pre>
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" id="config">
       <div class="panel">
         <div class="kicker">Config layout</div>
         <h2>The config differs by file format, not by behavior.</h2>
@@ -213,6 +225,8 @@ args = ["start"]</code></pre>
         </div>
       </div>
     </section>
+      </div>
+    </div>
   </main>
 
   <footer class="site-footer">

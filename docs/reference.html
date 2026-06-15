@@ -13,6 +13,7 @@
       <a class="brand" href="index.html">raph<span>docs</span></a>
       <nav class="nav-links" aria-label="Primary">
         <a href="index.html">Overview</a>
+        <a href="docs.html">Docs</a>
         <a href="getting-started.html">Getting started</a>
         <a href="mcp-agents.html">MCP and agents</a>
         <a href="studio.html">Studio</a>
@@ -29,7 +30,19 @@
       <p class="lead">Use this page as the practical reference when you need command reminders, local build steps, or the fastest route through a setup issue.</p>
     </section>
 
-    <section class="section">
+    <div class="docs-layout">
+      <aside class="docs-sidebar" aria-label="On this page">
+        <div class="sidebar-title">On this page</div>
+        <a href="#commands">Commands</a>
+        <a href="#updates">Updates</a>
+        <a href="#release">Release integrity</a>
+        <a href="#troubleshooting">Troubleshooting</a>
+        <a href="#build">Build locally</a>
+        <a href="#license">License</a>
+      </aside>
+
+      <div class="docs-content">
+    <section class="section" id="commands">
       <div class="panel">
         <div class="kicker">Command cheat sheet</div>
         <h2>Core commands.</h2>
@@ -55,7 +68,7 @@ raph version</code></pre>
       </div>
     </section>
 
-    <section class="section split">
+    <section class="section split" id="updates">
       <div class="panel">
         <div class="kicker">Updates</div>
         <h2>Stable release updates are built in.</h2>
@@ -70,7 +83,7 @@ raph update</code></pre>
       </article>
     </section>
 
-    <section class="section">
+    <section class="section" id="release">
       <div class="panel">
         <div class="kicker">Release integrity</div>
         <h2>Verify published tags and assets with <code>gh</code>.</h2>
@@ -99,7 +112,7 @@ raph update</code></pre>
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" id="troubleshooting">
       <div class="panel">
         <div class="kicker">Troubleshooting</div>
         <h2>Common setup issues.</h2>
@@ -116,7 +129,7 @@ raph update</code></pre>
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" id="build">
       <div class="panel">
         <div class="kicker">Build locally</div>
         <h2>Verification before merging.</h2>
@@ -133,7 +146,7 @@ go build ./cmd/raph</code></pre>
       </div>
     </section>
 
-    <section class="section">
+    <section class="section" id="license">
       <div class="panel">
         <div class="kicker">License</div>
         <h2>Usage terms.</h2>
@@ -141,6 +154,8 @@ go build ./cmd/raph</code></pre>
         <p><a href="https://github.com/tesh254/raph/blob/main/LICENSE">Read the full license.</a></p>
       </div>
     </section>
+      </div>
+    </div>
   </main>
 
   <footer class="site-footer">

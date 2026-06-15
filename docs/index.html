@@ -13,6 +13,7 @@
       <a class="brand" href="index.html">raph<span>docs</span></a>
       <nav class="nav-links" aria-label="Primary">
         <a href="index.html" aria-current="page">Overview</a>
+        <a href="docs.html">Docs</a>
         <a href="getting-started.html">Getting started</a>
         <a href="mcp-agents.html">MCP and agents</a>
         <a href="studio.html">Studio</a>
@@ -31,7 +32,7 @@
           raph indexes local code, docs, and scoped memory into a graph under <code>~/.raph/</code>, then exposes that graph through MCP and Studio so coding agents can search, traverse, and keep context close to the repo.
         </p>
         <div class="cta-row">
-          <a class="button primary" href="getting-started.html">Start here</a>
+          <a class="button primary" href="docs.html">Read the docs</a>
           <a class="button" href="mcp-agents.html">Set up MCP</a>
           <a class="button" href="reference.html">See commands</a>
         </div>
@@ -44,26 +45,32 @@
         </div>
         <div class="terminal-window">
           <div class="terminal-line step-one"><span>$</span> raph config init</div>
-          <div class="terminal-out step-two">created ~/.raph/schema.json, ~/.raph/raph.json, ~/.raph/data/</div>
-          <div class="terminal-line step-three"><span>$</span> raph init --path .</div>
-          <div class="terminal-out step-four">indexed code, docs, and notes into the local graph</div>
-          <div class="terminal-line step-five"><span>$</span> raph sync --status</div>
-          <div class="terminal-out step-six">worker running; repository registered</div>
-          <div class="terminal-line step-seven"><span>$</span> raph start</div>
-          <div class="terminal-out step-eight">MCP server ready on stdin/stdout<span class="cursor" aria-hidden="true"></span></div>
+          <div class="terminal-out step-two">created ~/.raph/schema.json and ~/.raph/raph.json</div>
+          <div class="terminal-line step-three"><span>$</span> export OPENROUTER_API_KEY="..."</div>
+          <div class="terminal-line step-four"><span>$</span> raph init --path .</div>
+          <div class="terminal-out step-five">indexed code, docs, and notes into the local graph</div>
+          <div class="terminal-line step-six"><span>$</span> raph agents mcp setup --path .</div>
+          <div class="terminal-out step-seven">project MCP config updated</div>
+          <div class="terminal-line step-eight"><span>$</span> raph sync --path .</div>
+          <div class="terminal-out step-nine">worker started for this repository</div>
+          <div class="terminal-line step-ten"><span>$</span> raph studio --port 4545</div>
+          <div class="terminal-out step-eleven">open http://localhost:4545<span class="cursor" aria-hidden="true"></span></div>
         </div>
       </aside>
     </section>
 
-    <nav class="docs-rail" aria-label="Documentation sections">
-      <a href="getting-started.html#install"><span>01</span> Install</a>
-      <a href="getting-started.html#bootstrap"><span>02</span> Bootstrap</a>
-      <a href="getting-started.html#index"><span>03</span> Index</a>
-      <a href="getting-started.html#sync"><span>04</span> Sync status</a>
-      <a href="mcp-agents.html"><span>05</span> MCP setup</a>
-      <a href="studio.html"><span>06</span> Studio</a>
-      <a href="reference.html"><span>07</span> Release checks</a>
-    </nav>
+    <section class="docs-outline" aria-labelledby="docs-outline-title">
+      <div>
+        <div class="kicker">Docs outline</div>
+        <h2 id="docs-outline-title">Docs live on their own page.</h2>
+      </div>
+      <nav class="outline-links" aria-label="Documentation outline">
+        <a href="docs.html#quickstart"><span>01</span><strong>Quickstart</strong> Install, index, connect an agent.</a>
+        <a href="docs.html#setup"><span>02</span><strong>Setup flow</strong> Config, indexing, sync, cleanup.</a>
+        <a href="docs.html#agents"><span>03</span><strong>MCP and agents</strong> Connect coding agents to the local graph.</a>
+        <a href="docs.html#reference"><span>04</span><strong>Reference</strong> Commands, updates, release checks, fixes.</a>
+      </nav>
+    </section>
 
     <section class="grid three">
       <article class="card">
