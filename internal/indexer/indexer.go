@@ -19,6 +19,7 @@ import (
 
 	"raph/internal/config"
 	"raph/internal/db"
+	"raph/internal/verbose"
 )
 
 const (
@@ -44,6 +45,7 @@ type Indexer struct {
 }
 
 func New(store db.GraphStore, cfg *config.Config, root string, skipEmbeddings bool) (*Indexer, error) {
+	verbose.Printf("creating indexer root=%s skipEmbeddings=%t", root, skipEmbeddings)
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve root path: %w", err)
@@ -53,6 +55,7 @@ func New(store db.GraphStore, cfg *config.Config, root string, skipEmbeddings bo
 	if err != nil {
 		return nil, err
 	}
+	verbose.Printf("resolved project identity=%s workspace=%s", projectID, workspaceID(absRoot))
 
 	return &Indexer{
 		store:          store,
@@ -67,16 +70,19 @@ func New(store db.GraphStore, cfg *config.Config, root string, skipEmbeddings bo
 func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	var stats Stats
 
+	verbose.Printf("clearing existing workspace graph workspace=%s", i.workspaceID)
 	if err := i.store.DeleteWorkspace(ctx, i.workspaceID); err != nil {
 		return stats, fmt.Errorf("clear existing workspace graph: %w", err)
 	}
 
+	verbose.Printf("walking directory tree root=%s", i.root)
 	err := filepath.WalkDir(i.root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if d.IsDir() {
 			if shouldSkipDir(d.Name()) {
+				verbose.Printf("skipping directory name=%s", d.Name())
 				return filepath.SkipDir
 			}
 			return nil
@@ -93,6 +99,7 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 		return stats, err
 	}
 
+	verbose.Printf("walk complete files=%d nodes=%d edges=%d embeddings=%d", stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
 	return stats, nil
 }
 
@@ -183,19 +190,22 @@ func (i *Indexer) indexFile(ctx context.Context, path string, stats *Stats) erro
 		return err
 	}
 	if info.Size() > maxFileSizeBytes {
+		verbose.Printf("skipping oversized file path=%s size=%d", path, info.Size())
 		return nil
 	}
+
+	relPath, err := filepath.Rel(i.root, path)
+	if err != nil {
+		return err
+	}
+	relPath = filepath.ToSlash(relPath)
+	verbose.Printf("indexing file=%s domain=%s size=%d", relPath, detectDomain(relPath), info.Size())
 
 	contentBytes, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	content := string(contentBytes)
-	relPath, err := filepath.Rel(i.root, path)
-	if err != nil {
-		return err
-	}
-	relPath = filepath.ToSlash(relPath)
 
 	fileNode := db.Node{
 		ID:        i.nodeID("file", relPath),
@@ -221,6 +231,8 @@ func (i *Indexer) indexFile(ctx context.Context, path string, stats *Stats) erro
 	stats.NodesSaved++
 
 	ext := strings.ToLower(filepath.Ext(relPath))
+	beforeNodes := stats.NodesSaved
+	beforeEdges := stats.EdgesSaved
 	switch ext {
 	case ".md", ".markdown", ".txt", ".rst":
 		if err := i.indexDocumentSections(ctx, relPath, fileNode.ID, content, stats); err != nil {
@@ -236,6 +248,7 @@ func (i *Indexer) indexFile(ctx context.Context, path string, stats *Stats) erro
 		}
 	}
 
+	verbose.Printf("indexed file=%s nodes=+%d edges=+%d", relPath, stats.NodesSaved-beforeNodes, stats.EdgesSaved-beforeEdges)
 	return nil
 }
 

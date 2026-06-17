@@ -35,6 +35,7 @@ func main() {
 
 func newRootCmd() *cobra.Command {
 	var verboseFlag bool
+	var quietFlag bool
 	rootCmd := &cobra.Command{
 		Use:           "raph",
 		Short:         "raph is a local-first graph-vector brain for coding agents",
@@ -42,8 +43,10 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		Version:       version.Full(),
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			verbose.Set(verboseFlag)
-			if verboseFlag {
+			if quietFlag {
+				verbose.Set(false)
+			} else {
+				verbose.Set(true)
 				_ = os.Setenv("RAPH_VERBOSE", "1")
 				verbose.Printf("command=%s args=%v", cmd.CommandPath(), args)
 			}
@@ -58,7 +61,8 @@ func newRootCmd() *cobra.Command {
 			}
 		},
 	}
-	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Print verbose operational logs")
+	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", true, "Print verbose operational logs (enabled by default)")
+	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress verbose operational logs")
 
 	rootCmd.AddCommand(newInitCmd())
 	rootCmd.AddCommand(newCrawlCmd())
@@ -75,6 +79,7 @@ func newRootCmd() *cobra.Command {
 		Short: "Print version, commit, and build date",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			verbose.Printf("version=%s commit=%s date=%s", version.Version, version.Commit, version.Date)
 			fmt.Fprintln(cmd.OutOrStdout(), version.Full())
 		},
 	})
@@ -87,6 +92,9 @@ func newUpdateCmd() *cobra.Command {
 		Short: "Update raph to the latest stable release",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Checking for updates...\n")
+			verbose.Printf("current version=%s", version.Version)
 			ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 			defer cancel()
 			result, err := updater.Update(ctx, version.Version)
@@ -94,10 +102,10 @@ func newUpdateCmd() *cobra.Command {
 				return err
 			}
 			if result.Updated {
-				fmt.Fprintf(cmd.OutOrStdout(), "Updated raph from %s to %s\n", result.Current, result.Latest)
+				fmt.Fprintf(out, "Updated raph from %s to %s\n", result.Current, result.Latest)
 				return nil
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "raph %s is already current\n", result.Current)
+			fmt.Fprintf(out, "raph %s is already current\n", result.Current)
 			return nil
 		},
 	}
@@ -117,12 +125,15 @@ func newSyncCmd() *cobra.Command {
 		Use:   "sync",
 		Short: "Keep indexed repositories synchronized in the background",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
 			if worker {
+				verbose.Printf("starting sync worker in foreground mode interval=%s", interval)
 				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 				defer cancel()
 				return syncer.RunWorker(ctx, interval)
 			}
 			if status {
+				verbose.Printf("querying sync worker status")
 				running, pid, err := syncer.Status()
 				if err != nil {
 					return err
@@ -131,54 +142,62 @@ func newSyncCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				verbose.Printf("status: running=%t pid=%d repositories=%d", running, pid, len(repositories))
 				if running {
-					fmt.Fprintf(cmd.OutOrStdout(), "Sync worker running (pid %d)\n", pid)
+					fmt.Fprintf(out, "Sync worker running (pid %d)\n", pid)
 				} else {
-					fmt.Fprintln(cmd.OutOrStdout(), "Sync worker stopped")
+					fmt.Fprintln(out, "Sync worker stopped")
 				}
 				for _, repo := range repositories {
-					fmt.Fprintf(cmd.OutOrStdout(), "%s (embeddings=%t)\n", repo.Path, !repo.NoEmbeddings)
+					fmt.Fprintf(out, "%s (embeddings=%t)\n", repo.Path, !repo.NoEmbeddings)
 				}
 				return nil
 			}
 			if stop {
+				verbose.Printf("stopping sync worker")
 				stopped, err := syncer.Stop()
 				if err != nil {
 					return err
 				}
 				if stopped {
-					fmt.Fprintln(cmd.OutOrStdout(), "Stopped sync worker")
+					fmt.Fprintln(out, "Stopped sync worker")
 				} else {
-					fmt.Fprintln(cmd.OutOrStdout(), "Sync worker is not running")
+					fmt.Fprintln(out, "Sync worker is not running")
 				}
 				return nil
 			}
 			if remove {
+				verbose.Printf("removing repository from sync path=%s keepData=%t", scanPath, keepData)
 				if err := syncer.Remove(context.Background(), scanPath, !keepData); err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Stopped syncing %s (graph data removed=%t)\n", scanPath, !keepData)
+				fmt.Fprintf(out, "Stopped syncing %s (graph data removed=%t)\n", scanPath, !keepData)
 				return nil
 			}
 
+			fmt.Fprintf(out, "Loading configuration...\n")
 			cfg, err := config.LoadConfigIfPresent()
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(out, "Initializing local storage...\n")
 			store, err := db.InitStorage()
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(out, "Preparing indexer for %s...\n", scanPath)
 			idx, err := indexer.New(store, cfg, scanPath, noEmbeddings)
 			if err != nil {
 				_ = store.Close()
 				return err
 			}
+			fmt.Fprintf(out, "Scanning and indexing files...\n")
 			stats, err := idx.Run(context.Background())
 			_ = store.Close()
 			if err != nil {
 				return err
 			}
+			verbose.Printf("index complete path=%s files=%d nodes=%d edges=%d embeddings=%d", scanPath, stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
 			repo, err := syncer.Register(scanPath, noEmbeddings)
 			if err != nil {
 				return err
@@ -187,11 +206,11 @@ func newSyncCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Sync enabled for %s: %d files, %d nodes, %d edges\n", repo.Path, stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved)
+			fmt.Fprintf(out, "Sync enabled for %s: %d files, %d nodes, %d edges\n", repo.Path, stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved)
 			if started {
-				fmt.Fprintln(cmd.OutOrStdout(), "Background sync worker started")
+				fmt.Fprintln(out, "Background sync worker started")
 			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), "Background sync worker already running")
+				fmt.Fprintln(out, "Background sync worker already running")
 			}
 			return nil
 		},
@@ -216,22 +235,35 @@ func newInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Scan a workspace and build graph relationships in local storage",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+
+			fmt.Fprintf(out, "Loading configuration...\n")
 			cfg, err := config.LoadConfigIfPresent()
 			if err != nil {
 				return err
 			}
+			if cfg == nil {
+				fmt.Fprintf(out, "  No config found — embeddings will be skipped (keyword search still available)\n")
+			} else if cfg.HasEmbeddingProvider() {
+				fmt.Fprintf(out, "  Embedding provider: %s (model: %s)\n", cfg.Vector.CurrentProvider, cfg.Vector.Providers.OpenRouter.Model)
+			} else {
+				fmt.Fprintf(out, "  Config loaded but no embedding API key resolved — embeddings will be skipped\n")
+			}
 
+			fmt.Fprintf(out, "Initializing local storage...\n")
 			store, err := db.InitStorage()
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
+			fmt.Fprintf(out, "Preparing indexer for %s...\n", scanPath)
 			idx, err := indexer.New(store, cfg, scanPath, noEmbeddings)
 			if err != nil {
 				return err
 			}
 
+			fmt.Fprintf(out, "Scanning and indexing files...\n")
 			stats, err := idx.Run(context.Background())
 			if err != nil {
 				return err
@@ -246,15 +278,16 @@ func newInitCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Indexed %d files, %d nodes, %d edges, %d embeddings\n", stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
-			fmt.Fprintf(cmd.OutOrStdout(), "Watcher armed for %s\n", repo.Path)
+			fmt.Fprintf(out, "\n")
+			fmt.Fprintf(out, "Indexed %d files, %d nodes, %d edges, %d embeddings\n", stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
+			fmt.Fprintf(out, "Watcher armed for %s\n", repo.Path)
 			if started {
-				fmt.Fprintln(cmd.OutOrStdout(), "Background sync worker started")
+				fmt.Fprintln(out, "Background sync worker started")
 			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), "Background sync worker already running")
+				fmt.Fprintln(out, "Background sync worker already running")
 			}
 			if !noEmbeddings && (cfg == nil || !cfg.HasEmbeddingProvider()) {
-				fmt.Fprintln(cmd.OutOrStdout(), "No resolved embedding provider key found; graph was indexed without embeddings. Run `raph config init` and set OPENROUTER_API_KEY to enable semantic search.")
+				fmt.Fprintln(out, "No resolved embedding provider key found; graph was indexed without embeddings. Run `raph config init` and set OPENROUTER_API_KEY to enable semantic search.")
 			}
 			return nil
 		},
@@ -272,17 +305,26 @@ func newCrawlCmd() *cobra.Command {
 		Short: "Crawl a documentation site into the local graph store",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Loading configuration...\n")
 			cfg, err := config.LoadConfig()
 			if err != nil {
 				return err
 			}
 
+			fmt.Fprintf(out, "Initializing local storage...\n")
 			store, err := db.InitStorage()
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
+			mode := "full crawl"
+			if single {
+				mode = "single page"
+			}
+			fmt.Fprintf(out, "Creating %s crawler for %s...\n", mode, args[0])
+			verbose.Printf("crawl url=%s single=%t", args[0], single)
 			var docCrawler *crawler.DocumentationCrawler
 			if single {
 				docCrawler, err = crawler.NewSinglePageCrawler(store, cfg, args[0])
@@ -293,13 +335,15 @@ func newCrawlCmd() *cobra.Command {
 				return err
 			}
 
+			fmt.Fprintf(out, "Crawling and indexing pages...\n")
 			ctx := context.Background()
 			if err := docCrawler.Run(ctx); err != nil {
 				return err
 			}
 
 			stats := docCrawler.Stats()
-			fmt.Fprintf(cmd.OutOrStdout(), "Crawl completed for %s: %d pages, %d chunks, %d embeddings\n", args[0], stats.PagesIndexed, stats.ChunksIndexed, stats.EmbeddingsCreated)
+			verbose.Printf("crawl complete pages=%d chunks=%d embeddings=%d", stats.PagesIndexed, stats.ChunksIndexed, stats.EmbeddingsCreated)
+			fmt.Fprintf(out, "Crawl completed for %s: %d pages, %d chunks, %d embeddings\n", args[0], stats.PagesIndexed, stats.ChunksIndexed, stats.EmbeddingsCreated)
 			return nil
 		},
 	}
@@ -312,6 +356,7 @@ func newStartCmd() *cobra.Command {
 		Use:   "start",
 		Short: "Start the MCP server over stdio",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			verbose.Printf("loading config for MCP start")
 			cfg, err := config.LoadConfigIfPresent()
 			if err != nil {
 				return err
@@ -320,19 +365,23 @@ func newStartCmd() *cobra.Command {
 			if cfg == nil {
 				fmt.Fprintln(os.Stderr, "raph: no config found, semantic embeddings disabled; keyword search fallback remains available")
 			}
+			verbose.Printf("starting background sync worker")
 			if started, err := syncer.Start(2 * time.Second); err != nil {
 				verbose.Printf("sync worker start skipped: %v", err)
 			} else if started {
 				verbose.Printf("sync worker started for MCP session")
 			}
 
+			verbose.Printf("initializing local storage")
 			store, err := db.InitStorage()
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
+			verbose.Printf("creating MCP server wrapper")
 			server := serverpkg.NewMCPServerWrapper(store, cfg)
+			verbose.Printf("starting MCP server over stdio")
 			return server.Run(context.Background())
 		},
 	}
@@ -346,6 +395,8 @@ func newStudioCmd() *cobra.Command {
 		Use:   "studio",
 		Short: "Launch the local graph explorer UI",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Loading configuration...\n")
 			cfg, err := config.LoadConfigIfPresent()
 			if err != nil {
 				return err
@@ -354,6 +405,7 @@ func newStudioCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "raph: no config found, semantic embeddings disabled; keyword search fallback remains available")
 			}
 
+			fmt.Fprintf(out, "Initializing local storage...\n")
 			store, err := db.InitStorage()
 			if err != nil {
 				return err
@@ -364,8 +416,10 @@ func newStudioCmd() *cobra.Command {
 			srv.SetConfig(cfg)
 			if cwd, cwdErr := os.Getwd(); cwdErr == nil {
 				srv.SetWorkspaceRoot(cwd)
+				verbose.Printf("workspace root=%s", cwd)
 			}
 			verbose.Printf("launching studio on host=%s port=%d", host, port)
+			fmt.Fprintf(out, "Starting raph Studio at http://%s:%d...\n", host, port)
 			return srv.Start()
 		},
 	}
@@ -382,21 +436,24 @@ func newClearCmd() *cobra.Command {
 		Use:   "clear",
 		Short: "Clear all nodes and edges from local storage",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
 			if !yes {
 				return fmt.Errorf("refusing to clear graph without --yes")
 			}
 
+			fmt.Fprintf(out, "Initializing local storage...\n")
 			store, err := db.InitStorage()
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 
+			verbose.Printf("clearing all nodes, edges, memory records, and web corpora")
 			if err := store.ClearAll(context.Background()); err != nil {
 				return err
 			}
 
-			fmt.Fprintln(cmd.OutOrStdout(), "Cleared local graph database")
+			fmt.Fprintln(out, "Cleared local graph database")
 			return nil
 		},
 	}
@@ -416,12 +473,14 @@ func newConfigCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Create ~/.raph/schema.json and ~/.raph/raph.json",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Writing default config files (overwrite=%t)...\n", overwrite)
 			paths, err := config.WriteDefaultFiles(overwrite)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Wrote config assets under %s\n", paths.BaseDir)
-			fmt.Fprintf(cmd.OutOrStdout(), "Schema: %s\nConfig: %s\n", paths.SchemaFile, paths.ConfigFile)
+			fmt.Fprintf(out, "Wrote config assets under %s\n", paths.BaseDir)
+			fmt.Fprintf(out, "Schema: %s\nConfig: %s\n", paths.SchemaFile, paths.ConfigFile)
 			return nil
 		},
 	})
@@ -431,6 +490,7 @@ func newConfigCmd() *cobra.Command {
 		Use:   "path",
 		Short: "Print configuration and data paths",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			verbose.Printf("resolving config paths")
 			paths, err := config.GetConfigPaths()
 			if err != nil {
 				return err
@@ -444,6 +504,8 @@ func newConfigCmd() *cobra.Command {
 		Use:   "check",
 		Short: "Validate the current config file",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Loading and validating config...\n")
 			cfg, err := config.LoadConfig()
 			if err != nil {
 				if errors.Is(err, config.ErrConfigNotFound) {
@@ -451,7 +513,8 @@ func newConfigCmd() *cobra.Command {
 				}
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Config OK. Provider=%s Model=%s EmbeddingsEnabled=%t\n", cfg.Vector.CurrentProvider, cfg.Vector.Providers.OpenRouter.Model, cfg.HasEmbeddingProvider())
+			verbose.Printf("config valid provider=%s model=%s embeddings=%t", cfg.Vector.CurrentProvider, cfg.Vector.Providers.OpenRouter.Model, cfg.HasEmbeddingProvider())
+			fmt.Fprintf(out, "Config OK. Provider=%s Model=%s EmbeddingsEnabled=%t\n", cfg.Vector.CurrentProvider, cfg.Vector.Providers.OpenRouter.Model, cfg.HasEmbeddingProvider())
 			return nil
 		},
 	})
@@ -475,10 +538,13 @@ func newAgentsCmd() *cobra.Command {
 		Use:   "setup",
 		Short: "Install or refresh project MCP config for supported coding agents",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Setting up MCP config for supported agents (dryRun=%t)...\n", dryRun)
 			result, err := agentsetup.Setup(agentsetup.Options{Root: path, DryRun: dryRun})
 			if err != nil {
 				return err
 			}
+			verbose.Printf("setup complete root=%s agents=%d", result.Root, len(result.Outcomes))
 
 			if dryRun {
 				fmt.Fprintf(cmd.OutOrStdout(), "Preview only for %s\n", result.Root)
@@ -527,9 +593,11 @@ func newReleaseCmd() *cobra.Command {
 		Short: "Create a detached minisign signature for a release artifact",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
 			if artifactPath == "" || signaturePath == "" {
 				return fmt.Errorf("artifact and signature paths are required")
 			}
+			fmt.Fprintf(out, "Loading signing key from %s...\n", keyEnv)
 			privateKeyText := []byte(os.Getenv(keyEnv))
 			if len(privateKeyText) == 0 {
 				return fmt.Errorf("%s is required", keyEnv)
@@ -539,18 +607,21 @@ func newReleaseCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			verbose.Printf("reading artifact path=%s", artifactPath)
 			artifact, err := os.ReadFile(artifactPath)
 			if err != nil {
 				return fmt.Errorf("read artifact: %w", err)
 			}
+			verbose.Printf("signing artifact size=%d", len(artifact))
 			signature, err := signing.SignMessage(privateKey, artifact, "raph release artifact")
 			if err != nil {
 				return err
 			}
+			verbose.Printf("writing signature path=%s size=%d", signaturePath, len(signature))
 			if err := os.WriteFile(signaturePath, signature, 0o644); err != nil {
 				return fmt.Errorf("write signature: %w", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Signed %s -> %s\n", artifactPath, signaturePath)
+			fmt.Fprintf(out, "Signed %s -> %s\n", artifactPath, signaturePath)
 			return nil
 		},
 	}
@@ -568,21 +639,26 @@ func newReleaseCmd() *cobra.Command {
 		Short: "Verify a detached minisign signature against the bundled public key",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
 			if verifyArtifactPath == "" || verifySignaturePath == "" {
 				return fmt.Errorf("artifact and signature paths are required")
 			}
+			fmt.Fprintf(out, "Loading artifact and signature...\n")
+			verbose.Printf("reading artifact path=%s", verifyArtifactPath)
 			artifact, err := os.ReadFile(verifyArtifactPath)
 			if err != nil {
 				return fmt.Errorf("read artifact: %w", err)
 			}
+			verbose.Printf("reading signature path=%s", verifySignaturePath)
 			signature, err := os.ReadFile(verifySignaturePath)
 			if err != nil {
 				return fmt.Errorf("read signature: %w", err)
 			}
+			verbose.Printf("verifying signature artifactSize=%d signatureSize=%d", len(artifact), len(signature))
 			if err := signing.VerifyTrustedMessage(artifact, signature); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Verified %s with %s\n", verifyArtifactPath, verifySignaturePath)
+			fmt.Fprintf(out, "Verified %s with %s\n", verifyArtifactPath, verifySignaturePath)
 			return nil
 		},
 	}

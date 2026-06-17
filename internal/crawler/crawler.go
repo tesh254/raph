@@ -13,6 +13,7 @@ import (
 
 	"raph/internal/config"
 	"raph/internal/db"
+	"raph/internal/verbose"
 
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
@@ -54,6 +55,7 @@ func NewSinglePageCrawler(store db.GraphStore, cfg *config.Config, rawURL string
 }
 
 func newDocumentationCrawler(store db.GraphStore, cfg *config.Config, rawURL string, followLinks bool) (*DocumentationCrawler, error) {
+	verbose.Printf("creating crawler url=%s followLinks=%t", rawURL, followLinks)
 	if store == nil {
 		return nil, fmt.Errorf("graph store is required")
 	}
@@ -115,21 +117,26 @@ func (c *DocumentationCrawler) Run(ctx context.Context) error {
 	}
 	c.runCtx = ctx
 
+	verbose.Printf("registering web corpus")
 	if err := c.registerCorpus(ctx); err != nil {
 		return err
 	}
+	verbose.Printf("ensuring site node")
 	if err := c.ensureSiteNode(ctx); err != nil {
 		return err
 	}
 
+	verbose.Printf("visiting seed url=%s", c.seedURL)
 	if err := c.collector.Visit(c.seedURL); err != nil {
 		return err
 	}
+	verbose.Printf("waiting for crawler to finish")
 	c.collector.Wait()
 
 	if err := c.getErr(); err != nil {
 		return err
 	}
+	verbose.Printf("crawl run complete")
 	return ctx.Err()
 }
 
@@ -172,9 +179,11 @@ func (c *DocumentationCrawler) registerCallbacks() {
 
 	c.collector.OnError(func(r *colly.Response, err error) {
 		if r != nil && r.Request != nil && r.Request.URL != nil {
+			verbose.Printf("crawl error url=%s err=%v", r.Request.URL.String(), err)
 			c.setErr(fmt.Errorf("crawl %s: %w", r.Request.URL.String(), err))
 			return
 		}
+		verbose.Printf("crawl error err=%v", err)
 		c.setErr(err)
 	})
 
@@ -189,6 +198,7 @@ func (c *DocumentationCrawler) registerCallbacks() {
 			return
 		}
 
+		verbose.Printf("processing page url=%s", pageURL)
 		markdown, err := c.extractMarkdown(e, pageURL)
 		if err != nil {
 			c.setErr(fmt.Errorf("extract markdown for %s: %w", pageURL, err))
@@ -221,6 +231,7 @@ func (c *DocumentationCrawler) registerCallbacks() {
 
 		c.markPageKnown(pageURL)
 		c.recordPage()
+		verbose.Printf("page saved url=%s title=%s", pageURL, title)
 
 		if err := c.ingestSections(ctx, pageURL, title, markdown); err != nil {
 			c.setErr(err)
@@ -271,6 +282,7 @@ func (c *DocumentationCrawler) registerCallbacks() {
 
 func (c *DocumentationCrawler) ingestSections(ctx context.Context, pageURL string, pageTitle string, markdown string) error {
 	sections := splitMarkdownSections(markdown, pageTitle)
+	verbose.Printf("ingesting sections page=%s count=%d", pageURL, len(sections))
 	for idx, section := range sections {
 		if strings.TrimSpace(section.Content) == "" {
 			continue
