@@ -17,7 +17,7 @@ This repository now includes:
 - codebase chunk indexing for non-Go files so README, docs, config, and other text assets are searchable alongside symbols
 - GoReleaser releases for macOS, Linux, and Windows
 - verified POSIX and PowerShell installers
-- an in-repository Homebrew tap
+- a dedicated Homebrew tap repository
 - explicit stable-version updates with optional opt-in auto-update
 - detached minisign signatures for release checksums
 - GitHub artifact attestations and `gh` verification hooks for releases
@@ -202,7 +202,7 @@ irm https://raw.githubusercontent.com/tesh254/raph/main/install.ps1 | iex
 
 ### Homebrew
 
-This repository is its own tap. GoReleaser writes `Casks/raph.rb` on each stable release.
+Homebrew installs `raph` from dedicated tap repository at [`tesh254/homebrew-raph`](https://github.com/tesh254/homebrew-raph). Stable releases sync cask file there automatically, including fresh version and checksum values.
 
 ```sh
 brew install --cask tesh254/raph/raph
@@ -265,6 +265,9 @@ The release workflow also requires these repository secrets:
 
 - `RAPH_MINISIGN_PRIVATE_KEY`
 - `RAPH_MINISIGN_PASSWORD`
+- `HOMEBREW_TAP_GITHUB_TOKEN`
+
+`HOMEBREW_TAP_GITHUB_TOKEN` must be token for `tesh254` with write access to both `tesh254/raph` and `tesh254/homebrew-raph`, because GoReleaser creates release assets in source repo and updates cask in dedicated tap repo during same run.
 
 Merges to `main` now auto-create and push a semantic version tag through `.github/workflows/version-tag.yml`.
 
@@ -277,7 +280,7 @@ Bump rules follow conventional commits across commits since the previous tag:
 
 `.github/workflows/version-tag.yml` now calls `.github/workflows/release.yml` immediately after pushing the tag, because tags created by GitHub Actions do not start a second workflow run on their own. Direct manual tag pushes still trigger `.github/workflows/release.yml`.
 
-`.github/workflows/release.yml` validates the generated tag, requires immutable releases, runs tests, signs `checksums.txt`, publishes release archives, generates GitHub artifact attestations, verifies the finished release with `gh`, and updates the Homebrew cask in this repository.
+`.github/workflows/release.yml` validates generated tag, requires immutable releases, runs tests, signs `checksums.txt`, publishes release archives, generates GitHub artifact attestations, and syncs `Casks/raph.rb` to `tesh254/homebrew-raph` with updated version and checksum values.
 
 Manual tags still work when needed:
 

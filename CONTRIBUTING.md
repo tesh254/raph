@@ -51,7 +51,8 @@ Examples:
 - Workflow computes next semantic version and pushes tag
 - The same workflow then calls `.github/workflows/release.yml` so action-created tags still publish a release
 - Manual tag pushes still trigger `.github/workflows/release.yml`
-- GoReleaser publishes release artifacts and updates cask metadata
+- GoReleaser publishes release artifacts and syncs cask metadata to `tesh254/homebrew-raph`
+- `HOMEBREW_TAP_GITHUB_TOKEN` must have write access to both `tesh254/raph` and `tesh254/homebrew-raph`
 
 Manual tags still work:
 
