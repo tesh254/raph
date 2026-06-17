@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"raph/internal/signing"
+	"raph/internal/verbose"
 
 	"github.com/minio/selfupdate"
 	"golang.org/x/mod/semver"
@@ -52,20 +53,25 @@ var releaseHTTPClient = &http.Client{Timeout: requestTimeout}
 
 func Update(ctx context.Context, current string) (Result, error) {
 	result := Result{Current: current}
+	verbose.Printf("update check current=%s", current)
 	if !semver.IsValid(current) {
 		return result, fmt.Errorf("current version %q is not a semantic version", current)
 	}
 
+	verbose.Printf("fetching latest release from GitHub")
 	latest, err := latestRelease(ctx)
 	if err != nil {
 		return result, err
 	}
 	result.Latest = latest.TagName
+	verbose.Printf("latest release=%s", latest.TagName)
 	if semver.Compare(latest.TagName, current) <= 0 {
+		verbose.Printf("already on latest version")
 		return result, nil
 	}
 
 	archiveName := assetName()
+	verbose.Printf("looking for release asset=%s", archiveName)
 	archiveURL, err := findAsset(latest.Assets, archiveName)
 	if err != nil {
 		return result, err
@@ -79,14 +85,17 @@ func Update(ctx context.Context, current string) (Result, error) {
 		return result, err
 	}
 
+	verbose.Printf("downloading checksums url=%s", checksumsURL)
 	checksums, err := download(ctx, checksumsURL)
 	if err != nil {
 		return result, fmt.Errorf("download checksums: %w", err)
 	}
+	verbose.Printf("downloading checksum signature url=%s", checksumsSigURL)
 	checksumsSignature, err := download(ctx, checksumsSigURL)
 	if err != nil {
 		return result, fmt.Errorf("download checksum signature: %w", err)
 	}
+	verbose.Printf("verifying checksum signature")
 	if err := signing.VerifyTrustedMessage(checksums, checksumsSignature); err != nil {
 		return result, fmt.Errorf("verify checksum signature: %w", err)
 	}
@@ -94,25 +103,30 @@ func Update(ctx context.Context, current string) (Result, error) {
 	if err != nil {
 		return result, err
 	}
+	verbose.Printf("downloading release archive url=%s", archiveURL)
 	archive, err := download(ctx, archiveURL)
 	if err != nil {
 		return result, fmt.Errorf("download %s: %w", archiveName, err)
 	}
+	verbose.Printf("verifying archive checksum size=%d", len(archive))
 	got := sha256.Sum256(archive)
 	if !bytes.Equal(got[:], want) {
 		return result, fmt.Errorf("checksum mismatch for %s", archiveName)
 	}
 
+	verbose.Printf("extracting binary from archive")
 	binary, err := extractBinary(archive)
 	if err != nil {
 		return result, err
 	}
+	verbose.Printf("applying self-update binarySize=%d", len(binary))
 	if err := selfupdate.Apply(bytes.NewReader(binary), selfupdate.Options{}); err != nil {
 		if rollbackErr := selfupdate.RollbackError(err); rollbackErr != nil {
 			return result, fmt.Errorf("apply update: %w (rollback failed: %v)", err, rollbackErr)
 		}
 		return result, fmt.Errorf("apply update: %w", err)
 	}
+	verbose.Printf("update applied successfully")
 	result.Updated = true
 	return result, nil
 }

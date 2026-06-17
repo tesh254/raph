@@ -13,6 +13,7 @@ import (
 	"raph/internal/db"
 	"raph/internal/indexer"
 	"raph/internal/memory"
+	"raph/internal/verbose"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -187,6 +188,7 @@ type CrossCorpusNeighborOutput struct {
 }
 
 func NewMCPServerWrapper(store db.GraphStore, cfg *config.Config) *MCPServerWrapper {
+	verbose.Printf("creating MCP server")
 	s := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "raph",
 		Version: "1.0.0",
@@ -194,6 +196,7 @@ func NewMCPServerWrapper(store db.GraphStore, cfg *config.Config) *MCPServerWrap
 
 	wrapper := &MCPServerWrapper{server: s, store: store, config: cfg}
 	wrapper.registerTools()
+	verbose.Printf("MCP server ready with all tools registered")
 	return wrapper
 }
 
@@ -422,6 +425,7 @@ func (m *MCPServerWrapper) registerTools() {
 		Name:        "crawl_url",
 		Description: "Fetches exactly one user-provided HTTP or HTTPS page, extracts readable content, creates chunks, and generates embeddings.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args CrawlURLArgs) (*mcpsdk.CallToolResult, CrawlURLOutput, error) {
+		verbose.Printf("crawl_url tool called url=%s", args.URL)
 		if m.config == nil || !m.config.HasEmbeddingProvider() {
 			return nil, CrawlURLOutput{}, fmt.Errorf("crawl_url requires a configured embedding provider")
 		}
@@ -432,7 +436,9 @@ func (m *MCPServerWrapper) registerTools() {
 		if err := docCrawler.Run(ctx); err != nil {
 			return nil, CrawlURLOutput{}, err
 		}
-		output := CrawlURLOutput{URL: strings.TrimSpace(args.URL), Stats: docCrawler.Stats()}
+		stats := docCrawler.Stats()
+		verbose.Printf("crawl_url complete pages=%d chunks=%d embeddings=%d", stats.PagesIndexed, stats.ChunksIndexed, stats.EmbeddingsCreated)
+		output := CrawlURLOutput{URL: strings.TrimSpace(args.URL), Stats: stats}
 		return textResult(renderJSON(output)), output, nil
 	})
 
@@ -444,21 +450,26 @@ func (m *MCPServerWrapper) registerTools() {
 		if query == "" {
 			return nil, CrawlWebsiteOutput{}, fmt.Errorf("query is required")
 		}
+		verbose.Printf("crawl_website tool called url=%s query=%q", args.URL, query)
 		args.Limit = compactResultLimit(args.Limit)
 		args.MaxChars = compactExcerptLimit(args.MaxChars)
 
+		verbose.Printf("crawl_website creating crawler url=%s", args.URL)
 		docCrawler, err := crawler.NewDocumentationCrawler(m.store, m.config, args.URL)
 		if err != nil {
 			return nil, CrawlWebsiteOutput{}, err
 		}
+		verbose.Printf("crawl_website running crawler")
 		if err := docCrawler.Run(ctx); err != nil {
 			return nil, CrawlWebsiteOutput{}, err
 		}
 
+		verbose.Printf("crawl_website searching crawled workspace query=%q", query)
 		mode, nodes, err := m.searchWorkspace(ctx, docCrawler.WorkspaceID(), query, args.Limit)
 		if err != nil {
 			return nil, CrawlWebsiteOutput{}, err
 		}
+		verbose.Printf("crawl_website search complete mode=%s results=%d", mode, len(nodes))
 		output := CrawlWebsiteOutput{
 			URL:     strings.TrimSpace(args.URL),
 			Query:   query,
@@ -477,6 +488,7 @@ func (m *MCPServerWrapper) registerTools() {
 		if path == "" {
 			path = "."
 		}
+		verbose.Printf("index_codebase tool called path=%s noEmbeddings=%t", path, args.NoEmbeddings)
 		absPath, err := filepath.Abs(path)
 		if err != nil {
 			return nil, IndexCodebaseOutput{}, fmt.Errorf("resolve codebase path: %w", err)
@@ -489,14 +501,17 @@ func (m *MCPServerWrapper) registerTools() {
 			return nil, IndexCodebaseOutput{}, fmt.Errorf("codebase path must be a directory")
 		}
 
+		verbose.Printf("index_codebase creating indexer path=%s", absPath)
 		idx, err := indexer.New(m.store, m.config, absPath, args.NoEmbeddings)
 		if err != nil {
 			return nil, IndexCodebaseOutput{}, err
 		}
+		verbose.Printf("index_codebase running indexer workspace=%s", idx.WorkspaceID())
 		stats, err := idx.Run(ctx)
 		if err != nil {
 			return nil, IndexCodebaseOutput{}, err
 		}
+		verbose.Printf("index_codebase complete files=%d nodes=%d edges=%d embeddings=%d", stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
 		output := IndexCodebaseOutput{Path: absPath, WorkspaceID: idx.WorkspaceID(), Stats: stats}
 		return textResult(renderJSON(output)), output, nil
 	})
@@ -516,17 +531,21 @@ func (m *MCPServerWrapper) registerTools() {
 func (m *MCPServerWrapper) hybridSearch(ctx context.Context, query string, limit int) (SearchOutput, error) {
 	limit = searchLimit(limit)
 	output := SearchOutput{Mode: "keyword"}
+	verbose.Printf("hybrid search query=%q limit=%d", query, limit)
 
 	if m.config != nil && m.config.HasEmbeddingProvider() {
+		verbose.Printf("generating query embedding for semantic search")
 		vec, err := config.GenerateEmbedding(ctx, m.config, query)
 		if err == nil && len(vec) > 0 {
 			nodes, searchErr := m.store.VectorSearch(ctx, vec, limit)
 			if searchErr == nil && len(nodes) > 0 {
 				output.Mode = "semantic"
 				output.Matches = nodes
+				verbose.Printf("semantic search returned %d results", len(nodes))
 				return output, nil
 			}
 		}
+		verbose.Printf("semantic search unavailable, falling back to keyword search")
 	}
 
 	nodes, err := m.store.KeywordSearch(ctx, query, limit)
@@ -534,6 +553,7 @@ func (m *MCPServerWrapper) hybridSearch(ctx context.Context, query string, limit
 		return output, err
 	}
 	output.Matches = nodes
+	verbose.Printf("keyword search returned %d results", len(nodes))
 	return output, nil
 }
 

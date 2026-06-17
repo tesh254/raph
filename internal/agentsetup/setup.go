@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+
+	"raph/internal/verbose"
 )
 
 type Options struct {
@@ -47,6 +49,7 @@ func Setup(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve project root: %w", err)
 	}
+	verbose.Printf("agents mcp setup root=%s dryRun=%t", absRoot, opts.DryRun)
 
 	specs := []agentSpec{
 		{
@@ -126,6 +129,7 @@ func Setup(opts Options) (Result, error) {
 		installed := err == nil
 		configPath := spec.ConfigPath(absRoot)
 
+		verbose.Printf("agent=%s installed=%t configPath=%s", spec.Name, installed, configPath)
 		changed, writeErr := spec.Write(configPath, opts.DryRun)
 		if writeErr != nil {
 			return Result{}, fmt.Errorf("%s config: %w", spec.Name, writeErr)

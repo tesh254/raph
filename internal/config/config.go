@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"raph/internal/verbose"
 )
 
 var ErrConfigNotFound = errors.New("raph config file not found")
@@ -128,6 +130,7 @@ func EnsureBaseLayout() (Paths, error) {
 		return Paths{}, err
 	}
 
+	verbose.Printf("ensuring base layout base=%s data=%s", paths.BaseDir, paths.DataDir)
 	for _, dir := range []string{paths.BaseDir, paths.DataDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return Paths{}, fmt.Errorf("failed creating %s: %w", dir, err)
@@ -143,6 +146,7 @@ func WriteDefaultFiles(overwrite bool) (Paths, error) {
 		return Paths{}, err
 	}
 
+	verbose.Printf("writing config files schema=%s config=%s overwrite=%t", paths.SchemaFile, paths.ConfigFile, overwrite)
 	if err := writeIfNeeded(paths.SchemaFile, DefaultSchemaJSON, overwrite); err != nil {
 		return Paths{}, err
 	}
@@ -174,6 +178,7 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
+	verbose.Printf("loading config file=%s", paths.ConfigFile)
 	fileBytes, err := os.ReadFile(paths.ConfigFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

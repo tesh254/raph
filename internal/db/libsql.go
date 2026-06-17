@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"raph/internal/config"
+	"raph/internal/verbose"
 
 	_ "modernc.org/sqlite"
 )
@@ -142,6 +143,7 @@ func InitStorage() (*LibSQLStore, error) {
 	}
 
 	dbFile := filepath.Join(paths.DataDir, "brain.db")
+	verbose.Printf("opening database file=%s", dbFile)
 	db, err := sql.Open("sqlite", dbFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open embedded database: %w", err)
@@ -149,10 +151,12 @@ func InitStorage() (*LibSQLStore, error) {
 
 	db.SetMaxOpenConns(1)
 	store := &LibSQLStore{db: db}
+	verbose.Printf("running database migrations...")
 	if err := store.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	verbose.Printf("database migrations complete")
 	return store, nil
 }
 
