@@ -78,7 +78,7 @@ homebrew_casks:
       - raph
     repository:
       owner: tesh254
-      name: raph
+      name: homebrew-raph
       branch: main
     directory: Casks
     homepage: "https://tesh254.github.io/raph/"
