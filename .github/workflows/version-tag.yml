@@ -95,4 +95,5 @@ jobs:
           fi
           git tag -a "$NEXT_TAG" -m "release: $NEXT_TAG"
           git push origin "$NEXT_TAG"
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" -f tag="$NEXT_TAG"
           echo "Created $NEXT_TAG from ${LAST_TAG:-initial release} using $BUMP bump"
