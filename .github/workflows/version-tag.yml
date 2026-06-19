@@ -96,10 +96,3 @@ jobs:
           git tag -a "$NEXT_TAG" -m "release: $NEXT_TAG"
           git push origin "$NEXT_TAG"
           echo "Created $NEXT_TAG from ${LAST_TAG:-initial release} using $BUMP bump"
-
-  release:
-    needs: tag
-    uses: ./.github/workflows/release.yml
-    with:
-      tag: ${{ needs.tag.outputs.next_tag }}
-    secrets: inherit
