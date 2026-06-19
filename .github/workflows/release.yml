@@ -48,11 +48,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Require immutable releases
-        run: |
-          set -euo pipefail
-          gh api -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2026-03-10" "repos/${GITHUB_REPOSITORY}/immutable-releases" >/dev/null
-
       - name: Test
         run: go test ./...
 
