@@ -54,6 +54,38 @@ Examples:
 - GoReleaser publishes release artifacts and syncs cask metadata to `tesh254/homebrew-raph`
 - `HOMEBREW_TAP_GITHUB_TOKEN` must have write access to both `tesh254/raph` and `tesh254/homebrew-raph`
 
+## Changelog And Tags
+
+Release tags follow semantic versioning in the form `vMAJOR.MINOR.PATCH`.
+
+Tag bumps come from conventional commits since the previous release tag:
+
+- `BREAKING CHANGE` in commit body, or `type!:` in subject -> major bump
+- `feat:` -> minor bump
+- `fix:`, `perf:`, or `refactor:` -> patch bump
+- anything else -> patch bump
+
+Examples:
+
+- `feat(cli): add update progress output` -> `v0.2.0` if previous release was `v0.1.2`
+- `fix(release): remove failing permission check` -> `v0.1.3`
+- `refactor(core)!: change release archive layout` -> `v1.0.0`
+
+Merge flow:
+
+1. Merge to `main`
+2. `version-tag` computes next tag from commit messages
+3. `version-tag` pushes that tag
+4. `version-tag` dispatches `release.yml`
+5. `release.yml` publishes GitHub Release and updates `tesh254/homebrew-raph`
+
+Manual release tag creation still works when needed:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 Manual tags still work:
 
 ```sh
