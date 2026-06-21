@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "raph": {
+      "type": "stdio",
+      "command": "raph",
+      "args": ["start"],
+      "env": {}
+    }
+  }
+}
