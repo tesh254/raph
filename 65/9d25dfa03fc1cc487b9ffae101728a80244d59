@@ -1,0 +1,21 @@
+plugins/raph/.claude-plugin/plugin.json
+  s_30200fc5b8ddb9::t_a8efe91a2d9191 11-12
+plugins/raph/skills/raph/SKILL.md
+  s_30200fc5b8ddb9::t_a9ba34f8a11094 1-96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "659d25dfa03fc1cc487b9ffae101728a80244d59",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
