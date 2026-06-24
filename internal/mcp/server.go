@@ -85,6 +85,21 @@ type GetMemoryHistoryArgs struct {
 	NodeID string `json:"node_id" jsonschema:"The memory node ID whose revision history should be returned"`
 }
 
+type StoreRuleArgs struct {
+	Scope    string   `json:"scope" jsonschema:"Rule scope: global (affects all work) or project (this codebase)"`
+	Content  string   `json:"content" jsonschema:"The rule the agent must follow"`
+	Title    string   `json:"title,omitempty" jsonschema:"Short rule title"`
+	Tags     []string `json:"tags,omitempty" jsonschema:"Optional tags"`
+	Key      string   `json:"key,omitempty" jsonschema:"Stable rule key; defaults to a slug of title/content"`
+	WriterID string   `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer"`
+}
+
+type ListRulesArgs struct {
+	Scope string `json:"scope" jsonschema:"Rule scope: global or project"`
+	Query string `json:"query,omitempty" jsonschema:"Optional text filter"`
+	Limit int    `json:"limit,omitempty" jsonschema:"Maximum rules to return"`
+}
+
 type CrawlURLArgs struct {
 	URL string `json:"url" jsonschema:"A single HTTP or HTTPS page to fetch, extract, and embed"`
 }
@@ -432,6 +447,47 @@ func (m *MCPServerWrapper) registerTools() {
 	})
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "store_rule",
+		Description: "Stores or updates a rule the agent must follow, scoped globally (all work) or to the current project (this codebase).",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args StoreRuleArgs) (*mcpsdk.CallToolResult, memory.StoreOutput, error) {
+		scopeType, scopeID, err := m.resolveRuleScope(args.Scope)
+		if err != nil {
+			return nil, memory.StoreOutput{}, err
+		}
+		key := strings.TrimSpace(args.Key)
+		if key == "" {
+			key = slugify(firstNonEmpty(args.Title, args.Content))
+		}
+		writer := strings.TrimSpace(args.WriterID)
+		if writer == "" {
+			writer = "agent"
+		}
+		out, err := memory.Put(ctx, m.store, m.config, memory.StoreInput{
+			ScopeType: scopeType, ScopeID: scopeID, KnowledgeType: "rule",
+			Title: args.Title, Content: args.Content, Source: "agent", WriterID: writer, Tags: args.Tags, MemoryKey: key,
+		})
+		if err != nil {
+			return nil, memory.StoreOutput{}, err
+		}
+		return textResult(renderJSON(out)), out, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "list_rules",
+		Description: "Lists active rules for a scope. Use scope=global for rules affecting all work and scope=project for rules specific to the current codebase.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args ListRulesArgs) (*mcpsdk.CallToolResult, ScopedMemorySearchOutput, error) {
+		scopeType, scopeID, err := m.resolveRuleScope(args.Scope)
+		if err != nil {
+			return nil, ScopedMemorySearchOutput{}, err
+		}
+		out, err := m.searchKnowledge(ctx, scopeType, scopeID, "rule", args.Query, args.Limit)
+		if err != nil {
+			return nil, ScopedMemorySearchOutput{}, err
+		}
+		return textResult(renderJSON(out)), out, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "crawl_url",
 		Description: "Fetches exactly one user-provided HTTP or HTTPS page, extracts readable content, creates chunks, and generates embeddings.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args CrawlURLArgs) (*mcpsdk.CallToolResult, CrawlURLOutput, error) {
@@ -609,6 +665,54 @@ func (m *MCPServerWrapper) searchWorkspace(ctx context.Context, workspace string
 		return "keyword", nil, err
 	}
 	return "keyword", nodes, nil
+}
+
+// resolveRuleScope maps a rule scope keyword to a (scopeType, scopeID) pair.
+// global rules share a fixed bucket; project rules use the workspace identity.
+func (m *MCPServerWrapper) resolveRuleScope(scope string) (string, string, error) {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		scope = "project"
+	}
+	switch scope {
+	case "global":
+		return "global", "global", nil
+	case "project":
+		id, err := m.resolveScopeID("project", "")
+		if err != nil {
+			return "", "", err
+		}
+		return "project", id, nil
+	default:
+		return "", "", fmt.Errorf("unknown rule scope %q (use global or project)", scope)
+	}
+}
+
+// slugify produces a stable key from free text.
+func slugify(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash && b.Len() > 0 {
+				b.WriteRune('-')
+				lastDash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "entry"
+	}
+	if len(out) > 60 {
+		out = strings.Trim(out[:60], "-")
+	}
+	return out
 }
 
 func (m *MCPServerWrapper) resolveScopeID(scopeType string, provided string) (string, error) {

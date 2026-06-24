@@ -128,3 +128,34 @@ func TestStoreGeneratesAndPersistsEmbedding(t *testing.T) {
 		t.Fatalf("expected scoped record metadata, got %+v", output.Record)
 	}
 }
+
+func TestPutCreatesThenUpdates(t *testing.T) {
+	store := &captureStore{}
+	ctx := context.Background()
+	in := StoreInput{
+		ScopeType: "global", ScopeID: "global", KnowledgeType: "rule",
+		MemoryKey: "no-cgo", Title: "No CGO", Content: "Keep CGO disabled.",
+		Source: "cli", WriterID: "cli",
+	}
+	first, err := Put(ctx, store, nil, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Record.Revision != 1 {
+		t.Fatalf("expected revision 1 on create, got %d", first.Record.Revision)
+	}
+	in.Content = "Keep CGO disabled for portability."
+	second, err := Put(ctx, store, nil, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Record.Revision != 2 {
+		t.Fatalf("expected revision 2 on update, got %d", second.Record.Revision)
+	}
+	if second.Record.Node.ID != first.Record.Node.ID {
+		t.Fatalf("Put changed node id across update: %s != %s", second.Record.Node.ID, first.Record.Node.ID)
+	}
+	if second.Record.Node.Content != "Keep CGO disabled for portability." {
+		t.Fatalf("Put did not update content: %q", second.Record.Node.Content)
+	}
+}

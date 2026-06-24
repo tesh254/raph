@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"raph/internal/db"
 	"raph/internal/indexer"
 	serverpkg "raph/internal/mcp"
+	"raph/internal/memory"
 	"raph/internal/output"
 	"raph/internal/query"
 	"raph/internal/signing"
@@ -86,6 +88,8 @@ func newRootCmd() *cobra.Command {
 
 	rootCmd.AddCommand(newInitCmd())
 	rootCmd.AddCommand(newSearchCmd())
+	rootCmd.AddCommand(newMemCmd())
+	rootCmd.AddCommand(newRulesCmd())
 	rootCmd.AddCommand(newCrawlCmd())
 	rootCmd.AddCommand(newStartCmd())
 	rootCmd.AddCommand(newStudioCmd())
@@ -390,6 +394,349 @@ func newSearchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&regex, "regex", false, "Treat the query as a regular expression")
 	cmd.Flags().BoolVar(&vector, "vector", false, "Semantic search (requires a configured embedding provider)")
 	return cmd
+}
+
+// writerID identifies who is writing memory/rules from the CLI. Agents can set
+// RAPH_WRITER to attribute writes; otherwise a stable default is used.
+func writerID() string {
+	if w := strings.TrimSpace(os.Getenv("RAPH_WRITER")); w != "" {
+		return w
+	}
+	return "cli"
+}
+
+func slugify(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash && b.Len() > 0 {
+				b.WriteRune('-')
+				lastDash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "entry"
+	}
+	if len(out) > 60 {
+		out = strings.Trim(out[:60], "-")
+	}
+	return out
+}
+
+// resolveMemoryScope returns the (scopeType, scopeID) pair for a scope. project
+// scope derives its id from the workspace's project identity; global uses a
+// fixed bucket; shared requires an explicit id.
+func resolveMemoryScope(cfg *config.Config, scope, scopeID, path string) (string, string, error) {
+	scope = strings.TrimSpace(scope)
+	scopeID = strings.TrimSpace(scopeID)
+	switch scope {
+	case "project":
+		if scopeID != "" {
+			return scope, scopeID, nil
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", "", err
+		}
+		id, err := indexer.ResolveProjectIdentity(cfg, abs)
+		if err != nil {
+			return "", "", err
+		}
+		return scope, id, nil
+	case "global":
+		if scopeID == "" {
+			scopeID = "global"
+		}
+		return scope, scopeID, nil
+	case "shared":
+		if scopeID == "" {
+			return "", "", fmt.Errorf("--scope-id is required for shared scope")
+		}
+		return scope, scopeID, nil
+	default:
+		return "", "", fmt.Errorf("unknown scope %q (use project, shared, or global)", scope)
+	}
+}
+
+func renderMemoryRecords(w io.Writer, records []db.MemoryRecord) error {
+	if len(records) == 0 {
+		_, err := io.WriteString(w, "No matching records\n")
+		return err
+	}
+	var sb strings.Builder
+	for _, r := range records {
+		fmt.Fprintf(&sb, "%s  [%s/%s · %s]\n", r.Node.Name, r.ScopeType, r.KnowledgeType, r.LifecycleState)
+		fmt.Fprintf(&sb, "    id: %s  key: %s\n", r.Node.ID, r.MemoryKey)
+		if len(r.DisplayTags) > 0 {
+			fmt.Fprintf(&sb, "    tags: %s\n", strings.Join(r.DisplayTags, ", "))
+		}
+		if c := strings.TrimSpace(r.Node.Content); c != "" {
+			fmt.Fprintf(&sb, "    %s\n", query.NewExcerpt(c, 280))
+		}
+		sb.WriteString("\n")
+	}
+	_, err := io.WriteString(w, sb.String())
+	return err
+}
+
+func newMemCmd() *cobra.Command {
+	memCmd := &cobra.Command{
+		Use:   "mem",
+		Short: "Read and write scoped agent memory (project, shared, or global)",
+	}
+
+	var scope, scopeID, knowledgeType, title, key, path string
+	var tags []string
+	setCmd := &cobra.Command{
+		Use:   "set <content>",
+		Short: "Create or update a memory record (idempotent)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			scopeType, resolvedID, err := resolveMemoryScope(cfg, scope, scopeID, path)
+			if err != nil {
+				return err
+			}
+			content := strings.Join(args, " ")
+			memKey := key
+			if memKey == "" {
+				if title != "" {
+					memKey = slugify(title)
+				} else {
+					memKey = slugify(content)
+				}
+			}
+			out, err := memory.Put(cmd.Context(), store, cfg, memory.StoreInput{
+				ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: knowledgeType,
+				Title: title, Content: content, Source: "cli", WriterID: writerID(), Tags: tags, MemoryKey: memKey,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), out, func(w io.Writer) error {
+				fmt.Fprintf(w, "Saved %s memory %q (id %s, embedded=%t)\n", scopeType, out.Record.MemoryKey, out.Record.Node.ID, out.Embedded)
+				return nil
+			})
+		},
+	}
+	setCmd.Flags().StringVar(&scope, "scope", "project", "Scope: project, shared, or global")
+	setCmd.Flags().StringVar(&scopeID, "scope-id", "", "Explicit scope id (required for shared)")
+	setCmd.Flags().StringVar(&knowledgeType, "type", "decision", "Knowledge type: decision, workflow, preference, incident")
+	setCmd.Flags().StringVar(&title, "title", "", "Short title")
+	setCmd.Flags().StringVar(&key, "key", "", "Stable memory key (defaults to a slug of title/content)")
+	setCmd.Flags().StringSliceVar(&tags, "tag", nil, "Tags (repeatable)")
+	setCmd.Flags().StringVar(&path, "path", ".", "Workspace path for project scope resolution")
+
+	var sScope, sScopeID, sType, sQuery, sPath string
+	var sLimit int
+	searchCmd := &cobra.Command{
+		Use:   "search [query]",
+		Short: "Search memory records in a scope",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			scopeType, resolvedID, err := resolveMemoryScope(cfg, sScope, sScopeID, sPath)
+			if err != nil {
+				return err
+			}
+			q := sQuery
+			if q == "" && len(args) > 0 {
+				q = strings.Join(args, " ")
+			}
+			res, err := memory.Search(cmd.Context(), store, memory.SearchInput{
+				Query: q, ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: sType, Limit: sLimit,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), res, func(w io.Writer) error {
+				return renderMemoryRecords(w, res.Matches)
+			})
+		},
+	}
+	searchCmd.Flags().StringVar(&sScope, "scope", "project", "Scope: project, shared, or global")
+	searchCmd.Flags().StringVar(&sScopeID, "scope-id", "", "Explicit scope id (required for shared)")
+	searchCmd.Flags().StringVar(&sType, "type", "", "Filter by knowledge type")
+	searchCmd.Flags().StringVar(&sQuery, "query", "", "Search query (also accepted as positional arg)")
+	searchCmd.Flags().IntVar(&sLimit, "limit", 20, "Maximum records")
+	searchCmd.Flags().StringVar(&sPath, "path", ".", "Workspace path for project scope resolution")
+
+	var rmReason, rmReplacement string
+	rmCmd := &cobra.Command{
+		Use:   "rm <node_id>",
+		Short: "Deprecate a memory record",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			rec, err := memory.Deprecate(cmd.Context(), store, memory.DeprecateInput{
+				NodeID: args[0], ReplacementNodeID: rmReplacement, WriterID: writerID(), Reason: rmReason,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), rec, func(w io.Writer) error {
+				fmt.Fprintf(w, "Deprecated %s (state %s)\n", rec.Node.ID, rec.LifecycleState)
+				return nil
+			})
+		},
+	}
+	rmCmd.Flags().StringVar(&rmReason, "reason", "", "Why this memory is being deprecated")
+	rmCmd.Flags().StringVar(&rmReplacement, "replacement", "", "Node id that replaces this memory")
+
+	memCmd.AddCommand(setCmd, searchCmd, rmCmd)
+	return memCmd
+}
+
+func newRulesCmd() *cobra.Command {
+	rulesCmd := &cobra.Command{
+		Use:   "rules",
+		Short: "Manage agent rules scoped globally or to a codebase",
+	}
+
+	var scope, title, key, path string
+	var tags []string
+	addCmd := &cobra.Command{
+		Use:   "add <rule text>",
+		Short: "Add or update a rule (scope: global or project)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			scopeType, resolvedID, err := resolveMemoryScope(cfg, scope, "", path)
+			if err != nil {
+				return err
+			}
+			content := strings.Join(args, " ")
+			memKey := key
+			if memKey == "" {
+				if title != "" {
+					memKey = slugify(title)
+				} else {
+					memKey = slugify(content)
+				}
+			}
+			out, err := memory.Put(cmd.Context(), store, cfg, memory.StoreInput{
+				ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: "rule",
+				Title: title, Content: content, Source: "cli", WriterID: writerID(), Tags: tags, MemoryKey: memKey,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), out, func(w io.Writer) error {
+				fmt.Fprintf(w, "Added %s rule %q (id %s)\n", scopeType, out.Record.MemoryKey, out.Record.Node.ID)
+				return nil
+			})
+		},
+	}
+	addCmd.Flags().StringVar(&scope, "scope", "project", "Rule scope: project (this codebase) or global")
+	addCmd.Flags().StringVar(&title, "title", "", "Short rule title")
+	addCmd.Flags().StringVar(&key, "key", "", "Stable rule key (defaults to a slug)")
+	addCmd.Flags().StringSliceVar(&tags, "tag", nil, "Tags (repeatable)")
+	addCmd.Flags().StringVar(&path, "path", ".", "Workspace path for project scope resolution")
+
+	var lScope, lQuery, lPath string
+	var lLimit int
+	var lAll bool
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List rules for a scope",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			var all []db.MemoryRecord
+			scopes := []string{lScope}
+			if lAll {
+				scopes = []string{"global", "project"}
+			}
+			for _, sc := range scopes {
+				scopeType, resolvedID, err := resolveMemoryScope(cfg, sc, "", lPath)
+				if err != nil {
+					return err
+				}
+				res, err := memory.Search(cmd.Context(), store, memory.SearchInput{
+					Query: lQuery, ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: "rule", Limit: lLimit,
+				})
+				if err != nil {
+					return err
+				}
+				all = append(all, res.Matches...)
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), memory.SearchOutput{Matches: all}, func(w io.Writer) error {
+				return renderMemoryRecords(w, all)
+			})
+		},
+	}
+	listCmd.Flags().StringVar(&lScope, "scope", "project", "Rule scope: project or global")
+	listCmd.Flags().BoolVar(&lAll, "all", false, "List both global and project rules")
+	listCmd.Flags().StringVar(&lQuery, "query", "", "Filter rules by text")
+	listCmd.Flags().IntVar(&lLimit, "limit", 50, "Maximum rules")
+	listCmd.Flags().StringVar(&lPath, "path", ".", "Workspace path for project scope resolution")
+
+	rmCmd := &cobra.Command{
+		Use:   "rm <node_id>",
+		Short: "Remove (deprecate) a rule",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			rec, err := memory.Deprecate(cmd.Context(), store, memory.DeprecateInput{NodeID: args[0], WriterID: writerID(), Reason: "removed via cli"})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), rec, func(w io.Writer) error {
+				fmt.Fprintf(w, "Removed rule %s\n", rec.Node.ID)
+				return nil
+			})
+		},
+	}
+
+	rulesCmd.AddCommand(addCmd, listCmd, rmCmd)
+	return rulesCmd
 }
 
 func newCrawlCmd() *cobra.Command {

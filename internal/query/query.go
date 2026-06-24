@@ -173,6 +173,9 @@ func candidateLimit(limit int, types []string) int {
 	return limit * 5
 }
 
+// NewExcerpt returns a whitespace-collapsed, length-capped preview of content.
+func NewExcerpt(content string, max int) string { return excerpt(content, max) }
+
 func excerpt(content string, max int) string {
 	content = strings.Join(strings.Fields(content), " ")
 	runes := []rune(content)

@@ -110,6 +110,23 @@ func Store(ctx context.Context, store db.GraphStore, cfg *config.Config, input S
 	return StoreOutput{Record: record, Embedded: embedded}, nil
 }
 
+// Put creates a memory if absent, or updates it if one already exists for the
+// same scope/knowledge/key. It gives CLI and agents idempotent write semantics.
+func Put(ctx context.Context, store db.GraphStore, cfg *config.Config, input StoreInput) (StoreOutput, error) {
+	prepared, err := prepareInput(input.ScopeType, input.ScopeID, input.KnowledgeType, input.Title, input.Content, input.Source, input.WriterID, input.Tags, input.MemoryKey)
+	if err != nil {
+		return StoreOutput{}, err
+	}
+	_, err = store.GetMemoryRecordByKey(ctx, prepared.ScopeType, prepared.ScopeID, prepared.KnowledgeType, prepared.MemoryKey)
+	if err == nil {
+		return Update(ctx, store, cfg, UpdateInput(input))
+	}
+	if err != sql.ErrNoRows {
+		return StoreOutput{}, fmt.Errorf("load existing memory: %w", err)
+	}
+	return Store(ctx, store, cfg, input)
+}
+
 func Update(ctx context.Context, store db.GraphStore, cfg *config.Config, input UpdateInput) (StoreOutput, error) {
 	prepared, err := prepareInput(input.ScopeType, input.ScopeID, input.KnowledgeType, input.Title, input.Content, input.Source, input.WriterID, input.Tags, input.MemoryKey)
 	if err != nil {
