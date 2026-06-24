@@ -1,0 +1,22 @@
+{
+  "name": "raph",
+  "version": "0.1.0",
+  "description": "Codex plugin for shared Raph memory, docs, and codebase indexing.",
+  "author": {
+    "name": "Erick Wachira"
+  },
+  "interface": {
+    "displayName": "Raph",
+    "shortDescription": "Memory-first Codex context via Raph.",
+    "longDescription": "Connect Codex to Raph so shared memory, URL-based documentation, and codebase indexing are always available when the plugin is used.",
+    "developerName": "Erick Wachira",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": [
+      "Use Raph as shared memory before answering.",
+      "Crawl docs from URLs and retain useful facts.",
+      "Index the current codebase whenever context may help."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}
