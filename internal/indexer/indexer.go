@@ -447,6 +447,18 @@ func gitRoot(root string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
+// ShouldSkipDir reports whether a directory name should be excluded from
+// indexing and filesystem watching. Exported for the syncer's watcher.
+func ShouldSkipDir(name string) bool {
+	return shouldSkipDir(name)
+}
+
+// IndexablePath reports whether a file path is eligible for indexing. Exported
+// for the syncer's watcher to filter filesystem events.
+func IndexablePath(path string) bool {
+	return shouldIndexFile(path)
+}
+
 func shouldSkipDir(name string) bool {
 	switch name {
 	case ".git", ".svn", ".hg", "node_modules", "vendor", "dist", "build", ".next", ".turbo", ".raph":

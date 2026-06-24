@@ -6,6 +6,7 @@ require (
 	aead.dev/minisign v0.2.0
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.1
 	github.com/PuerkitoBio/goquery v1.12.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gocolly/colly/v2 v2.3.0
 	github.com/minio/selfupdate v0.6.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1

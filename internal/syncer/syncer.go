@@ -244,6 +244,20 @@ func RunWorker(ctx context.Context, interval time.Duration) error {
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	// Fast path: fsnotify delivers debounced change signals so the graph is
+	// refreshed within ~150ms of a save. The periodic ticker remains as a
+	// correctness fallback (missed events, newly registered repos) and degrades
+	// gracefully to pure polling if a watcher cannot be created.
+	trigger := make(chan struct{}, 1)
+	watcher, werr := newRepoWatcher(ctx, trigger)
+	if werr != nil {
+		verbose.Printf("filesystem watcher unavailable, polling only: %v", werr)
+	} else {
+		defer watcher.Close()
+		verbose.Printf("filesystem watcher active debounce=%s", debounceWindow)
+	}
+
 	snapshots := make(map[string]map[string]indexer.FileState)
 	lastChange := time.Now()
 	for {
@@ -257,9 +271,20 @@ func RunWorker(ctx context.Context, interval time.Duration) error {
 			verbose.Printf("worker idle for %s; shutting down", idleTimeout)
 			return nil
 		}
+		if watcher != nil {
+			if repos, listErr := List(); listErr == nil {
+				roots := make([]string, 0, len(repos))
+				for _, repo := range repos {
+					roots = append(roots, repo.Path)
+				}
+				watcher.ensureDirs(roots)
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-trigger:
+			verbose.Printf("worker woken by filesystem event")
 		case <-ticker.C:
 		}
 	}
