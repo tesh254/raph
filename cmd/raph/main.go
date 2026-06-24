@@ -15,6 +15,7 @@ import (
 	"raph/internal/config"
 	"raph/internal/crawler"
 	"raph/internal/db"
+	"raph/internal/exporter"
 	"raph/internal/indexer"
 	"raph/internal/knowledge"
 	serverpkg "raph/internal/mcp"
@@ -92,6 +93,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newMemCmd())
 	rootCmd.AddCommand(newRulesCmd())
 	rootCmd.AddCommand(newDocCmd())
+	rootCmd.AddCommand(newExportCmd())
 	rootCmd.AddCommand(newCrawlCmd())
 	rootCmd.AddCommand(newStartCmd())
 	rootCmd.AddCommand(newStudioCmd())
@@ -938,6 +940,109 @@ func readContent(cmd *cobra.Command, file string, args []string) (string, error)
 		return strings.Join(args, " "), nil
 	}
 	return "", fmt.Errorf("provide content via --file, '-' for stdin, or inline text")
+}
+
+func newExportCmd() *cobra.Command {
+	var docID, scope, path, format, out string
+	var bundle, gist, public bool
+	var repo, repoPath, s3Dest, r2Endpoint string
+
+	cmd := &cobra.Command{
+		Use:   "export",
+		Short: "Export a document or knowledge bundle to a file and optionally publish it",
+		Long: "Export local knowledge to a portable Markdown/JSON file, then optionally publish it " +
+			"to a GitHub gist, a repo, S3, or Cloudflare R2 so it transfers between machines.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			fmtVal := exporter.Format(format)
+			if fmtVal != exporter.FormatJSON {
+				fmtVal = exporter.FormatMarkdown
+			}
+
+			var artifact exporter.Artifact
+			switch {
+			case bundle:
+				workspace, wsErr := resolveDocWorkspace(store, cfg, scope, path)
+				if wsErr != nil {
+					return wsErr
+				}
+				artifact, err = exporter.Bundle(cmd.Context(), store, workspace, fmtVal)
+			case strings.TrimSpace(docID) != "":
+				artifact, err = exporter.Document(cmd.Context(), store, docID, fmtVal)
+			default:
+				return fmt.Errorf("provide --doc <id> or --bundle")
+			}
+			if err != nil {
+				return err
+			}
+
+			target, err := exporter.Write(artifact, out)
+			if err != nil {
+				return err
+			}
+
+			result := map[string]any{"file": target, "bytes": artifact.Bytes}
+			if gist {
+				url, gistErr := exporter.UploadGist(cmd.Context(), target, public, "raph knowledge export")
+				if gistErr != nil {
+					return gistErr
+				}
+				result["gist_url"] = url
+			}
+			if strings.TrimSpace(repo) != "" {
+				rp := repoPath
+				if rp == "" {
+					rp = filepath.Base(target)
+				}
+				if err := exporter.UploadRepoFile(cmd.Context(), repo, rp, target, ""); err != nil {
+					return err
+				}
+				result["repo"] = repo + "/" + rp
+			}
+			if strings.TrimSpace(s3Dest) != "" {
+				if err := exporter.UploadS3(cmd.Context(), target, s3Dest, r2Endpoint); err != nil {
+					return err
+				}
+				result["s3"] = s3Dest
+			}
+
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), result, func(w io.Writer) error {
+				fmt.Fprintf(w, "Exported %d bytes to %s\n", artifact.Bytes, target)
+				if v, ok := result["gist_url"]; ok {
+					fmt.Fprintf(w, "Gist: %v\n", v)
+				}
+				if v, ok := result["repo"]; ok {
+					fmt.Fprintf(w, "Repo: %v\n", v)
+				}
+				if v, ok := result["s3"]; ok {
+					fmt.Fprintf(w, "Uploaded to %v\n", v)
+				}
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&docID, "doc", "", "Document node id to export")
+	cmd.Flags().BoolVar(&bundle, "bundle", false, "Export all documents in the scope as one bundle")
+	cmd.Flags().StringVar(&scope, "scope", "project", "Scope for --bundle: project or global")
+	cmd.Flags().StringVar(&path, "path", ".", "Workspace path for project scope")
+	cmd.Flags().StringVar(&format, "out-format", "md", "Export content format: md or json")
+	cmd.Flags().StringVar(&out, "out", "", "Output file or directory (default: auto-named in cwd)")
+	cmd.Flags().BoolVar(&gist, "gist", false, "Publish the export as a GitHub gist")
+	cmd.Flags().BoolVar(&public, "public", false, "Make the gist public")
+	cmd.Flags().StringVar(&repo, "repo", "", "Publish to a GitHub repo (owner/name)")
+	cmd.Flags().StringVar(&repoPath, "repo-path", "", "Destination path within the repo")
+	cmd.Flags().StringVar(&s3Dest, "s3", "", "Upload to an S3/R2 destination (s3://bucket/key)")
+	cmd.Flags().StringVar(&r2Endpoint, "r2-endpoint", "", "Custom S3 endpoint URL (e.g. Cloudflare R2)")
+	return cmd
 }
 
 func newCrawlCmd() *cobra.Command {
