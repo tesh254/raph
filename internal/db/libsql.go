@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"raph/internal/config"
 	"raph/internal/verbose"
@@ -17,16 +18,27 @@ import (
 )
 
 type Node struct {
-	ID              string    `json:"id"`
-	Workspace       string    `json:"-"`
-	Domain          string    `json:"domain"`
-	Type            string    `json:"type"`
-	Name            string    `json:"name"`
-	Content         string    `json:"content"`
-	URL             string    `json:"url,omitempty"`
-	Path            string    `json:"path,omitempty"`
-	Embedding       []float32 `json:"-"`
-	EmbeddingLength int       `json:"embedding_length,omitempty"`
+	ID              string            `json:"id"`
+	Workspace       string            `json:"-"`
+	Domain          string            `json:"domain"`
+	Type            string            `json:"type"`
+	Name            string            `json:"name"`
+	Content         string            `json:"content"`
+	URL             string            `json:"url,omitempty"`
+	Path            string            `json:"path,omitempty"`
+	Properties      map[string]string `json:"properties,omitempty"`
+	CreatedAt       string            `json:"created_at,omitempty"`
+	UpdatedAt       string            `json:"updated_at,omitempty"`
+	Embedding       []float32         `json:"-"`
+	EmbeddingLength int               `json:"embedding_length,omitempty"`
+}
+
+// Prop returns a node property value (empty if unset).
+func (n Node) Prop(key string) string {
+	if n.Properties == nil {
+		return ""
+	}
+	return n.Properties[key]
 }
 
 type Edge struct {
@@ -107,6 +119,9 @@ type GraphStore interface {
 	VectorSearchWorkspace(ctx context.Context, workspace string, embedding []float32, limit int) ([]Node, error)
 	KeywordSearch(ctx context.Context, query string, limit int) ([]Node, error)
 	KeywordSearchWorkspace(ctx context.Context, workspace string, query string, limit int) ([]Node, error)
+	LexicalSearch(ctx context.Context, workspace string, query string, limit int) ([]Node, error)
+	ListNodes(ctx context.Context, filter NodeFilter) ([]Node, error)
+	SetNodeProperties(ctx context.Context, id string, props map[string]string) error
 	GetNodeByID(ctx context.Context, id string) (Node, error)
 	GetNeighbors(ctx context.Context, nodeID string) ([]Node, []Edge, error)
 	GetAllGraphElements(ctx context.Context) ([]Node, []Edge, error)
@@ -251,6 +266,18 @@ func (s *LibSQLStore) migrate() error {
 			FOREIGN KEY (corpus_id) REFERENCES web_corpora(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_web_crawl_versions_corpus ON web_crawl_versions (corpus_id, created_at DESC);`,
+		// Trigram FTS5 index over searchable node text. Serves both ranked keyword
+		// (bm25) and literal substring (rg-like) lookups without scanning every row.
+		`CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+			node_id UNINDEXED,
+			workspace UNINDEXED,
+			domain UNINDEXED,
+			type UNINDEXED,
+			name,
+			content,
+			path UNINDEXED,
+			tokenize = 'trigram'
+		);`,
 	}
 
 	for _, q := range queries {
@@ -258,19 +285,23 @@ func (s *LibSQLStore) migrate() error {
 			return fmt.Errorf("migration execution failure: %w", err)
 		}
 	}
-	if err := s.ensureNodePathColumn(); err != nil {
+	if err := s.ensureNodeColumns(); err != nil {
+		return err
+	}
+	if err := s.backfillNodesFTS(); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *LibSQLStore) ensureNodePathColumn() error {
+// ensureNodeColumns adds columns introduced after the original schema. SQLite
+// ALTER TABLE ADD COLUMN is cheap and idempotent here because we inspect first.
+func (s *LibSQLStore) ensureNodeColumns() error {
+	existing := map[string]bool{}
 	rows, err := s.db.Query(`PRAGMA table_info(nodes)`)
 	if err != nil {
 		return fmt.Errorf("inspect nodes schema: %w", err)
 	}
-
-	found := false
 	for rows.Next() {
 		var cid int
 		var name string
@@ -279,12 +310,10 @@ func (s *LibSQLStore) ensureNodePathColumn() error {
 		var defaultValue any
 		var primaryKey int
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
 			return fmt.Errorf("scan nodes schema: %w", err)
 		}
-		if name == "path" {
-			found = true
-			break
-		}
+		existing[name] = true
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -293,11 +322,40 @@ func (s *LibSQLStore) ensureNodePathColumn() error {
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close nodes schema rows: %w", err)
 	}
-	if found {
+
+	additions := []struct {
+		name string
+		ddl  string
+	}{
+		{"path", `ALTER TABLE nodes ADD COLUMN path TEXT NOT NULL DEFAULT ''`},
+		{"properties_json", `ALTER TABLE nodes ADD COLUMN properties_json TEXT NOT NULL DEFAULT '{}'`},
+		{"created_at", `ALTER TABLE nodes ADD COLUMN created_at TEXT NOT NULL DEFAULT ''`},
+		{"updated_at", `ALTER TABLE nodes ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, add := range additions {
+		if existing[add.name] {
+			continue
+		}
+		if _, err := s.db.Exec(add.ddl); err != nil {
+			return fmt.Errorf("add nodes column %s: %w", add.name, err)
+		}
+	}
+	return nil
+}
+
+// backfillNodesFTS seeds the FTS index from existing rows the first time the
+// virtual table is created on a pre-existing database.
+func (s *LibSQLStore) backfillNodesFTS() error {
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM nodes_fts`).Scan(&count); err != nil {
+		return fmt.Errorf("count nodes_fts: %w", err)
+	}
+	if count > 0 {
 		return nil
 	}
-	if _, err := s.db.Exec(`ALTER TABLE nodes ADD COLUMN path TEXT NOT NULL DEFAULT ''`); err != nil {
-		return fmt.Errorf("add nodes path column: %w", err)
+	if _, err := s.db.Exec(`INSERT INTO nodes_fts (node_id, workspace, domain, type, name, content, path)
+		SELECT id, workspace, domain, type, name, content, COALESCE(path, '') FROM nodes`); err != nil {
+		return fmt.Errorf("backfill nodes_fts: %w", err)
 	}
 	return nil
 }
@@ -412,9 +470,21 @@ func (s *LibSQLStore) SaveNode(ctx context.Context, node Node) error {
 	if err != nil {
 		return fmt.Errorf("marshal embedding: %w", err)
 	}
+	propertiesJSON, err := marshalProperties(node.Properties)
+	if err != nil {
+		return fmt.Errorf("marshal properties: %w", err)
+	}
+	now := node.UpdatedAt
+	if strings.TrimSpace(now) == "" {
+		now = nowTimestamp()
+	}
+	createdAt := node.CreatedAt
+	if strings.TrimSpace(createdAt) == "" {
+		createdAt = now
+	}
 
-	query := `INSERT INTO nodes (id, workspace, domain, type, name, content, url, path, embedding_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	query := `INSERT INTO nodes (id, workspace, domain, type, name, content, url, path, properties_json, created_at, updated_at, embedding_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			workspace = excluded.workspace,
 			domain = excluded.domain,
@@ -423,10 +493,29 @@ func (s *LibSQLStore) SaveNode(ctx context.Context, node Node) error {
 			content = excluded.content,
 			url = excluded.url,
 			path = excluded.path,
+			properties_json = excluded.properties_json,
+			created_at = CASE WHEN nodes.created_at = '' THEN excluded.created_at ELSE nodes.created_at END,
+			updated_at = excluded.updated_at,
 			embedding_json = excluded.embedding_json;`
 
-	_, err = s.db.ExecContext(ctx, query, node.ID, node.Workspace, node.Domain, node.Type, node.Name, node.Content, node.URL, node.Path, string(embeddingJSON))
-	return err
+	if _, err = s.db.ExecContext(ctx, query, node.ID, node.Workspace, node.Domain, node.Type, node.Name, node.Content, node.URL, node.Path, propertiesJSON, createdAt, now, string(embeddingJSON)); err != nil {
+		return err
+	}
+	return s.syncNodeFTS(ctx, node)
+}
+
+// syncNodeFTS keeps the trigram FTS index in lockstep with a node row.
+func (s *LibSQLStore) syncNodeFTS(ctx context.Context, node Node) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, node.ID); err != nil {
+		return fmt.Errorf("clear fts row: %w", err)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO nodes_fts (node_id, workspace, domain, type, name, content, path)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		node.ID, node.Workspace, node.Domain, node.Type, node.Name, node.Content, node.Path)
+	if err != nil {
+		return fmt.Errorf("index fts row: %w", err)
+	}
+	return nil
 }
 
 func (s *LibSQLStore) SaveEdge(ctx context.Context, edge Edge) error {
@@ -519,92 +608,248 @@ func (s *LibSQLStore) KeywordSearchWorkspace(ctx context.Context, workspace stri
 	return s.keywordSearch(ctx, strings.TrimSpace(workspace), query, limit)
 }
 
+const nodeColumns = `id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), COALESCE(properties_json, '{}'), COALESCE(created_at, ''), COALESCE(updated_at, ''), COALESCE(embedding_json, '[]')`
+
+// scanNode reads a full node row (including properties and timestamps) selected
+// with the nodeColumns column list.
+func scanNode(rows interface{ Scan(...any) error }) (Node, error) {
+	var n Node
+	var propertiesJSON string
+	var embeddingJSON string
+	if err := rows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &propertiesJSON, &n.CreatedAt, &n.UpdatedAt, &embeddingJSON); err != nil {
+		return Node{}, err
+	}
+	n.Properties = unmarshalProperties(propertiesJSON)
+	n.EmbeddingLength = embeddingLength(embeddingJSON)
+	return n, nil
+}
+
 func (s *LibSQLStore) keywordSearch(ctx context.Context, workspace string, query string, limit int) ([]Node, error) {
 	if limit <= 0 {
 		limit = 5
 	}
-	query = strings.TrimSpace(strings.ToLower(query))
+	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, nil
 	}
 
-	sqlQuery := `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), COALESCE(embedding_json, '[]') FROM nodes`
-	var rows *sql.Rows
-	var err error
-	if workspace == "" {
-		rows, err = s.db.QueryContext(ctx, sqlQuery)
-	} else {
-		rows, err = s.db.QueryContext(ctx, sqlQuery+` WHERE workspace = ?`, workspace)
+	// Primary path: trigram FTS with bm25 ranking. AND of query terms.
+	if match := buildFTSMatch(query); match != "" {
+		nodes, err := s.ftsSearch(ctx, workspace, match, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(nodes) > 0 {
+			return nodes, nil
+		}
 	}
+	// Fallback for very short queries (trigram needs >=3 chars) or empty FTS.
+	return s.likeSearch(ctx, workspace, query, limit)
+}
+
+// LexicalSearch performs a literal substring match (rg-style) over indexed node
+// text using the trigram index, ranked by bm25.
+func (s *LibSQLStore) LexicalSearch(ctx context.Context, workspace string, query string, limit int) ([]Node, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	if len([]rune(query)) >= 3 {
+		nodes, err := s.ftsSearch(ctx, strings.TrimSpace(workspace), `"`+escapeFTS(query)+`"`, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(nodes) > 0 {
+			return nodes, nil
+		}
+	}
+	return s.likeSearch(ctx, strings.TrimSpace(workspace), query, limit)
+}
+
+func (s *LibSQLStore) ftsSearch(ctx context.Context, workspace string, match string, limit int) ([]Node, error) {
+	query := `SELECT n.id, n.workspace, n.domain, n.type, n.name, n.content, COALESCE(n.url, ''), COALESCE(n.path, ''), COALESCE(n.properties_json, '{}'), COALESCE(n.created_at, ''), COALESCE(n.updated_at, ''), COALESCE(n.embedding_json, '[]'), bm25(nodes_fts) AS score
+		FROM nodes_fts JOIN nodes n ON n.id = nodes_fts.node_id
+		WHERE nodes_fts MATCH ?`
+	args := []any{match}
+	if workspace != "" {
+		query += ` AND nodes_fts.workspace = ?`
+		args = append(args, workspace)
+	}
+	query += ` ORDER BY score ASC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	terms := strings.Fields(query)
-	type rankedNode struct {
-		node  Node
-		score int
-	}
-	var ranked []rankedNode
-
+	var results []Node
 	for rows.Next() {
 		var n Node
+		var propertiesJSON string
 		var embeddingJSON string
-		if err := rows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &embeddingJSON); err != nil {
+		var score float64
+		if err := rows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &propertiesJSON, &n.CreatedAt, &n.UpdatedAt, &embeddingJSON, &score); err != nil {
 			return nil, err
 		}
+		n.Properties = unmarshalProperties(propertiesJSON)
 		n.EmbeddingLength = embeddingLength(embeddingJSON)
+		results = append(results, n)
+	}
+	return results, rows.Err()
+}
 
-		name := strings.ToLower(n.Name)
-		content := strings.ToLower(n.Content)
-		score := 0
-		if strings.Contains(name, query) {
-			score += 10
+// likeSearch is the substring fallback used when the trigram index cannot serve
+// a query (e.g. patterns shorter than three characters).
+func (s *LibSQLStore) likeSearch(ctx context.Context, workspace string, query string, limit int) ([]Node, error) {
+	like := "%" + strings.ToLower(query) + "%"
+	sqlQuery := `SELECT ` + nodeColumns + ` FROM nodes WHERE (LOWER(name) LIKE ? OR LOWER(content) LIKE ?)`
+	args := []any{like, like}
+	if workspace != "" {
+		sqlQuery += ` AND workspace = ?`
+		args = append(args, workspace)
+	}
+	sqlQuery += ` ORDER BY updated_at DESC, id ASC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []Node
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, err
 		}
-		if strings.Contains(content, query) {
-			score += 5
+		results = append(results, n)
+	}
+	return results, rows.Err()
+}
+
+// buildFTSMatch turns a free-text query into a trigram FTS5 MATCH expression by
+// AND-ing each term of length >= 3. Returns "" when no term qualifies.
+func buildFTSMatch(query string) string {
+	terms := strings.Fields(query)
+	parts := make([]string, 0, len(terms))
+	for _, term := range terms {
+		if len([]rune(term)) < 3 {
+			continue
 		}
-		for _, term := range terms {
-			if strings.Contains(name, term) {
-				score += 3
+		parts = append(parts, `"`+escapeFTS(term)+`"`)
+	}
+	return strings.Join(parts, " ")
+}
+
+func escapeFTS(value string) string {
+	return strings.ReplaceAll(value, `"`, `""`)
+}
+
+// NodeFilter selects nodes structurally (without text search) for listings such
+// as docs, rules, and handoffs.
+type NodeFilter struct {
+	Workspace      string
+	Domain         string
+	Types          []string
+	PropertyEquals map[string]string
+	Query          string
+	Limit          int
+}
+
+func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	sqlQuery := `SELECT ` + nodeColumns + ` FROM nodes`
+	var where []string
+	var args []any
+	if ws := strings.TrimSpace(filter.Workspace); ws != "" {
+		where = append(where, `workspace = ?`)
+		args = append(args, ws)
+	}
+	if d := strings.TrimSpace(filter.Domain); d != "" {
+		where = append(where, `domain = ?`)
+		args = append(args, d)
+	}
+	if len(filter.Types) > 0 {
+		placeholders := make([]string, 0, len(filter.Types))
+		for _, t := range filter.Types {
+			t = strings.TrimSpace(t)
+			if t == "" {
+				continue
 			}
-			if strings.Contains(content, term) {
-				score += 1
-			}
+			placeholders = append(placeholders, "?")
+			args = append(args, t)
 		}
-		if score > 0 {
-			ranked = append(ranked, rankedNode{node: n, score: score})
+		if len(placeholders) > 0 {
+			where = append(where, `type IN (`+strings.Join(placeholders, ", ")+`)`)
 		}
 	}
+	for key, value := range filter.PropertyEquals {
+		where = append(where, `json_extract(properties_json, '$.'||?) = ?`)
+		args = append(args, key, value)
+	}
+	if q := strings.TrimSpace(strings.ToLower(filter.Query)); q != "" {
+		where = append(where, `(LOWER(name) LIKE ? OR LOWER(content) LIKE ?)`)
+		like := "%" + q + "%"
+		args = append(args, like, like)
+	}
+	if len(where) > 0 {
+		sqlQuery += ` WHERE ` + strings.Join(where, ` AND `)
+	}
+	sqlQuery += ` ORDER BY updated_at DESC, id ASC LIMIT ?`
+	args = append(args, limit)
 
-	sort.Slice(ranked, func(i, j int) bool {
-		if ranked[i].score == ranked[j].score {
-			return ranked[i].node.ID < ranked[j].node.ID
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []Node
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, err
 		}
-		return ranked[i].score > ranked[j].score
-	})
-
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
+		results = append(results, n)
 	}
+	return results, rows.Err()
+}
 
-	results := make([]Node, 0, len(ranked))
-	for _, item := range ranked {
-		results = append(results, item.node)
+// SetNodeProperties merges properties into an existing node and bumps its
+// updated_at timestamp. Existing keys not present in props are preserved.
+func (s *LibSQLStore) SetNodeProperties(ctx context.Context, id string, props map[string]string) error {
+	var current string
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(properties_json, '{}') FROM nodes WHERE id = ?`, id).Scan(&current)
+	if err != nil {
+		return err
 	}
-	return results, nil
+	merged := unmarshalProperties(current)
+	if merged == nil {
+		merged = map[string]string{}
+	}
+	for k, v := range props {
+		merged[k] = v
+	}
+	encoded, err := marshalProperties(merged)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE nodes SET properties_json = ?, updated_at = ? WHERE id = ?`, encoded, nowTimestamp(), id)
+	return err
 }
 
 func (s *LibSQLStore) GetNodeByID(ctx context.Context, id string) (Node, error) {
-	var n Node
-	var embeddingJSON string
-	err := s.db.QueryRowContext(ctx, `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), COALESCE(embedding_json, '[]') FROM nodes WHERE id = ?`, id).
-		Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &embeddingJSON)
+	n, err := scanNode(s.db.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM nodes WHERE id = ?`, id))
 	if err != nil {
 		return Node{}, err
 	}
-	n.EmbeddingLength = embeddingLength(embeddingJSON)
 	return n, nil
 }
 
@@ -1006,12 +1251,22 @@ func (s *LibSQLStore) DeleteNodeByID(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	if _, err = s.db.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, id); err != nil {
+		return err
+	}
 	_, err = s.db.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, id)
 	return err
 }
 
 func (s *LibSQLStore) DeleteFileNodes(ctx context.Context, workspace string, relativePath string) error {
 	relativePath = filepath.ToSlash(relativePath)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM nodes_fts
+		WHERE node_id IN (
+			SELECT id FROM nodes WHERE workspace = ?1
+			AND (url = ?2 OR (substr(url, 1, length(?2)) = ?2 AND substr(url, length(?2) + 1, 1) = '#'))
+		)`, workspace, relativePath); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `DELETE FROM edges
 		WHERE source_id IN (
 			SELECT id FROM nodes WHERE workspace = ?1
@@ -1039,6 +1294,9 @@ func (s *LibSQLStore) DeleteWorkspace(ctx context.Context, workspace string) err
 	if err != nil {
 		return err
 	}
+	if _, err = s.db.ExecContext(ctx, `DELETE FROM nodes_fts WHERE workspace = ?`, workspace); err != nil {
+		return err
+	}
 	_, err = s.db.ExecContext(ctx, `DELETE FROM nodes WHERE workspace = ?`, workspace)
 	return err
 }
@@ -1054,6 +1312,9 @@ func (s *LibSQLStore) ClearAll(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx, `DELETE FROM nodes`)
 	if err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM nodes_fts`); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM memory_revisions`); err != nil {
@@ -1086,6 +1347,36 @@ func jsonStringSlice(value string) []string {
 	}
 	var out []string
 	if err := json.Unmarshal([]byte(value), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func nowTimestamp() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
+func marshalProperties(props map[string]string) (string, error) {
+	if len(props) == 0 {
+		return "{}", nil
+	}
+	data, err := json.Marshal(props)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func unmarshalProperties(value string) map[string]string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "{}" {
+		return nil
+	}
+	out := map[string]string{}
+	if err := json.Unmarshal([]byte(value), &out); err != nil {
+		return nil
+	}
+	if len(out) == 0 {
 		return nil
 	}
 	return out

@@ -35,6 +35,13 @@ func (*crawlStore) KeywordSearch(context.Context, string, int) ([]db.Node, error
 func (*crawlStore) KeywordSearchWorkspace(context.Context, string, string, int) ([]db.Node, error) {
 	return nil, nil
 }
+func (*crawlStore) LexicalSearch(context.Context, string, string, int) ([]db.Node, error) {
+	return nil, nil
+}
+func (*crawlStore) ListNodes(context.Context, db.NodeFilter) ([]db.Node, error) { return nil, nil }
+func (*crawlStore) SetNodeProperties(context.Context, string, map[string]string) error {
+	return nil
+}
 func (*crawlStore) GetNodeByID(context.Context, string) (db.Node, error) { return db.Node{}, nil }
 func (*crawlStore) GetNeighbors(context.Context, string) ([]db.Node, []db.Edge, error) {
 	return nil, nil, nil

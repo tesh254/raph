@@ -33,6 +33,13 @@ func (*captureStore) KeywordSearch(context.Context, string, int) ([]db.Node, err
 func (*captureStore) KeywordSearchWorkspace(context.Context, string, string, int) ([]db.Node, error) {
 	return nil, nil
 }
+func (*captureStore) LexicalSearch(context.Context, string, string, int) ([]db.Node, error) {
+	return nil, nil
+}
+func (*captureStore) ListNodes(context.Context, db.NodeFilter) ([]db.Node, error) { return nil, nil }
+func (*captureStore) SetNodeProperties(context.Context, string, map[string]string) error {
+	return nil
+}
 func (*captureStore) GetNodeByID(context.Context, string) (db.Node, error) { return db.Node{}, nil }
 func (*captureStore) GetNeighbors(context.Context, string) ([]db.Node, []db.Edge, error) {
 	return nil, nil, nil

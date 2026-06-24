@@ -30,6 +30,15 @@ func (*indexCaptureStore) KeywordSearch(context.Context, string, int) ([]db.Node
 func (*indexCaptureStore) KeywordSearchWorkspace(context.Context, string, string, int) ([]db.Node, error) {
 	return nil, nil
 }
+func (*indexCaptureStore) LexicalSearch(context.Context, string, string, int) ([]db.Node, error) {
+	return nil, nil
+}
+func (*indexCaptureStore) ListNodes(context.Context, db.NodeFilter) ([]db.Node, error) {
+	return nil, nil
+}
+func (*indexCaptureStore) SetNodeProperties(context.Context, string, map[string]string) error {
+	return nil
+}
 func (*indexCaptureStore) GetNodeByID(context.Context, string) (db.Node, error) {
 	return db.Node{}, nil
 }

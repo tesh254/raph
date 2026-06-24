@@ -52,6 +52,27 @@ func (s *protocolStore) KeywordSearch(context.Context, string, int) ([]db.Node, 
 func (s *protocolStore) KeywordSearchWorkspace(ctx context.Context, _ string, query string, limit int) ([]db.Node, error) {
 	return s.KeywordSearch(ctx, query, limit)
 }
+func (s *protocolStore) LexicalSearch(ctx context.Context, _ string, query string, limit int) ([]db.Node, error) {
+	return s.KeywordSearch(ctx, query, limit)
+}
+func (s *protocolStore) ListNodes(_ context.Context, _ db.NodeFilter) ([]db.Node, error) {
+	out := make([]db.Node, 0, len(s.nodes))
+	for _, node := range s.nodes {
+		out = append(out, node)
+	}
+	return out, nil
+}
+func (s *protocolStore) SetNodeProperties(_ context.Context, id string, props map[string]string) error {
+	node := s.nodes[id]
+	if node.Properties == nil {
+		node.Properties = map[string]string{}
+	}
+	for k, v := range props {
+		node.Properties[k] = v
+	}
+	s.nodes[id] = node
+	return nil
+}
 func (s *protocolStore) GetNodeByID(_ context.Context, id string) (db.Node, error) {
 	return s.nodes[id], nil
 }
