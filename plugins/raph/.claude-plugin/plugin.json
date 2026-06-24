@@ -8,5 +8,6 @@
   "homepage": "https://github.com/tesh254/raph",
   "repository": "https://github.com/tesh254/raph",
   "license": "MIT",
-  "keywords": ["raph", "mcp", "memory", "search", "knowledge-graph", "rules"]
+  "keywords": ["raph", "mcp", "memory", "search", "knowledge-graph", "rules"],
+  "skills": "./skills/"
 }
