@@ -1,0 +1,27 @@
+cmd/raph/main.go
+  s_30200fc5b8ddb9::t_81020cb36f6acd 96
+  s_30200fc5b8ddb9::t_57fddd34924acf 18
+  s_30200fc5b8ddb9::t_652c574bd4653f 945-1047
+internal/exporter/exporter_test.go
+  s_30200fc5b8ddb9::t_55ebb802e00a27 1-74
+internal/exporter/exporter.go
+  s_30200fc5b8ddb9::t_1611dbe6f650fb 9
+  s_30200fc5b8ddb9::t_850921fdbb2600 179-182
+  s_30200fc5b8ddb9::t_0c20af6c0c6456 1-8,10-178,183-232
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "46765a8b76ebc14ba68f1bd9667fc7b3669f5d96",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
