@@ -16,6 +16,7 @@ import (
 	"raph/internal/crawler"
 	"raph/internal/db"
 	"raph/internal/indexer"
+	"raph/internal/knowledge"
 	serverpkg "raph/internal/mcp"
 	"raph/internal/memory"
 	"raph/internal/output"
@@ -90,6 +91,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newSearchCmd())
 	rootCmd.AddCommand(newMemCmd())
 	rootCmd.AddCommand(newRulesCmd())
+	rootCmd.AddCommand(newDocCmd())
 	rootCmd.AddCommand(newCrawlCmd())
 	rootCmd.AddCommand(newStartCmd())
 	rootCmd.AddCommand(newStudioCmd())
@@ -737,6 +739,205 @@ func newRulesCmd() *cobra.Command {
 
 	rulesCmd.AddCommand(addCmd, listCmd, rmCmd)
 	return rulesCmd
+}
+
+// resolveDocWorkspace maps a doc scope to a workspace id (project workspace or
+// the shared global-knowledge bucket).
+func resolveDocWorkspace(store db.GraphStore, cfg *config.Config, scope, path string) (string, error) {
+	switch strings.TrimSpace(scope) {
+	case "", "project":
+		return resolveWorkspaceID(store, cfg, path)
+	case "global":
+		return knowledge.GlobalWorkspace, nil
+	default:
+		return "", fmt.Errorf("unknown scope %q (use project or global)", scope)
+	}
+}
+
+func renderDocList(w io.Writer, docs []db.Node) error {
+	if len(docs) == 0 {
+		_, err := io.WriteString(w, "No documents\n")
+		return err
+	}
+	var sb strings.Builder
+	for _, d := range docs {
+		fmt.Fprintf(&sb, "%s  [%s · %s]\n", d.Name, d.Prop("doc_type"), d.Prop("status"))
+		fmt.Fprintf(&sb, "    id: %s\n", d.ID)
+		if c := strings.TrimSpace(d.Content); c != "" {
+			fmt.Fprintf(&sb, "    %s\n", query.NewExcerpt(c, 200))
+		}
+		sb.WriteString("\n")
+	}
+	_, err := io.WriteString(w, sb.String())
+	return err
+}
+
+func newDocCmd() *cobra.Command {
+	docCmd := &cobra.Command{
+		Use:   "doc",
+		Short: "Manage local documents and handoffs attached to the graph",
+	}
+
+	var scope, path, file, title, docType, source, key string
+	var tags, links []string
+	var noEmbed bool
+	addCmd := &cobra.Command{
+		Use:   "add [content]",
+		Short: "Add a local document (from --file, stdin via '-', or inline text)",
+		Long:  "Attach a document to local knowledge. Use --type to mark it as architecture, handoff, reference, or note so agents know how it serves the work.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			content, err := readContent(cmd, file, args)
+			if err != nil {
+				return err
+			}
+			workspace, err := resolveDocWorkspace(store, cfg, scope, path)
+			if err != nil {
+				return err
+			}
+			doc, err := knowledge.Add(cmd.Context(), store, cfg, knowledge.AddInput{
+				Workspace: workspace, Key: key, Title: title, Content: content,
+				DocType: docType, Source: source, WriterID: writerID(), Tags: tags, Links: links, NoEmbed: noEmbed,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), doc, func(w io.Writer) error {
+				fmt.Fprintf(w, "Added %s document %q (id %s, %d chunks)\n", doc.Node.Prop("doc_type"), doc.Node.Name, doc.Node.ID, doc.ChunkCount)
+				return nil
+			})
+		},
+	}
+	addCmd.Flags().StringVar(&scope, "scope", "project", "Scope: project (this codebase) or global")
+	addCmd.Flags().StringVar(&path, "path", ".", "Workspace path for project scope")
+	addCmd.Flags().StringVar(&file, "file", "", "Read document content from a file")
+	addCmd.Flags().StringVar(&title, "title", "", "Document title")
+	addCmd.Flags().StringVar(&docType, "type", "note", "Document type: architecture, handoff, reference, note")
+	addCmd.Flags().StringVar(&source, "source", "local", "Source: local, user, web")
+	addCmd.Flags().StringVar(&key, "key", "", "Stable key (defaults to a slug of the title)")
+	addCmd.Flags().StringSliceVar(&tags, "tag", nil, "Tags (repeatable)")
+	addCmd.Flags().StringSliceVar(&links, "link", nil, "Node ids to relate this document to (repeatable)")
+	addCmd.Flags().BoolVar(&noEmbed, "no-embeddings", false, "Skip embedding generation")
+
+	var lScope, lPath, lType, lStatus, lQuery string
+	var lLimit int
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List documents in a scope",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			workspace, err := resolveDocWorkspace(store, cfg, lScope, lPath)
+			if err != nil {
+				return err
+			}
+			docs, err := knowledge.List(cmd.Context(), store, knowledge.ListFilter{
+				Workspace: workspace, DocType: lType, Status: lStatus, Query: lQuery, Limit: lLimit,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), docs, func(w io.Writer) error {
+				return renderDocList(w, docs)
+			})
+		},
+	}
+	listCmd.Flags().StringVar(&lScope, "scope", "project", "Scope: project or global")
+	listCmd.Flags().StringVar(&lPath, "path", ".", "Workspace path for project scope")
+	listCmd.Flags().StringVar(&lType, "type", "", "Filter by document type")
+	listCmd.Flags().StringVar(&lStatus, "status", "", "Filter by status (fresh, stale, used)")
+	listCmd.Flags().StringVar(&lQuery, "query", "", "Filter by text")
+	listCmd.Flags().IntVar(&lLimit, "limit", 50, "Maximum documents")
+
+	var noMark bool
+	readCmd := &cobra.Command{
+		Use:   "read <id>",
+		Short: "Read a document with its chunks and related nodes (marks handoffs as used)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			doc, err := knowledge.Read(cmd.Context(), store, args[0], !noMark, writerID())
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), doc, func(w io.Writer) error {
+				fmt.Fprintf(w, "%s  [%s · %s]\n\n%s\n", doc.Node.Name, doc.Node.Prop("doc_type"), doc.Node.Prop("status"), doc.Node.Content)
+				if len(doc.Related) > 0 {
+					fmt.Fprintf(w, "\nRelated:\n")
+					for _, r := range doc.Related {
+						fmt.Fprintf(w, "  - %s (%s) %s\n", r.Name, r.Type, r.ID)
+					}
+				}
+				return nil
+			})
+		},
+	}
+	readCmd.Flags().BoolVar(&noMark, "no-mark", false, "Do not mark a handoff document as used")
+
+	var rel string
+	linkCmd := &cobra.Command{
+		Use:   "link <from_id> <to_id>",
+		Short: "Create a relation edge between two nodes",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			if err := knowledge.Link(cmd.Context(), store, args[0], args[1], rel); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Linked %s -> %s (%s)\n", args[0], args[1], rel)
+			return nil
+		},
+	}
+	linkCmd.Flags().StringVar(&rel, "rel", knowledge.RelRelatesTo, "Relation type")
+
+	docCmd.AddCommand(addCmd, listCmd, readCmd, linkCmd)
+	return docCmd
+}
+
+// readContent resolves document content from --file, stdin ('-'), or args.
+func readContent(cmd *cobra.Command, file string, args []string) (string, error) {
+	if strings.TrimSpace(file) != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("read file: %w", err)
+		}
+		return string(data), nil
+	}
+	if len(args) == 1 && args[0] == "-" {
+		data, err := io.ReadAll(cmd.InOrStdin())
+		if err != nil {
+			return "", fmt.Errorf("read stdin: %w", err)
+		}
+		return string(data), nil
+	}
+	if len(args) > 0 {
+		return strings.Join(args, " "), nil
+	}
+	return "", fmt.Errorf("provide content via --file, '-' for stdin, or inline text")
 }
 
 func newCrawlCmd() *cobra.Command {
