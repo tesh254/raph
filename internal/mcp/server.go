@@ -13,6 +13,7 @@ import (
 	"raph/internal/db"
 	"raph/internal/indexer"
 	"raph/internal/memory"
+	"raph/internal/query"
 	"raph/internal/verbose"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -98,6 +99,15 @@ type CrawlWebsiteArgs struct {
 type IndexCodebaseArgs struct {
 	Path         string `json:"path,omitempty" jsonschema:"Codebase directory to index. Defaults to the MCP server working directory."`
 	NoEmbeddings bool   `json:"no_embeddings,omitempty" jsonschema:"Skip embedding generation while indexing"`
+}
+
+type SearchArgs struct {
+	Query  string   `json:"query" jsonschema:"The search query or pattern"`
+	Mode   string   `json:"mode,omitempty" jsonschema:"Search mode: auto (ranked keyword, default), literal (exact substring), regex, or vector (semantic)"`
+	Types  []string `json:"types,omitempty" jsonschema:"Filter to node types such as func, type, file, markdown_chunk, file_chunk, doc, doc_chunk"`
+	Path   string   `json:"path,omitempty" jsonschema:"Workspace path to scope the search. Defaults to the server working directory"`
+	Global bool     `json:"global,omitempty" jsonschema:"Search across all indexed workspaces instead of one"`
+	Limit  int      `json:"limit,omitempty" jsonschema:"Maximum number of matches"`
 }
 
 type SearchCodebaseArgs struct {
@@ -517,6 +527,32 @@ func (m *MCPServerWrapper) registerTools() {
 	})
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "search",
+		Description: "Ripgrep-style search over the indexed graph (code, docs, knowledge). Modes: auto (ranked keyword), literal (exact substring), regex, vector (semantic). Filter by node type; scope to the current workspace or all.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchArgs) (*mcpsdk.CallToolResult, query.Result, error) {
+		workspace := ""
+		if !args.Global {
+			ws, err := m.resolveWorkspace(args.Path)
+			if err != nil {
+				return nil, query.Result{}, err
+			}
+			workspace = ws
+		}
+		mode := query.Mode(strings.TrimSpace(args.Mode))
+		result, err := query.Search(ctx, m.store, m.config, query.Options{
+			Query:     args.Query,
+			Workspace: workspace,
+			Types:     args.Types,
+			Limit:     args.Limit,
+			Mode:      mode,
+		})
+		if err != nil {
+			return nil, query.Result{}, err
+		}
+		return textResult(renderJSON(result)), result, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "search_codebase",
 		Description: "Searches indexed codebase nodes with explicit file, symbol, and chunk result groups.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchCodebaseArgs) (*mcpsdk.CallToolResult, SearchCodebaseOutput, error) {
@@ -650,6 +686,24 @@ func (m *MCPServerWrapper) crossCorpusNeighbors(ctx context.Context, nodeID stri
 		output.Mode = "semantic"
 	}
 	return output, nil
+}
+
+// resolveWorkspace maps a path (default: server working directory) to a graph
+// workspace id for scoped searches.
+func (m *MCPServerWrapper) resolveWorkspace(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = "."
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace path: %w", err)
+	}
+	idx, err := indexer.New(m.store, m.config, absPath, true)
+	if err != nil {
+		return "", err
+	}
+	return idx.WorkspaceID(), nil
 }
 
 func (m *MCPServerWrapper) searchCodebase(ctx context.Context, args SearchCodebaseArgs) (SearchCodebaseOutput, error) {

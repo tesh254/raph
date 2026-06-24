@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"raph/internal/agentsetup"
@@ -14,6 +16,8 @@ import (
 	"raph/internal/db"
 	"raph/internal/indexer"
 	serverpkg "raph/internal/mcp"
+	"raph/internal/output"
+	"raph/internal/query"
 	"raph/internal/signing"
 	"raph/internal/studio"
 	"raph/internal/syncer"
@@ -25,6 +29,21 @@ import (
 )
 
 const autoUpdateEnvVar = "RAPH_AUTO_UPDATE"
+
+// outputFormatFlag holds the value of the root --format flag (text|json|auto).
+// Empty means auto-detect (JSON for agents/pipes, text for terminals).
+var outputFormatFlag string
+
+func resolveFormat() output.Format { return output.Resolve(outputFormatFlag) }
+
+// resolveWorkspaceID maps a filesystem path to its graph workspace id.
+func resolveWorkspaceID(store db.GraphStore, cfg *config.Config, path string) (string, error) {
+	idx, err := indexer.New(store, cfg, path, true)
+	if err != nil {
+		return "", err
+	}
+	return idx.WorkspaceID(), nil
+}
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
@@ -63,8 +82,10 @@ func newRootCmd() *cobra.Command {
 	}
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", true, "Print verbose operational logs (enabled by default)")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress verbose operational logs")
+	rootCmd.PersistentFlags().StringVar(&outputFormatFlag, "format", "", "Output format: text, json, or auto (default auto: json for agents/pipes)")
 
 	rootCmd.AddCommand(newInitCmd())
+	rootCmd.AddCommand(newSearchCmd())
 	rootCmd.AddCommand(newCrawlCmd())
 	rootCmd.AddCommand(newStartCmd())
 	rootCmd.AddCommand(newStudioCmd())
@@ -295,6 +316,79 @@ func newInitCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&scanPath, "path", ".", "Workspace path to index")
 	cmd.Flags().BoolVar(&noEmbeddings, "no-embeddings", false, "Skip remote embedding generation during indexing")
+	return cmd
+}
+
+func newSearchCmd() *cobra.Command {
+	var scanPath string
+	var global bool
+	var types []string
+	var limit int
+	var literal bool
+	var regex bool
+	var vector bool
+
+	cmd := &cobra.Command{
+		Use:   "search <query>",
+		Short: "Search the indexed graph (ripgrep-style) for code, docs, and knowledge",
+		Long: "Search indexed nodes without learning raph query syntax. Defaults to ranked " +
+			"keyword search; use --literal for exact substrings, --regex for patterns, or " +
+			"--vector for semantic matches. Emits JSON for agents and text for terminals.",
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			workspace := ""
+			if !global {
+				workspace, err = resolveWorkspaceID(store, cfg, scanPath)
+				if err != nil {
+					return err
+				}
+			}
+
+			mode := query.ModeAuto
+			switch {
+			case regex:
+				mode = query.ModeRegex
+			case vector:
+				mode = query.ModeVector
+			case literal:
+				mode = query.ModeLiteral
+			}
+
+			result, err := query.Search(cmd.Context(), store, cfg, query.Options{
+				Query:     strings.Join(args, " "),
+				Workspace: workspace,
+				Types:     types,
+				Limit:     limit,
+				Mode:      mode,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), result, func(w io.Writer) error {
+				var sb strings.Builder
+				result.RenderText(&sb)
+				_, writeErr := io.WriteString(w, sb.String())
+				return writeErr
+			})
+		},
+	}
+	cmd.Flags().StringVar(&scanPath, "path", ".", "Workspace path to scope the search")
+	cmd.Flags().BoolVar(&global, "global", false, "Search across all indexed workspaces")
+	cmd.Flags().StringSliceVar(&types, "type", nil, "Filter by node type (func, type, file, markdown_chunk, file_chunk, doc, doc_chunk)")
+	cmd.Flags().IntVar(&limit, "limit", 10, "Maximum number of matches")
+	cmd.Flags().BoolVar(&literal, "literal", false, "Exact substring match (ripgrep -F style)")
+	cmd.Flags().BoolVar(&regex, "regex", false, "Treat the query as a regular expression")
+	cmd.Flags().BoolVar(&vector, "vector", false, "Semantic search (requires a configured embedding provider)")
 	return cmd
 }
 
