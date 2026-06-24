@@ -1,0 +1,31 @@
+internal/knowledge/knowledge.go
+  s_30200fc5b8ddb9::t_1e320745feeff2 1-361
+cmd/raph/main.go
+  s_30200fc5b8ddb9::t_be8fea52b987e9 94
+  s_30200fc5b8ddb9::t_74a457bbe87019 744-942
+  s_30200fc5b8ddb9::t_7658adc506a710 19
+internal/knowledge/knowledge_test.go
+  s_30200fc5b8ddb9::t_c3895fcdf3c544 126
+  s_30200fc5b8ddb9::t_5631c71a725119 1-125
+internal/mcp/server.go
+  s_30200fc5b8ddb9::t_25fc2c8d9e57b3 15
+  s_30200fc5b8ddb9::t_7264146ea2be5e 104-145
+  s_30200fc5b8ddb9::t_0cf0930f7a21ce 787-799
+  s_30200fc5b8ddb9::t_c9fd8383627efb 533-606
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "6fbad0177ca1c903a3bc930b620c118a56dc2a77",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
