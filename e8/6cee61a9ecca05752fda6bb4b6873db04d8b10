@@ -1,0 +1,29 @@
+internal/syncer/watcher.go
+  s_30200fc5b8ddb9::t_e25de65b1f701a 1-5,7-93,95-138
+  s_30200fc5b8ddb9::t_cc8538e5f71bde 6
+  s_30200fc5b8ddb9::t_1da5a7f6422cc3 94
+internal/syncer/watcher_test.go
+  s_30200fc5b8ddb9::t_422d8e81d7bae6 1-63
+go.mod
+  s_30200fc5b8ddb9::t_4600460fbd7a70 9
+internal/indexer/indexer.go
+  s_30200fc5b8ddb9::t_cc322101e46f0a 450-461
+internal/syncer/syncer.go
+  s_30200fc5b8ddb9::t_6f27f0afa3ebae 247-260,274-282,286-287
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "e86cee61a9ecca05752fda6bb4b6873db04d8b10",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
