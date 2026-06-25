@@ -411,6 +411,13 @@ func newSCIPInstallCmd() *cobra.Command {
 			if dryRun {
 				return nil
 			}
+			// Preflight: the install relies on a package manager / runtime being
+			// present (npm, pip, rustup, gem). Fail with a clear prerequisite
+			// message instead of a cryptic exec error.
+			if _, err := exec.LookPath(plan.Argv[0]); err != nil {
+				return fmt.Errorf("%q is required to install the %s resolver but was not found on PATH; install %s first, or run manually: %s",
+					plan.Argv[0], plan.Language, plan.Argv[0], plan.Hint)
+			}
 			run := exec.Command(plan.Argv[0], plan.Argv[1:]...)
 			run.Stdout = out
 			run.Stderr = cmd.ErrOrStderr()

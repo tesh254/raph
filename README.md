@@ -196,6 +196,26 @@ raph doc link <a> <b> Relate two nodes
 raph export --doc <id> Export a document/bundle; publish to gist/repo/S3/R2
 ```
 
+#### SCIP resolver prerequisites
+
+`raph scip install` shells out to a package manager, so the matching runtime
+must already be on the machine. raph does **not** bundle these (they are large
+native/runtime programs in other languages; embedding them would bloat the
+binary past 1GB and require license review). Install the prerequisite once:
+
+| Language | Installs via | Requires |
+|----------|--------------|----------|
+| typescript / javascript | `npm i -g @sourcegraph/scip-typescript` | Node.js |
+| python | `pip install scip-python` (or npm) | Python+pip (or Node.js) |
+| rust | `rustup component add rust-analyzer` | rustup |
+| ruby | `gem install scip-ruby` | Ruby+gem |
+| java | coursier (`scip-java`) | JVM |
+| c / c++ | prebuilt release (`scip-clang`) | — (manual download) |
+
+If the prerequisite is missing, `raph scip install` reports exactly which tool
+to install first. Without any resolver a language still gets the bundled
+pure-Go import-aware cross-file resolver — only compiler-grade precision is lost.
+
 Documentation site: [tesh254/raph-docs](https://github.com/tesh254/raph-docs).
 Live dashboard: [tesh254/raph-studio](https://github.com/tesh254/raph-studio).
 
