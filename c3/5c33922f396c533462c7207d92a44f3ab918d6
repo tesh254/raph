@@ -1,0 +1,19 @@
+README.md
+  s_30200fc5b8ddb9::t_b0940b32f0af61 177-197
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "c35c33922f396c533462c7207d92a44f3ab918d6",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
