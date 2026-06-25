@@ -666,7 +666,7 @@ func (m *MCPServerWrapper) registerTools() {
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "index_codebase",
-		Description: "Indexes a local codebase into the graph. Defaults to the MCP server working directory and replaces that workspace's existing indexed nodes.",
+		Description: "Indexes a local codebase into the graph. Defaults to the MCP server working directory and replaces that workspace's existing indexed nodes. The result's stats.scip_active lists languages resolved compiler-grade; stats.scip_suggestions lists languages that would gain go/types-level cross-file accuracy if you install the named indexer (each with an install command) — you may install one and re-index to upgrade.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args IndexCodebaseArgs) (*mcpsdk.CallToolResult, IndexCodebaseOutput, error) {
 		path := strings.TrimSpace(args.Path)
 		if path == "" {

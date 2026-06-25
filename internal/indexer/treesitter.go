@@ -190,11 +190,15 @@ func (i *Indexer) indexTreeSitterFile(ctx context.Context, relPath, parentID, co
 	walk(tree.RootNode())
 
 	// Pass 2: references -> USES edges (owner symbol -> referenced declaration).
-	// Skipped when a compiler-backed SCIP indexer covers this language — its
-	// cross-file accurate edges supersede the syntactic within-file ones.
+	// Skipped when a compiler-backed SCIP indexer covers this language (its
+	// cross-file accurate edges supersede), or when an import-aware spec exists
+	// (the post-walk fallback resolves within-file AND cross-file for it).
 	if i.scipCovered[entry.Name] {
 		verbose.Printf("tree-sitter usage pass skipped for %s (SCIP covers %s)", relPath, entry.Name)
 		return nil
+	}
+	if _, ok := importSpecs[entry.Name]; ok {
+		return nil // handled by linkImportAwareUsages post-walk
 	}
 	i.linkTreeSitterUsages(ctx, tree.RootNode(), lang, src, spec, declared, stats)
 	return nil

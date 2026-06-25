@@ -33,6 +33,14 @@ type Stats struct {
 	NodesSaved        int `json:"nodes_saved"`
 	EdgesSaved        int `json:"edges_saved"`
 	EmbeddingsCreated int `json:"embeddings_created"`
+
+	// Resolution tier reporting (full index only). SCIPActive lists languages
+	// resolved compiler-grade this run; SCIPSuggestions lists languages present
+	// whose compiler-grade indexer is not installed, with install commands — so
+	// `raph init` (and the MCP index tool) can prompt the user or let an agent
+	// install the tool itself and re-index.
+	SCIPActive      []string         `json:"scip_active,omitempty"`
+	SCIPSuggestions []SCIPSuggestion `json:"scip_suggestions,omitempty"`
 }
 
 type Indexer struct {
@@ -119,6 +127,14 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	// Compiler-grade reference linking for other languages, when an external
 	// SCIP indexer is installed. Cross-file accurate; best-effort.
 	i.runSCIP(ctx, scipToolsAvailable, &stats)
+
+	// Import-aware cross-file fallback for tree-sitter languages a SCIP tool did
+	// not cover — resolves references through imports without any external tool.
+	i.linkImportAwareUsages(ctx, &stats)
+
+	// Report which languages got compiler-grade resolution and which could, so
+	// the CLI/MCP can nudge the user (or agent) to install the missing tool.
+	stats.SCIPActive, stats.SCIPSuggestions = i.scipReport(scipToolsAvailable)
 
 	verbose.Printf("walk complete files=%d nodes=%d edges=%d embeddings=%d", stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
 	return stats, nil

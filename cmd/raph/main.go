@@ -319,6 +319,7 @@ func newInitCmd() *cobra.Command {
 			if !noEmbeddings && (cfg == nil || !cfg.HasEmbeddingProvider()) {
 				fmt.Fprintln(out, "No resolved embedding provider key found; graph was indexed without embeddings. Run `raph config init` and set OPENROUTER_API_KEY to enable semantic search.")
 			}
+			printSCIPGuidance(out, stats)
 			return nil
 		},
 	}
@@ -326,6 +327,29 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&scanPath, "path", ".", "Workspace path to index")
 	cmd.Flags().BoolVar(&noEmbeddings, "no-embeddings", false, "Skip remote embedding generation during indexing")
 	return cmd
+}
+
+// printSCIPGuidance surfaces resolution-tier info after an index: which
+// languages got compiler-grade resolution, and an actionable prompt for any
+// language that could be upgraded by installing its indexer. Phrased so a human
+// reads it as a suggestion and an agent can act on the install command itself.
+func printSCIPGuidance(out io.Writer, stats indexer.Stats) {
+	if len(stats.SCIPActive) > 0 {
+		fmt.Fprintf(out, "Compiler-grade resolution active: %s\n", strings.Join(stats.SCIPActive, ", "))
+	}
+	if len(stats.SCIPSuggestions) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "\nUpgrade available — these languages used the bundled import-aware resolver.")
+	fmt.Fprintln(out, "For go/types-level cross-file accuracy, install the matching indexer, then re-run `raph init`:")
+	for _, s := range stats.SCIPSuggestions {
+		if s.Install != "" {
+			fmt.Fprintf(out, "  %-12s %s\n", s.Language, s.Install)
+		} else {
+			fmt.Fprintf(out, "  %-12s install %s\n", s.Language, s.Binary)
+		}
+	}
+	fmt.Fprintln(out, "(Agents: you may install a tool above and re-run `raph init` to upgrade resolution. See `raph scip`.)")
 }
 
 func newSCIPCmd() *cobra.Command {

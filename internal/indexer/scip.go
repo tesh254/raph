@@ -150,6 +150,39 @@ var scipInstallHints = map[string]string{
 	"scip-clang":      "see github.com/sourcegraph/scip-clang releases",
 }
 
+// SCIPSuggestion tells the user (or an agent) how to upgrade a language to
+// compiler-grade resolution.
+type SCIPSuggestion struct {
+	Language string `json:"language"`
+	Binary   string `json:"binary"`
+	Install  string `json:"install"`
+}
+
+// scipReport partitions the languages present this run into those already
+// resolved compiler-grade (tool installed) and those that could be (tool
+// missing), based on the file extensions actually indexed.
+func (i *Indexer) scipReport(available []scipTool) (active []string, suggestions []SCIPSuggestion) {
+	installed := map[string]bool{}
+	for _, t := range available {
+		installed[t.bin] = true
+	}
+	for _, t := range scipTools {
+		if !i.languagePresent(t.exts) {
+			continue
+		}
+		if installed[t.bin] {
+			active = append(active, t.label)
+		} else {
+			suggestions = append(suggestions, SCIPSuggestion{
+				Language: t.label,
+				Binary:   t.bin,
+				Install:  scipInstallHints[t.bin],
+			})
+		}
+	}
+	return active, suggestions
+}
+
 // SCIPStatus reports the install state of every registered SCIP indexer.
 func SCIPStatus() []SCIPToolStatus {
 	out := make([]SCIPToolStatus, 0, len(scipTools))
