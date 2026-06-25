@@ -1,0 +1,28 @@
+internal/indexer/gosem.go
+  s_30200fc5b8ddb9::t_d120f7c3bf6b82 1-240
+internal/indexer/indexer_test.go
+  s_30200fc5b8ddb9::t_7d6a770e860c70 121-215
+internal/db/libsql.go
+  s_30200fc5b8ddb9::t_7446ee58bb7344 971,979-980
+go.mod
+  s_30200fc5b8ddb9::t_18803a9395bb68 15-16,45-46,48-49
+internal/indexer/indexer.go
+  s_30200fc5b8ddb9::t_53b63f5afdf0d6 302-310,312-313,318-341,349-395
+  s_30200fc5b8ddb9::t_2dc41ea8cc8f00 102-105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "f17deac6f2641c747c9f4745e171fc682ab3df66",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
