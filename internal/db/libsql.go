@@ -535,6 +535,34 @@ func (s *LibSQLStore) SaveEdge(ctx context.Context, edge Edge) error {
 	return err
 }
 
+// SaveEdges persists many edges in a single transaction. Because the store runs
+// on one connection in WAL mode, the per-edge autocommit fsync dominates the
+// cost of edge-heavy index passes; batching collapses thousands of commits into
+// one. It is intentionally NOT part of the GraphStore interface — callers detect
+// it via an optional-capability type assertion and fall back to SaveEdge.
+func (s *LibSQLStore) SaveEdges(ctx context.Context, edges []Edge) error {
+	if len(edges) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO edges (source_id, target_id, type) VALUES (?, ?, ?) ON CONFLICT DO NOTHING;`)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for _, edge := range edges {
+		if _, err := stmt.ExecContext(ctx, edge.SourceID, edge.TargetID, edge.Type); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *LibSQLStore) VectorSearch(ctx context.Context, queryVector []float32, limit int) ([]Node, error) {
 	return s.vectorSearch(ctx, "", queryVector, limit)
 }

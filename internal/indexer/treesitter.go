@@ -218,7 +218,8 @@ func (i *Indexer) linkTreeSitterUsages(ctx context.Context, root *ts.Node, lang 
 	if len(declared) == 0 {
 		return
 	}
-	edges := 0
+	var batch []db.Edge
+	seen := map[string]bool{} // dedupe owner|target within this file
 	var walk func(n *ts.Node, ownerID string)
 	walk = func(n *ts.Node, ownerID string) {
 		if n == nil {
@@ -235,8 +236,10 @@ func (i *Indexer) linkTreeSitterUsages(ctx context.Context, root *ts.Node, lang 
 		if t == "identifier" || t == "type_identifier" || t == "constant" {
 			name := n.Text(src)
 			if targetID, ok := declared[name]; ok && ownerID != "" && targetID != ownerID {
-				if err := i.store.SaveEdge(ctx, db.Edge{SourceID: ownerID, TargetID: targetID, Type: "USES"}); err == nil {
-					edges++
+				key := ownerID + "\x00" + targetID
+				if !seen[key] {
+					seen[key] = true
+					batch = append(batch, db.Edge{SourceID: ownerID, TargetID: targetID, Type: "USES"})
 				}
 			}
 		}
@@ -245,7 +248,7 @@ func (i *Indexer) linkTreeSitterUsages(ctx context.Context, root *ts.Node, lang 
 		}
 	}
 	walk(root, "")
-	stats.EdgesSaved += edges
+	stats.EdgesSaved += i.saveEdges(ctx, batch)
 }
 
 // symbolName extracts a declaration's name via the grammar's "name" field, with

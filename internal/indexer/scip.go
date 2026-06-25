@@ -267,12 +267,8 @@ func SCIPStatus() []SCIPToolStatus {
 // runSCIP runs every available SCIP tool whose language is present in the
 // workspace, decodes the index, and links accurate reference edges. Best-effort:
 // a tool that fails or is missing source never blocks indexing.
-func (i *Indexer) runSCIP(ctx context.Context, tools []scipTool, stats *Stats) {
-	if i.store == nil || len(tools) == 0 {
-		return
-	}
-	nodeIdx := i.buildSymbolIndex(ctx)
-	if len(nodeIdx) == 0 {
+func (i *Indexer) runSCIP(ctx context.Context, tools []scipTool, nodeIdx map[string]symbolNode, stats *Stats) {
+	if i.store == nil || len(tools) == 0 || len(nodeIdx) == 0 {
 		return
 	}
 	tmp, err := os.MkdirTemp("", "raph-scip-")
@@ -425,7 +421,8 @@ func (i *Indexer) linkSCIPIndex(ctx context.Context, data []byte, nodeIdx map[st
 		owners[rel] = s
 	}
 
-	edges := 0
+	var batch []db.Edge
+	seen := map[string]bool{} // dedupe owner|target|type within this index
 	for _, d := range docs {
 		spans := owners[d.relPath]
 		if len(spans) == 0 {
@@ -447,11 +444,15 @@ func (i *Indexer) linkSCIPIndex(ctx context.Context, data []byte, nodeIdx map[st
 			if target.isVar && o.roles&scipRoleWriteAccess != 0 {
 				edgeType = "MUTATES"
 			}
-			if err := i.store.SaveEdge(ctx, db.Edge{SourceID: owner.id, TargetID: target.id, Type: edgeType}); err == nil {
-				edges++
+			key := owner.id + "\x00" + target.id + "\x00" + edgeType
+			if seen[key] {
+				continue
 			}
+			seen[key] = true
+			batch = append(batch, db.Edge{SourceID: owner.id, TargetID: target.id, Type: edgeType})
 		}
 	}
+	edges := i.saveEdges(ctx, batch)
 	stats.EdgesSaved += edges
 	return edges
 }

@@ -45,22 +45,32 @@ var importSpecs = map[string]importSpec{
 
 // linkImportAwareUsages runs after the main walk (full index only). It links
 // within-file AND cross-file references for fallback languages.
-func (i *Indexer) linkImportAwareUsages(ctx context.Context, stats *Stats) {
-	if i.store == nil {
+func (i *Indexer) linkImportAwareUsages(ctx context.Context, nodeIdx map[string]symbolNode, stats *Stats) {
+	if i.store == nil || len(nodeIdx) == 0 {
 		return
 	}
-	nodeIdx := i.buildSymbolIndex(ctx)
-	if len(nodeIdx) == 0 {
-		return
-	}
+	// Derive both lookups from nodeIdx in a single O(symbols) pass: the set of
+	// known files (for import resolution) and a per-file name->id bucket (so a
+	// file's local declarations don't require rescanning every workspace symbol).
 	known := map[string]bool{}
-	for key := range nodeIdx {
-		if h := strings.IndexByte(key, 0); h >= 0 {
-			known[key[:h]] = true
+	byFile := map[string]map[string]string{}
+	for key, sn := range nodeIdx {
+		h := strings.IndexByte(key, 0)
+		if h < 0 {
+			continue
 		}
+		rel, name := key[:h], key[h+1:]
+		known[rel] = true
+		bucket := byFile[rel]
+		if bucket == nil {
+			bucket = map[string]string{}
+			byFile[rel] = bucket
+		}
+		bucket[name] = sn.id
 	}
 
-	edges := 0
+	var batch []db.Edge
+	seen := map[string]bool{} // dedupe owner|target within this pass
 	_ = filepath.WalkDir(i.root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -96,29 +106,32 @@ func (i *Indexer) linkImportAwareUsages(ctx context.Context, stats *Stats) {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
-		n := i.linkImportFile(ctx, rel, entry, ispec, spec, nodeIdx, known)
-		edges += n
+		i.collectImportFileEdges(rel, entry, ispec, spec, nodeIdx, known, byFile[rel], seen, &batch)
 		return nil
 	})
+	edges := i.saveEdges(ctx, batch)
 	stats.EdgesSaved += edges
 	verbose.Printf("import-aware fallback linked %d cross-file/within-file reference edges", edges)
 }
 
-func (i *Indexer) linkImportFile(ctx context.Context, rel string, entry *grammars.LangEntry, ispec importSpec, spec langSpec, nodeIdx map[string]symbolNode, known map[string]bool) int {
+// collectImportFileEdges appends this file's resolved reference edges to batch.
+// local is the file's name->nodeID bucket (precomputed from the shared index);
+// seen dedupes owner|target across the whole pass.
+func (i *Indexer) collectImportFileEdges(rel string, entry *grammars.LangEntry, ispec importSpec, spec langSpec, nodeIdx map[string]symbolNode, known map[string]bool, local map[string]string, seen map[string]bool, batch *[]db.Edge) {
 	content, err := os.ReadFile(filepath.Join(i.root, rel))
 	if err != nil {
-		return 0
+		return
 	}
 	lang := entry.Language()
 	if lang == nil {
-		return 0
+		return
 	}
 	defer func() { _ = recover() }() // never let a parser panic abort the pass
 
 	parser := ts.NewParser(lang)
 	tree, perr := parser.Parse(content)
 	if perr != nil || tree == nil || tree.RootNode() == nil {
-		return 0
+		return
 	}
 	src := content
 
@@ -147,19 +160,12 @@ func (i *Indexer) linkImportFile(ctx context.Context, rel string, entry *grammar
 	}
 	collectImports(tree.RootNode())
 
-	// Local declarations in this file (name -> node id), from stored nodes.
-	local := map[string]string{}
-	for key, sn := range nodeIdx {
-		if h := strings.IndexByte(key, 0); h >= 0 && key[:h] == rel {
-			local[key[h+1:]] = sn.id
-		}
-	}
+	// local declarations come precomputed from the shared index bucket.
 	if len(local) == 0 && len(imported) == 0 {
-		return 0
+		return
 	}
 
 	// Walk references, tracking the nearest enclosing declared symbol (owner).
-	edges := 0
 	var walk func(n *ts.Node, ownerID string)
 	walk = func(n *ts.Node, ownerID string) {
 		if n == nil {
@@ -182,8 +188,10 @@ func (i *Indexer) linkImportFile(ctx context.Context, rel string, entry *grammar
 				targetID = id
 			}
 			if targetID != "" && ownerID != "" && targetID != ownerID {
-				if err := i.store.SaveEdge(ctx, db.Edge{SourceID: ownerID, TargetID: targetID, Type: "USES"}); err == nil {
-					edges++
+				key := ownerID + "\x00" + targetID
+				if !seen[key] {
+					seen[key] = true
+					*batch = append(*batch, db.Edge{SourceID: ownerID, TargetID: targetID, Type: "USES"})
 				}
 			}
 		}
@@ -192,7 +200,6 @@ func (i *Indexer) linkImportFile(ctx context.Context, rel string, entry *grammar
 		}
 	}
 	walk(tree.RootNode(), "")
-	return edges
 }
 
 // --- JavaScript / TypeScript ---

@@ -124,13 +124,18 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	// full index only; best-effort so a non-building tree never blocks indexing.
 	i.linkGoUsages(ctx, &stats)
 
+	// (relPath, name) -> node index, built once from the now-complete node set
+	// and shared by both reference-linking passes below (each previously rebuilt
+	// it from a full ListNodes scan).
+	nodeIdx := i.buildSymbolIndex(ctx)
+
 	// Compiler-grade reference linking for other languages, when an external
 	// SCIP indexer is installed. Cross-file accurate; best-effort.
-	i.runSCIP(ctx, scipToolsAvailable, &stats)
+	i.runSCIP(ctx, scipToolsAvailable, nodeIdx, &stats)
 
 	// Import-aware cross-file fallback for tree-sitter languages a SCIP tool did
 	// not cover — resolves references through imports without any external tool.
-	i.linkImportAwareUsages(ctx, &stats)
+	i.linkImportAwareUsages(ctx, nodeIdx, &stats)
 
 	// Report which languages got compiler-grade resolution and which could, so
 	// the CLI/MCP can nudge the user (or agent) to install the missing tool.
@@ -482,6 +487,35 @@ func (i *Indexer) embed(ctx context.Context, text string, stats *Stats) ([]float
 	}
 	stats.EmbeddingsCreated++
 	return embedding, nil
+}
+
+// edgeBatcher is the optional batch-write capability some stores expose. The
+// indexer uses it when present (one transaction for an edge-heavy pass) and
+// falls back to per-edge SaveEdge otherwise, so mock stores need no changes.
+type edgeBatcher interface {
+	SaveEdges(ctx context.Context, edges []db.Edge) error
+}
+
+// saveEdges persists a batch of edges and returns how many were written. It
+// prefers the store's batch path (single transaction); on its failure, or when
+// the store lacks one, it writes them one at a time counting successes.
+func (i *Indexer) saveEdges(ctx context.Context, edges []db.Edge) int {
+	if len(edges) == 0 {
+		return 0
+	}
+	if b, ok := i.store.(edgeBatcher); ok {
+		if err := b.SaveEdges(ctx, edges); err == nil {
+			return len(edges)
+		}
+		// Batch failed (and rolled back atomically): fall through to per-edge.
+	}
+	n := 0
+	for _, e := range edges {
+		if err := i.store.SaveEdge(ctx, e); err == nil {
+			n++
+		}
+	}
+	return n
 }
 
 func (i *Indexer) nodeID(kind string, raw string) string {
