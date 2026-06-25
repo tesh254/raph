@@ -1,0 +1,33 @@
+internal/db/libsql_test.go
+  s_30200fc5b8ddb9::t_de909577953578 302-336
+internal/studio/server.go
+  s_30200fc5b8ddb9::t_fcc4f106dba995 472-490
+  s_30200fc5b8ddb9::t_fe483851673e21 310
+  s_30200fc5b8ddb9::t_da0d1937765f67 183
+  s_30200fc5b8ddb9::t_fa8d9f891cfa76 114
+  s_30200fc5b8ddb9::t_4275f9ca4bf59c 256
+internal/mcp/server.go
+  s_30200fc5b8ddb9::t_68c0292aacfbcb 726
+  s_30200fc5b8ddb9::t_90e5a0a086b104 927-936
+  s_30200fc5b8ddb9::t_07d672b4dac574 589
+internal/db/libsql.go
+  s_30200fc5b8ddb9::t_c63a538b5c7c3a 269-279
+  s_30200fc5b8ddb9::t_fc50a09c83cc9e 1373-1506
+  s_30200fc5b8ddb9::t_548c70d573f2e3 1331-1333
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "33c70b4aa046b9ae112373a52c4c7b3fa947a9f9",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
