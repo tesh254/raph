@@ -266,6 +266,17 @@ func (s *LibSQLStore) migrate() error {
 			FOREIGN KEY (corpus_id) REFERENCES web_corpora(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_web_crawl_versions_corpus ON web_crawl_versions (corpus_id, created_at DESC);`,
+		// Access events power the studio analytics view: what nodes agents and
+		// users read, and what they searched for.
+		`CREATE TABLE IF NOT EXISTS access_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			node_id TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL,
+			query TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_access_events_node ON access_events (node_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_access_events_created ON access_events (created_at DESC);`,
 		// Trigram FTS5 index over searchable node text. Serves both ranked keyword
 		// (bm25) and literal substring (rg-like) lookups without scanning every row.
 		`CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
@@ -1317,6 +1328,9 @@ func (s *LibSQLStore) ClearAll(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM nodes_fts`); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM access_events`); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM memory_revisions`); err != nil {
 		return err
 	}
@@ -1354,6 +1368,140 @@ func jsonStringSlice(value string) []string {
 
 func nowTimestamp() string {
 	return time.Now().UTC().Format(time.RFC3339)
+}
+
+// AccessNode is a node ranked by how often it has been accessed.
+type AccessNode struct {
+	NodeID string `json:"node_id"`
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	URL    string `json:"url,omitempty"`
+	Count  int    `json:"count"`
+}
+
+type AccessKind struct {
+	Kind  string `json:"kind"`
+	Count int    `json:"count"`
+}
+
+type AccessSearch struct {
+	Query string `json:"query"`
+	Count int    `json:"count"`
+}
+
+type RecentAccess struct {
+	NodeID    string `json:"node_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Type      string `json:"type,omitempty"`
+	Kind      string `json:"kind"`
+	Query     string `json:"query,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+// Analytics summarizes access activity for the studio dashboard.
+type Analytics struct {
+	TotalEvents int            `json:"total_events"`
+	Last24h     int            `json:"last_24h"`
+	UniqueNodes int            `json:"unique_nodes"`
+	Searches    int            `json:"searches"`
+	TopNodes    []AccessNode   `json:"top_nodes"`
+	ByKind      []AccessKind   `json:"by_kind"`
+	TopSearches []AccessSearch `json:"top_searches"`
+	Recent      []RecentAccess `json:"recent"`
+}
+
+// RecordAccess logs an access event (a node view/read or a search). Failures
+// are non-fatal to callers — analytics is best-effort telemetry.
+func (s *LibSQLStore) RecordAccess(ctx context.Context, nodeID string, kind string, query string) error {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO access_events (node_id, kind, query, created_at) VALUES (?, ?, ?, ?)`,
+		strings.TrimSpace(nodeID), kind, strings.TrimSpace(query), nowTimestamp())
+	return err
+}
+
+func (s *LibSQLStore) Analytics(ctx context.Context, limit int) (Analytics, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	var a Analytics
+
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*), count(DISTINCT CASE WHEN node_id <> '' THEN node_id END) FROM access_events`).
+		Scan(&a.TotalEvents, &a.UniqueNodes); err != nil {
+		return Analytics{}, err
+	}
+	cutoff := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM access_events WHERE created_at >= ?`, cutoff).Scan(&a.Last24h); err != nil {
+		return Analytics{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM access_events WHERE kind = 'search'`).Scan(&a.Searches); err != nil {
+		return Analytics{}, err
+	}
+
+	topRows, err := s.db.QueryContext(ctx, `SELECT e.node_id, COALESCE(n.name, ''), COALESCE(n.type, ''), COALESCE(n.url, ''), count(*) AS c
+		FROM access_events e LEFT JOIN nodes n ON n.id = e.node_id
+		WHERE e.node_id <> '' GROUP BY e.node_id ORDER BY c DESC, e.node_id LIMIT ?`, limit)
+	if err != nil {
+		return Analytics{}, err
+	}
+	for topRows.Next() {
+		var an AccessNode
+		if err := topRows.Scan(&an.NodeID, &an.Name, &an.Type, &an.URL, &an.Count); err != nil {
+			_ = topRows.Close()
+			return Analytics{}, err
+		}
+		a.TopNodes = append(a.TopNodes, an)
+	}
+	_ = topRows.Close()
+
+	kindRows, err := s.db.QueryContext(ctx, `SELECT kind, count(*) c FROM access_events GROUP BY kind ORDER BY c DESC`)
+	if err != nil {
+		return Analytics{}, err
+	}
+	for kindRows.Next() {
+		var k AccessKind
+		if err := kindRows.Scan(&k.Kind, &k.Count); err != nil {
+			_ = kindRows.Close()
+			return Analytics{}, err
+		}
+		a.ByKind = append(a.ByKind, k)
+	}
+	_ = kindRows.Close()
+
+	searchRows, err := s.db.QueryContext(ctx, `SELECT query, count(*) c FROM access_events WHERE kind = 'search' AND query <> '' GROUP BY query ORDER BY c DESC, query LIMIT ?`, limit)
+	if err != nil {
+		return Analytics{}, err
+	}
+	for searchRows.Next() {
+		var sr AccessSearch
+		if err := searchRows.Scan(&sr.Query, &sr.Count); err != nil {
+			_ = searchRows.Close()
+			return Analytics{}, err
+		}
+		a.TopSearches = append(a.TopSearches, sr)
+	}
+	_ = searchRows.Close()
+
+	recentRows, err := s.db.QueryContext(ctx, `SELECT e.node_id, COALESCE(n.name, ''), COALESCE(n.type, ''), e.kind, e.query, e.created_at
+		FROM access_events e LEFT JOIN nodes n ON n.id = e.node_id
+		ORDER BY e.id DESC LIMIT ?`, limit*2)
+	if err != nil {
+		return Analytics{}, err
+	}
+	for recentRows.Next() {
+		var ra RecentAccess
+		if err := recentRows.Scan(&ra.NodeID, &ra.Name, &ra.Type, &ra.Kind, &ra.Query, &ra.CreatedAt); err != nil {
+			_ = recentRows.Close()
+			return Analytics{}, err
+		}
+		a.Recent = append(a.Recent, ra)
+	}
+	_ = recentRows.Close()
+
+	return a, nil
 }
 
 func marshalProperties(props map[string]string) (string, error) {

@@ -299,3 +299,38 @@ func TestKeywordSearchUpdatesAfterContentChange(t *testing.T) {
 		t.Fatalf("updated FTS content not found: %+v", fresh)
 	}
 }
+
+func TestAccessAnalytics(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.SaveNode(ctx, Node{ID: "n1", Workspace: "ws", Domain: "code", Type: "func", Name: "Hot", Content: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := store.RecordAccess(ctx, "n1", "view", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.RecordAccess(ctx, "", "search", "database"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAccess(ctx, "", "search", "database"); err != nil {
+		t.Fatal(err)
+	}
+	a, err := store.Analytics(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.TotalEvents != 5 || a.Searches != 2 || a.UniqueNodes != 1 {
+		t.Fatalf("analytics totals wrong: %+v", a)
+	}
+	if len(a.TopNodes) != 1 || a.TopNodes[0].NodeID != "n1" || a.TopNodes[0].Count != 3 || a.TopNodes[0].Name != "Hot" {
+		t.Fatalf("top nodes wrong: %+v", a.TopNodes)
+	}
+	if len(a.TopSearches) != 1 || a.TopSearches[0].Query != "database" || a.TopSearches[0].Count != 2 {
+		t.Fatalf("top searches wrong: %+v", a.TopSearches)
+	}
+	if a.Last24h != 5 {
+		t.Fatalf("expected 5 events in last 24h, got %d", a.Last24h)
+	}
+}

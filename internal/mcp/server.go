@@ -586,6 +586,7 @@ func (m *MCPServerWrapper) registerTools() {
 		if err != nil {
 			return nil, knowledge.Document{}, err
 		}
+		m.recordAccess(ctx, args.ID, "read", "")
 		return textResult(renderJSON(doc)), doc, nil
 	})
 
@@ -722,6 +723,7 @@ func (m *MCPServerWrapper) registerTools() {
 		if err != nil {
 			return nil, query.Result{}, err
 		}
+		m.recordAccess(ctx, "", "search", strings.TrimSpace(args.Query))
 		return textResult(renderJSON(result)), result, nil
 	})
 
@@ -920,6 +922,16 @@ func (m *MCPServerWrapper) crossCorpusNeighbors(ctx context.Context, nodeID stri
 		output.Mode = "semantic"
 	}
 	return output, nil
+}
+
+// recordAccess logs an access event when the store supports it (the local
+// SQLite store does). Best-effort telemetry for the studio analytics view.
+func (m *MCPServerWrapper) recordAccess(ctx context.Context, nodeID, kind, query string) {
+	if rec, ok := m.store.(interface {
+		RecordAccess(context.Context, string, string, string) error
+	}); ok {
+		_ = rec.RecordAccess(ctx, nodeID, kind, query)
+	}
 }
 
 // resolveWorkspace maps a path (default: server working directory) to a graph

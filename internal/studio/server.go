@@ -111,6 +111,7 @@ func (s *StudioServer) Start() error {
 	mux.HandleFunc("/api/sqlite", s.handleSQLite)
 	mux.HandleFunc("/api/activity", s.handleActivity)
 	mux.HandleFunc("/api/stats", s.handleStats)
+	mux.HandleFunc("/api/analytics", s.handleAnalytics)
 	mux.HandleFunc("/api/actions/clear", s.handleClearDB)
 	mux.HandleFunc("/api/actions/init", s.handleInitDemo)
 
@@ -179,6 +180,7 @@ func (s *StudioServer) handleGetNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	_ = s.store.RecordAccess(r.Context(), id, "view", "")
 	verbose.Printf("studio node request id=%s", id)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(details)
@@ -251,6 +253,7 @@ func (s *StudioServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if req.Limit <= 0 {
 		req.Limit = 5
 	}
+	_ = s.store.RecordAccess(r.Context(), "", "search", query)
 
 	resp := SearchResponse{Mode: "keyword"}
 	verbose.Printf("studio search query=%q limit=%d", query, req.Limit)
@@ -304,6 +307,7 @@ func (s *StudioServer) handleNeighbors(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	_ = s.store.RecordAccess(r.Context(), req.NodeID, "neighbors", "")
 	verbose.Printf("studio neighbors node=%s nodes=%d edges=%d", req.NodeID, len(nodes), len(edges))
 
 	resp := NeighborResponse{Nodes: nodes, Edges: edges}
@@ -463,6 +467,25 @@ func (s *StudioServer) handleActivity(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *StudioServer) handleAnalytics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 10
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 50 {
+			limit = parsed
+		}
+	}
+	analytics, err := s.store.Analytics(r.Context(), limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, analytics)
 }
 
 func (s *StudioServer) handleStats(w http.ResponseWriter, r *http.Request) {
