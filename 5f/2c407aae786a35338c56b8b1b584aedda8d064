@@ -1,0 +1,28 @@
+go.mod
+  s_30200fc5b8ddb9::t_8218316a6aff87 13
+internal/indexer/indexer.go
+  s_30200fc5b8ddb9::t_b6f78ef7fc074a 250-254
+  s_30200fc5b8ddb9::t_9a2bd296b901a5 510-511,515
+internal/indexer/treesitter_test.go
+  s_30200fc5b8ddb9::t_00ff308be29ffe 1-77
+internal/indexer/treesitter.go
+  s_30200fc5b8ddb9::t_19803d8d0dd652 290-294
+  s_30200fc5b8ddb9::t_4cc4e3e2b60fa1 1-172,177-289,295-324
+  s_30200fc5b8ddb9::t_0210916223de17 173-176
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "5f2c407aae786a35338c56b8b1b584aedda8d064",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
