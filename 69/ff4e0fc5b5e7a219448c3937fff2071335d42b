@@ -1,0 +1,24 @@
+internal/studio/server_test.go
+  s_30200fc5b8ddb9::t_bab7969602c044 11
+  s_30200fc5b8ddb9::t_755c8a4ca06aab 223-285
+internal/studio/server.go
+  s_30200fc5b8ddb9::t_6e276b5c80d75d 126
+  s_30200fc5b8ddb9::t_d18663b9f1ccc9 112-113
+  s_30200fc5b8ddb9::t_6f9fcf72666f7d 408-496
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "69ff4e0fc5b5e7a219448c3937fff2071335d42b",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
