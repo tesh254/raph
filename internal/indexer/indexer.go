@@ -247,7 +247,11 @@ func (i *Indexer) indexFile(ctx context.Context, path string, stats *Stats) erro
 			return err
 		}
 	default:
-		if err := i.indexFallbackChunks(ctx, relPath, fileNode.ID, content, stats); err != nil {
+		if isTreeSitterFile(relPath) {
+			if err := i.indexTreeSitterFile(ctx, relPath, fileNode.ID, content, stats); err != nil {
+				return err
+			}
+		} else if err := i.indexFallbackChunks(ctx, relPath, fileNode.ID, content, stats); err != nil {
 			return err
 		}
 	}
@@ -503,18 +507,16 @@ func shouldSkipDir(name string) bool {
 }
 
 func shouldIndexFile(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
 	case ".go", ".md", ".markdown", ".txt", ".rst", ".json", ".yaml", ".yml":
 		return true
-	default:
-		return false
 	}
+	return isTreeSitterFile(path)
 }
 
 func detectDomain(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".go":
-		return "code"
 	case ".md", ".markdown", ".rst", ".txt":
 		return "documentation"
 	default:
