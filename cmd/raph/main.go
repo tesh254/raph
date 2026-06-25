@@ -90,6 +90,7 @@ func newRootCmd() *cobra.Command {
 
 	rootCmd.AddCommand(newInitCmd())
 	rootCmd.AddCommand(newSearchCmd())
+	rootCmd.AddCommand(newSCIPCmd())
 	rootCmd.AddCommand(newMemCmd())
 	rootCmd.AddCommand(newRulesCmd())
 	rootCmd.AddCommand(newDocCmd())
@@ -325,6 +326,38 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&scanPath, "path", ".", "Workspace path to index")
 	cmd.Flags().BoolVar(&noEmbeddings, "no-embeddings", false, "Skip remote embedding generation during indexing")
 	return cmd
+}
+
+func newSCIPCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "scip",
+		Short: "Show compiler-grade (SCIP) code resolvers and their install state",
+		Long: "raph reaches go/types-grade cross-file reference accuracy for non-Go languages " +
+			"by running an installed SCIP indexer (compiler-backed) during a full index. " +
+			"Languages without a tool fall back to the bundled tree-sitter symbol pass. " +
+			"This lists each registered resolver and whether it is on PATH.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			status := indexer.SCIPStatus()
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), status, func(w io.Writer) error {
+				var sb strings.Builder
+				sb.WriteString("Compiler-grade code resolvers (SCIP tier)\n")
+				sb.WriteString("Go uses go/types natively. For others, install the tool below;\n")
+				sb.WriteString("raph runs it automatically on the next full index. Disable with RAPH_NO_SCIP=1.\n\n")
+				for _, s := range status {
+					mark := "not installed"
+					if s.Installed {
+						mark = "installed (" + s.Path + ")"
+					}
+					sb.WriteString(fmt.Sprintf("  %-12s %-16s %s\n", s.Language, s.Binary, mark))
+					if !s.Installed && s.Install != "" {
+						sb.WriteString(fmt.Sprintf("               install: %s\n", s.Install))
+					}
+				}
+				_, err := io.WriteString(w, sb.String())
+				return err
+			})
+		},
+	}
 }
 
 func newSearchCmd() *cobra.Command {

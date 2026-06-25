@@ -42,6 +42,11 @@ type Indexer struct {
 	workspaceID    string
 	projectID      string
 	skipEmbeddings bool
+
+	// SCIP tier state (set per full index run).
+	scipCovered map[string]bool     // gotreesitter grammar names a SCIP tool will resolve
+	seenExts    map[string]bool     // file extensions encountered this run
+	lineCache   map[string][]string // relPath -> source lines, for SCIP name extraction
 }
 
 func New(store db.GraphStore, cfg *config.Config, root string, skipEmbeddings bool) (*Indexer, error) {
@@ -69,6 +74,14 @@ func New(store db.GraphStore, cfg *config.Config, root string, skipEmbeddings bo
 
 func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	var stats Stats
+
+	// Detect compiler-backed SCIP indexers up front: for any language they
+	// cover, the tree-sitter usage pass is skipped so the authoritative SCIP
+	// edges are the only USES/MUTATES emitted for that language.
+	scipToolsAvailable, scipCovered := detectSCIPTools()
+	i.scipCovered = scipCovered
+	i.seenExts = map[string]bool{}
+	i.lineCache = map[string][]string{}
 
 	verbose.Printf("clearing existing workspace graph workspace=%s", i.workspaceID)
 	if err := i.store.DeleteWorkspace(ctx, i.workspaceID); err != nil {
@@ -102,6 +115,10 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	// Type-accurate Go reference linking (globals, calls, type usage). Runs on
 	// full index only; best-effort so a non-building tree never blocks indexing.
 	i.linkGoUsages(ctx, &stats)
+
+	// Compiler-grade reference linking for other languages, when an external
+	// SCIP indexer is installed. Cross-file accurate; best-effort.
+	i.runSCIP(ctx, scipToolsAvailable, &stats)
 
 	verbose.Printf("walk complete files=%d nodes=%d edges=%d embeddings=%d", stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
 	return stats, nil
@@ -203,6 +220,9 @@ func (i *Indexer) indexFile(ctx context.Context, path string, stats *Stats) erro
 		return err
 	}
 	relPath = filepath.ToSlash(relPath)
+	if i.seenExts != nil {
+		i.seenExts[strings.ToLower(filepath.Ext(relPath))] = true
+	}
 	verbose.Printf("indexing file=%s domain=%s size=%d", relPath, detectDomain(relPath), info.Size())
 
 	contentBytes, err := os.ReadFile(path)

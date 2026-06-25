@@ -15,6 +15,7 @@ This repository now includes:
 - a zero-dependency Studio UI in `internal/studio`
 - scoped durable memory with lifecycle metadata for agent preferences, facts, procedures, and project knowledge
 - multi-language symbol extraction via a pure-Go tree-sitter runtime (Python, JS/JSX, TS/TSX, Rust, Elixir, Ruby, Java, C/C++, C#, PHP) producing function/type/global nodes and `USES` reference edges; Go uses `go/types` for type-accurate `USES`/`MUTATES` edges — so agents can see where globals are read and written instead of guessing
+- an optional compiler-grade resolution tier (SCIP): when a language's indexer is installed (`scip-typescript`, `scip-python`, `rust-analyzer`, `scip-ruby`, `scip-java`, `scip-clang`), raph runs it on a full index and links **cross-file** `USES`/`MUTATES` edges with go/types-level accuracy, superseding the within-file tree-sitter pass for that language. Run `raph scip` to see which resolvers are installed; disable with `RAPH_NO_SCIP=1`
 - codebase chunk indexing for remaining non-code files so README, docs, config, and other text assets are searchable alongside symbols
 - GoReleaser releases for macOS, Linux, and Windows
 - verified POSIX and PowerShell installers
@@ -181,6 +182,7 @@ These emit JSON automatically when called by an agent or through a pipe, and
 human-readable text in a terminal (override with `--format json|text`).
 
 ```text
+raph scip            Show compiler-grade (SCIP) resolvers and their install state
 raph search <query>  Ripgrep-style search (--literal, --regex, --vector, --type, --global)
 raph mem set <text>  Create/update scoped memory (--scope project|shared|global)
 raph mem search <q>  Search memory in a scope
