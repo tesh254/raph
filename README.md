@@ -14,7 +14,8 @@ This repository now includes:
 - an MCP server in `internal/mcp`
 - a zero-dependency Studio UI in `internal/studio`
 - scoped durable memory with lifecycle metadata for agent preferences, facts, procedures, and project knowledge
-- codebase chunk indexing for non-Go files so README, docs, config, and other text assets are searchable alongside symbols
+- multi-language symbol extraction via a pure-Go tree-sitter runtime (Python, JS/JSX, TS/TSX, Rust, Elixir, Ruby, Java, C/C++, C#, PHP) producing function/type/global nodes and `USES` reference edges; Go uses `go/types` for type-accurate `USES`/`MUTATES` edges — so agents can see where globals are read and written instead of guessing
+- codebase chunk indexing for remaining non-code files so README, docs, config, and other text assets are searchable alongside symbols
 - GoReleaser releases for macOS, Linux, and Windows
 - verified POSIX and PowerShell installers
 - a dedicated Homebrew tap repository
