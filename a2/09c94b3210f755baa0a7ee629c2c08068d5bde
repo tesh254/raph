@@ -1,0 +1,21 @@
+README.md
+  s_30200fc5b8ddb9::t_a85e48cad55903 199-218
+cmd/raph/main.go
+  s_30200fc5b8ddb9::t_81462a70e34d01 414-420
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "a209c94b3210f755baa0a7ee629c2c08068d5bde",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
