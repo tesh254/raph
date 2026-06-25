@@ -1,0 +1,30 @@
+internal/mcp/server.go
+  s_30200fc5b8ddb9::t_6f09462c85e959 669
+cmd/raph/main.go
+  s_30200fc5b8ddb9::t_2e0f52151c78d3 9
+  s_30200fc5b8ddb9::t_a2f0d30b252e1f 347,349,353,358-360,373-375,383-426
+internal/indexer/scip.go
+  s_30200fc5b8ddb9::t_afeae2f97e1e4f 234,236-241
+  s_30200fc5b8ddb9::t_a8f9fa64d9851a 34-37,209-212
+  s_30200fc5b8ddb9::t_ad83d8d726374b 143,153-201
+  s_30200fc5b8ddb9::t_a5d0a9f63b58f9 204-205,207-208,215-217
+README.md
+  s_30200fc5b8ddb9::t_e16ccc1c977312 18
+  s_30200fc5b8ddb9::t_c4fc5bea4f1672 186
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "d836550e92f5cd808849e735cd4c5f1aaa3a1820",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
