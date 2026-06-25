@@ -1,0 +1,30 @@
+internal/indexer/scip.go
+  s_b59b6278ace8a9::t_f003fac4f03ccb 336
+internal/indexer/indexer.go
+  s_b59b6278ace8a9::t_db19d9c9c0e86a 493-496
+  s_b59b6278ace8a9::t_ea2879fc1c4daa 135
+internal/indexer/importaware.go
+  s_b59b6278ace8a9::t_e200e0b276e8c8 180
+  s_b59b6278ace8a9::t_62a841f9787591 73-80
+  s_b59b6278ace8a9::t_ad939e81859e78 116-119,122-124,128-131
+internal/db/libsql.go
+  s_b59b6278ace8a9::t_e8b5ab1b3b0559 801-805
+  s_b59b6278ace8a9::t_2c731754b18f04 813-817
+  s_b59b6278ace8a9::t_7d06c723bf002d 864-871
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "374dc838553f3a94e72931a1cb6e9c4480e9cc58",
+  "prompts": {},
+  "sessions": {
+    "s_b59b6278ace8a9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "33666a8f-f10a-497e-b063-142e5a406ebc",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
