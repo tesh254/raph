@@ -31,10 +31,10 @@ const (
 
 // scipTool describes an external SCIP indexer raph knows how to drive.
 type scipTool struct {
-	label    string                          // language label for logs
-	bin      string                          // executable looked up on PATH
-	exts     []string                        // file extensions that signal this language is present
-	grammars []string                        // gotreesitter grammar names this tool supersedes
+	label    string                           // language label for logs
+	bin      string                           // executable looked up on PATH
+	exts     []string                         // file extensions that signal this language is present
+	grammars []string                         // gotreesitter grammar names this tool supersedes
 	build    func(root, out string) *exec.Cmd // command writing a SCIP index to out (cmd.Dir = root)
 }
 
@@ -140,7 +140,7 @@ type SCIPToolStatus struct {
 	Install   string   `json:"install_hint,omitempty"`
 }
 
-// scipInstallHints map a tool binary to a one-line install command.
+// scipInstallHints map a tool binary to a human-readable install description.
 var scipInstallHints = map[string]string{
 	"scip-typescript": "npm install -g @sourcegraph/scip-typescript",
 	"scip-python":     "pip install scip-python  # or: npm i -g @sourcegraph/scip-python",
@@ -150,13 +150,71 @@ var scipInstallHints = map[string]string{
 	"scip-clang":      "see github.com/sourcegraph/scip-clang releases",
 }
 
-// SCIPSuggestion tells the user (or an agent) how to upgrade a language to
-// compiler-grade resolution.
-type SCIPSuggestion struct {
-	Language string `json:"language"`
-	Binary   string `json:"binary"`
-	Install  string `json:"install"`
+// scipInstallCmd maps a tool binary to an executable install command (argv).
+// Tools without a single reproducible command are absent here and only ever
+// surface their hint (manual install).
+var scipInstallCmd = map[string][]string{
+	"scip-typescript": {"npm", "install", "-g", "@sourcegraph/scip-typescript"},
+	"scip-python":     {"pip", "install", "scip-python"},
+	"rust-analyzer":   {"rustup", "component", "add", "rust-analyzer"},
+	"scip-ruby":       {"gem", "install", "scip-ruby"},
 }
+
+// SCIPInstallPlan describes how to install a language's indexer.
+type SCIPInstallPlan struct {
+	Language  string   // resolved language label
+	Binary    string   // executable that will appear on PATH
+	Installed bool     // already present?
+	Argv      []string // executable install command, nil if manual-only
+	Hint      string   // human-readable instruction (always set)
+}
+
+// SCIPInstallPlanFor resolves an install plan for a language label or its tool
+// binary. ok is false when the language is not a registered resolver.
+func SCIPInstallPlanFor(language string) (SCIPInstallPlan, bool) {
+	want := strings.ToLower(strings.TrimSpace(language))
+	for _, t := range scipTools {
+		if want != t.label && want != t.bin {
+			continue
+		}
+		plan := SCIPInstallPlan{
+			Language: t.label,
+			Binary:   t.bin,
+			Argv:     scipInstallCmd[t.bin],
+			Hint:     scipInstallHints[t.bin],
+		}
+		if _, err := exec.LookPath(t.bin); err == nil {
+			plan.Installed = true
+		}
+		return plan, true
+	}
+	return SCIPInstallPlan{}, false
+}
+
+// SCIPLanguages lists every registered resolver language label.
+func SCIPLanguages() []string {
+	out := make([]string, 0, len(scipTools))
+	for _, t := range scipTools {
+		out = append(out, t.label)
+	}
+	return out
+}
+
+// SCIPSuggestion tells the user (or an agent) how to upgrade a language to
+// compiler-grade resolution. AgentAction is the canonical raph command an agent
+// should request permission to run; AgentNote states the permission protocol.
+type SCIPSuggestion struct {
+	Language    string `json:"language"`
+	Binary      string `json:"binary"`
+	Install     string `json:"install"`          // human-readable install instruction
+	AgentAction string `json:"agent_action"`     // canonical command to run (with permission)
+	AgentNote   string `json:"agent_note"`       // permission protocol for agents
+	AutoInstall bool   `json:"auto_installable"` // a reproducible install command exists
+}
+
+// scipPermissionNote is the protocol every agent-facing suggestion carries.
+const scipPermissionNote = "Ask the user for permission before running this. " +
+	"If they decline, tell them to run it themselves; never install without explicit approval."
 
 // scipReport partitions the languages present this run into those already
 // resolved compiler-grade (tool installed) and those that could be (tool
@@ -173,10 +231,14 @@ func (i *Indexer) scipReport(available []scipTool) (active []string, suggestions
 		if installed[t.bin] {
 			active = append(active, t.label)
 		} else {
+			_, auto := scipInstallCmd[t.bin]
 			suggestions = append(suggestions, SCIPSuggestion{
-				Language: t.label,
-				Binary:   t.bin,
-				Install:  scipInstallHints[t.bin],
+				Language:    t.label,
+				Binary:      t.bin,
+				Install:     scipInstallHints[t.bin],
+				AgentAction: "raph scip install " + t.label,
+				AgentNote:   scipPermissionNote,
+				AutoInstall: auto,
 			})
 		}
 	}

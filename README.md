@@ -15,7 +15,7 @@ This repository now includes:
 - a zero-dependency Studio UI in `internal/studio`
 - scoped durable memory with lifecycle metadata for agent preferences, facts, procedures, and project knowledge
 - multi-language symbol extraction via a pure-Go tree-sitter runtime (Python, JS/JSX, TS/TSX, Rust, Elixir, Ruby, Java, C/C++, C#, PHP) producing function/type/global nodes and `USES` reference edges; Go uses `go/types` for type-accurate `USES`/`MUTATES` edges — so agents can see where globals are read and written instead of guessing
-- a two-tier cross-file resolution model. **Default (no install):** an import-aware fallback resolves references through import bindings (JS/TS/JSX/TSX relative imports, Python `from … import …`), so a symbol used in one file links to its declaration in another — pure Go, offline. **Opt-in ceiling (SCIP):** when a language's indexer is installed (`scip-typescript`, `scip-python`, `rust-analyzer`, `scip-ruby`, `scip-java`, `scip-clang`), raph runs it on a full index and links `USES`/`MUTATES` edges with go/types-level accuracy, superseding the fallback for that language. After indexing, `raph init` reports which languages got compiler-grade resolution and prints an install command for any that could be upgraded (the MCP `index_codebase` result carries the same as `scip_active` / `scip_suggestions`, so agents can install a tool and re-index themselves). Run `raph scip` for resolver status; disable SCIP with `RAPH_NO_SCIP=1`
+- a two-tier cross-file resolution model. **Default (no install):** an import-aware fallback resolves references through import bindings (JS/TS/JSX/TSX relative imports, Python `from … import …`), so a symbol used in one file links to its declaration in another — pure Go, offline. **Opt-in ceiling (SCIP):** when a language's indexer is installed (`scip-typescript`, `scip-python`, `rust-analyzer`, `scip-ruby`, `scip-java`, `scip-clang`), raph runs it on a full index and links `USES`/`MUTATES` edges with go/types-level accuracy, superseding the fallback for that language. After indexing, `raph init` reports which languages got compiler-grade resolution and prints `raph scip install <language>` for any that could be upgraded. `raph scip install python` installs the resolver (re-run `raph init` after). The MCP `index_codebase` result carries the same as `scip_active` / `scip_suggestions` (each with an `agent_action` command) — **agents must ask the user for permission before installing, and if declined, hand the command to the user**; they never install unattended. Run `raph scip` for resolver status; disable SCIP with `RAPH_NO_SCIP=1`
 - codebase chunk indexing for remaining non-code files so README, docs, config, and other text assets are searchable alongside symbols
 - GoReleaser releases for macOS, Linux, and Windows
 - verified POSIX and PowerShell installers
@@ -183,6 +183,7 @@ human-readable text in a terminal (override with `--format json|text`).
 
 ```text
 raph scip            Show compiler-grade (SCIP) resolvers and their install state
+raph scip install <lang> Install a resolver (agents must ask the user first)
 raph search <query>  Ripgrep-style search (--literal, --regex, --vector, --type, --global)
 raph mem set <text>  Create/update scoped memory (--scope project|shared|global)
 raph mem search <q>  Search memory in a scope

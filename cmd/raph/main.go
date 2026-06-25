@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -343,23 +344,20 @@ func printSCIPGuidance(out io.Writer, stats indexer.Stats) {
 	fmt.Fprintln(out, "\nUpgrade available — these languages used the bundled import-aware resolver.")
 	fmt.Fprintln(out, "For go/types-level cross-file accuracy, install the matching indexer, then re-run `raph init`:")
 	for _, s := range stats.SCIPSuggestions {
-		if s.Install != "" {
-			fmt.Fprintf(out, "  %-12s %s\n", s.Language, s.Install)
-		} else {
-			fmt.Fprintf(out, "  %-12s install %s\n", s.Language, s.Binary)
-		}
+		fmt.Fprintf(out, "  %-12s raph scip install %s   (%s)\n", s.Language, s.Language, s.Install)
 	}
-	fmt.Fprintln(out, "(Agents: you may install a tool above and re-run `raph init` to upgrade resolution. See `raph scip`.)")
+	fmt.Fprintln(out, "Agents: ask the user before installing. If they decline, give them the command above to run themselves.")
 }
 
 func newSCIPCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "scip",
 		Short: "Show compiler-grade (SCIP) code resolvers and their install state",
 		Long: "raph reaches go/types-grade cross-file reference accuracy for non-Go languages " +
 			"by running an installed SCIP indexer (compiler-backed) during a full index. " +
-			"Languages without a tool fall back to the bundled tree-sitter symbol pass. " +
-			"This lists each registered resolver and whether it is on PATH.",
+			"Languages without a tool fall back to the bundled import-aware resolver. " +
+			"This lists each registered resolver and whether it is on PATH. " +
+			"Use `raph scip install <language>` to install one (agents must ask the user first).",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			status := indexer.SCIPStatus()
 			return output.Print(cmd.OutOrStdout(), resolveFormat(), status, func(w io.Writer) error {
@@ -372,9 +370,9 @@ func newSCIPCmd() *cobra.Command {
 					if s.Installed {
 						mark = "installed (" + s.Path + ")"
 					}
-					sb.WriteString(fmt.Sprintf("  %-12s %-16s %s\n", s.Language, s.Binary, mark))
-					if !s.Installed && s.Install != "" {
-						sb.WriteString(fmt.Sprintf("               install: %s\n", s.Install))
+					fmt.Fprintf(&sb, "  %-12s %-16s %s\n", s.Language, s.Binary, mark)
+					if !s.Installed {
+						fmt.Fprintf(&sb, "               raph scip install %s   (%s)\n", s.Language, s.Install)
 					}
 				}
 				_, err := io.WriteString(w, sb.String())
@@ -382,6 +380,50 @@ func newSCIPCmd() *cobra.Command {
 			})
 		},
 	}
+	cmd.AddCommand(newSCIPInstallCmd())
+	return cmd
+}
+
+func newSCIPInstallCmd() *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "install <language>",
+		Short: "Install the compiler-grade SCIP resolver for a language",
+		Long: "Installs the SCIP indexer for a language (e.g. `raph scip install python`), then " +
+			"re-run `raph init` to upgrade resolution. AGENTS: ask the user for permission before " +
+			"running this; if they decline, tell them to run it themselves. Use --dry-run to print " +
+			"the command without executing it.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			plan, ok := indexer.SCIPInstallPlanFor(args[0])
+			if !ok {
+				return fmt.Errorf("unknown language %q; registered resolvers: %s", args[0], strings.Join(indexer.SCIPLanguages(), ", "))
+			}
+			if plan.Installed {
+				fmt.Fprintf(out, "%s resolver already installed (%s). Run `raph init` to use it.\n", plan.Language, plan.Binary)
+				return nil
+			}
+			if len(plan.Argv) == 0 {
+				return fmt.Errorf("no automated installer for %s — install manually: %s", plan.Language, plan.Hint)
+			}
+			fmt.Fprintf(out, "Install command: %s\n", strings.Join(plan.Argv, " "))
+			if dryRun {
+				return nil
+			}
+			run := exec.Command(plan.Argv[0], plan.Argv[1:]...)
+			run.Stdout = out
+			run.Stderr = cmd.ErrOrStderr()
+			run.Stdin = os.Stdin
+			if err := run.Run(); err != nil {
+				return fmt.Errorf("install failed (%w); run it manually: %s", err, plan.Hint)
+			}
+			fmt.Fprintf(out, "Installed %s resolver. Re-run `raph init` to upgrade to compiler-grade resolution.\n", plan.Language)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the install command without running it")
+	return cmd
 }
 
 func newSearchCmd() *cobra.Command {
