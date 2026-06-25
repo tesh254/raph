@@ -1,0 +1,43 @@
+internal/indexer/treesitter.go
+  s_30200fc5b8ddb9::t_eaffd6088d7ac1 193-198
+internal/indexer/indexer.go
+  s_30200fc5b8ddb9::t_2b3978576081f3 45-49
+  s_30200fc5b8ddb9::t_07b5f99f33ee68 119-122
+  s_30200fc5b8ddb9::t_8715ad0a888fff 78-85
+  s_30200fc5b8ddb9::t_2fd808bb5a1e7d 223-225
+internal/indexer/scip.go
+  s_30200fc5b8ddb9::t_92c75d1986a31f 418
+  s_30200fc5b8ddb9::t_d48043553de7ed 423-429
+  s_30200fc5b8ddb9::t_7c7b5cbfb74531 367
+  s_30200fc5b8ddb9::t_03e17af45ac495 1-131,172-228,236-296,298-318,320-366,368-417,419-422,430-608
+  s_30200fc5b8ddb9::t_d102a7a05b1f81 319
+  s_30200fc5b8ddb9::t_7dbf0de808bdfc 229-235
+  s_30200fc5b8ddb9::t_5cfe4cd0e969cf 132-171
+  s_30200fc5b8ddb9::t_808e4d03e7b798 297
+internal/indexer/scip_test.go
+  s_30200fc5b8ddb9::t_5fe11ceb626eb0 1-72
+README.md
+  s_30200fc5b8ddb9::t_4e4e39bfd27b7a 18
+  s_30200fc5b8ddb9::t_3b39ba97568bd5 185
+go.mod
+  s_30200fc5b8ddb9::t_1d0d4d9272c411 18,45
+cmd/raph/main.go
+  s_30200fc5b8ddb9::t_4f9383c5471f5a 93
+  s_30200fc5b8ddb9::t_ac3decaba0f621 331-362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "c9e37f3470df8366c904c8474d1457520bd18aa3",
+  "prompts": {},
+  "sessions": {
+    "s_30200fc5b8ddb9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f22dfad5-df79-48ad-b5d4-2bf8ecfe50e2",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
