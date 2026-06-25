@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"raph/internal/db"
@@ -217,5 +218,68 @@ func TestStudioSQLiteEndpointCapsRequestedLimit(t *testing.T) {
 		if table.Name == "nodes" && len(table.Rows) != 1000 {
 			t.Fatalf("expected nodes table capped to 1000 rows, got %d", len(table.Rows))
 		}
+	}
+}
+
+func TestStudioActivityAndStats(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, n := range []db.Node{
+		{ID: "f1", Workspace: "ws", Domain: "code", Type: "func", Name: "A", Content: "a"},
+		{ID: "d1", Workspace: "ws", Domain: "knowledge", Type: "doc", Name: "Doc", Content: "d", Properties: map[string]string{"doc_type": "handoff", "status": "fresh"}},
+	} {
+		if err := store.SaveNode(ctx, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := NewStudioServer(store, "", 0)
+
+	actRec := httptest.NewRecorder()
+	srv.handleActivity(actRec, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	if actRec.Code != http.StatusOK {
+		t.Fatalf("activity status %d", actRec.Code)
+	}
+	var act struct {
+		Items []ActivityItem `json:"items"`
+	}
+	if err := json.Unmarshal(actRec.Body.Bytes(), &act); err != nil {
+		t.Fatal(err)
+	}
+	if len(act.Items) != 2 {
+		t.Fatalf("expected 2 activity items, got %d", len(act.Items))
+	}
+
+	statsRec := httptest.NewRecorder()
+	srv.handleStats(statsRec, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
+	if statsRec.Code != http.StatusOK {
+		t.Fatalf("stats status %d", statsRec.Code)
+	}
+	if !strings.Contains(statsRec.Body.String(), "\"nodes\": 2") && !strings.Contains(statsRec.Body.String(), "\"nodes\":2") {
+		t.Fatalf("stats missing node count: %s", statsRec.Body.String())
+	}
+}
+
+func TestStudioCORSPreflight(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	handler := withCORS(http.NewServeMux())
+	req := httptest.NewRequest(http.MethodOptions, "/api/graph", nil)
+	req.Header.Set("Origin", "https://raph-studio.pages.dev")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight status %d", rec.Code)
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "https://raph-studio.pages.dev" {
+		t.Fatalf("missing CORS origin header: %v", rec.Header())
 	}
 }

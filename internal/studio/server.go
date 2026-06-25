@@ -109,6 +109,8 @@ func (s *StudioServer) Start() error {
 	mux.HandleFunc("/api/search", s.handleSearch)
 	mux.HandleFunc("/api/neighbors", s.handleNeighbors)
 	mux.HandleFunc("/api/sqlite", s.handleSQLite)
+	mux.HandleFunc("/api/activity", s.handleActivity)
+	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/actions/clear", s.handleClearDB)
 	mux.HandleFunc("/api/actions/init", s.handleInitDemo)
 
@@ -121,7 +123,7 @@ func (s *StudioServer) Start() error {
 	verbose.Printf("studio routes ready at %s", addr)
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           withCORS(mux),
 		ReadHeaderTimeout: studioReadHeaderTimeout,
 		ReadTimeout:       studioReadTimeout,
 		WriteTimeout:      studioWriteTimeout,
@@ -401,6 +403,95 @@ func (s *StudioServer) initDemoData(ctx context.Context) (InitDemoResponse, erro
 		Index:         indexStats,
 		Crawl:         docCrawler.Stats(),
 	}, nil
+}
+
+// withCORS allows the hosted raph-studio dashboard (a different origin) to read
+// this local server. The data is the user's own local graph, so a permissive
+// policy for read/inspect endpoints is acceptable.
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			origin = "*"
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ActivityItem is a recently changed node, surfaced as a near-realtime feed of
+// what agents and the sync worker are doing.
+type ActivityItem struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Domain    string `json:"domain"`
+	Name      string `json:"name"`
+	URL       string `json:"url,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	DocType   string `json:"doc_type,omitempty"`
+	Status    string `json:"status,omitempty"`
+}
+
+func (s *StudioServer) handleActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 40
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 200 {
+			limit = parsed
+		}
+	}
+	nodes, err := s.store.ListNodes(r.Context(), db.NodeFilter{Limit: limit})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	items := make([]ActivityItem, 0, len(nodes))
+	for _, n := range nodes {
+		items = append(items, ActivityItem{
+			ID: n.ID, Type: n.Type, Domain: n.Domain, Name: n.Name, URL: n.URL,
+			UpdatedAt: n.UpdatedAt, DocType: n.Prop("doc_type"), Status: n.Prop("status"),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *StudioServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nodes, edges, err := s.store.GetAllGraphElements(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	byType := map[string]int{}
+	byDomain := map[string]int{}
+	workspaces := map[string]struct{}{}
+	for _, n := range nodes {
+		byType[n.Type]++
+		byDomain[n.Domain]++
+		if strings.TrimSpace(n.Workspace) != "" {
+			workspaces[n.Workspace] = struct{}{}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nodes":      len(nodes),
+		"edges":      len(edges),
+		"workspaces": len(workspaces),
+		"by_type":    byType,
+		"by_domain":  byDomain,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
