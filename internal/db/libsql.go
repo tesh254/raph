@@ -968,7 +968,7 @@ func (s *LibSQLStore) GetNeighbors(ctx context.Context, nodeID string) ([]Node, 
 }
 
 func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, error) {
-	nodeRows, err := s.db.QueryContext(ctx, `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), COALESCE(embedding_json, '[]') FROM nodes ORDER BY domain, type, name`)
+	nodeRows, err := s.db.QueryContext(ctx, `SELECT `+nodeColumns+` FROM nodes ORDER BY domain, type, name`)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -976,12 +976,10 @@ func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, 
 
 	var nodes []Node
 	for nodeRows.Next() {
-		var n Node
-		var embeddingJSON string
-		if err := nodeRows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &embeddingJSON); err != nil {
+		n, err := scanNode(nodeRows)
+		if err != nil {
 			return nil, nil, err
 		}
-		n.EmbeddingLength = embeddingLength(embeddingJSON)
 		nodes = append(nodes, n)
 	}
 

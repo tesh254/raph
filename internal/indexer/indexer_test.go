@@ -118,3 +118,98 @@ func TestIndexedNodesCarryAbsoluteCodebasePath(t *testing.T) {
 		}
 	}
 }
+
+func TestGoGlobalsAndUsageEdges(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	root := t.TempDir()
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module testmod\n\ngo 1.21\n")
+	write("main.go", `package main
+
+var Counter int
+const Max = 10
+
+func Inc() { Counter++ }
+func Read() int { return Counter + Max }
+func main() { Inc(); _ = Read() }
+`)
+
+	idx, err := New(store, nil, root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	nodes, edges, err := store.GetAllGraphElements(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]db.Node{}
+	var counterID string
+	var globalFound, constFound bool
+	for _, n := range nodes {
+		byID[n.ID] = n
+		if n.Type == "var" && n.Name == "Counter" {
+			constFound = constFound || false
+			if n.Prop("global") == "true" {
+				globalFound = true
+			}
+			counterID = n.ID
+		}
+		if n.Type == "const" && n.Name == "Max" {
+			constFound = true
+		}
+	}
+	if !globalFound {
+		t.Fatalf("global var Counter not indexed with global=true; nodes=%v", nodeNames(nodes))
+	}
+	if !constFound {
+		t.Fatalf("const Max not indexed; nodes=%v", nodeNames(nodes))
+	}
+
+	var mutates, uses bool
+	for _, e := range edges {
+		src := byID[e.SourceID]
+		tgt := byID[e.TargetID]
+		if e.Type == "MUTATES" && src.Name == "Inc" && tgt.ID == counterID {
+			mutates = true
+		}
+		if e.Type == "USES" && src.Name == "Read" && tgt.ID == counterID {
+			uses = true
+		}
+	}
+	if !mutates {
+		t.Fatalf("expected MUTATES edge Inc->Counter; edges=%v", edgeSummary(byID, edges))
+	}
+	if !uses {
+		t.Fatalf("expected USES edge Read->Counter; edges=%v", edgeSummary(byID, edges))
+	}
+}
+
+func nodeNames(nodes []db.Node) []string {
+	var out []string
+	for _, n := range nodes {
+		out = append(out, n.Type+":"+n.Name)
+	}
+	return out
+}
+
+func edgeSummary(byID map[string]db.Node, edges []db.Edge) []string {
+	var out []string
+	for _, e := range edges {
+		out = append(out, byID[e.SourceID].Name+"-"+e.Type+"->"+byID[e.TargetID].Name)
+	}
+	return out
+}

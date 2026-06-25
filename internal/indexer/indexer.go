@@ -99,6 +99,10 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 		return stats, err
 	}
 
+	// Type-accurate Go reference linking (globals, calls, type usage). Runs on
+	// full index only; best-effort so a non-building tree never blocks indexing.
+	i.linkGoUsages(ctx, &stats)
+
 	verbose.Printf("walk complete files=%d nodes=%d edges=%d embeddings=%d", stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
 	return stats, nil
 }
@@ -295,69 +299,99 @@ func (i *Indexer) indexGoFile(ctx context.Context, relPath string, parentID stri
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
 			name := d.Name.Name
+			key := name
+			if d.Recv != nil && len(d.Recv.List) > 0 {
+				// Qualify methods by receiver type so e.g. two String() methods
+				// on different types don't collide and agents can tell them apart.
+				recv := receiverTypeName(d.Recv.List[0].Type)
+				if recv != "" {
+					name = "(" + recv + ") " + name
+					key = recv + "." + d.Name.Name
+				}
+			}
 			snippet := snippetForNode(fset, content, d.Pos(), d.End())
-			node := db.Node{
-				ID:        i.nodeID("func", relPath+"::"+name),
-				Workspace: i.workspaceID,
-				Domain:    "code",
-				Type:      "func",
-				Name:      name,
-				Content:   truncateRunes(snippet, maxStoredContent),
-				URL:       relPath + "#" + name,
-				Path:      i.root,
-			}
-			embedding, err := i.embed(ctx, name+"\n\n"+snippet, stats)
-			if err != nil {
-				return fmt.Errorf("embed function %q: %w", name, err)
-			}
-			if len(embedding) > 0 {
-				node.Embedding = embedding
-			}
-			if err := i.store.SaveNode(ctx, node); err != nil {
+			if err := i.saveSymbol(ctx, "func", relPath, key, name, snippet, parentID, nil, stats); err != nil {
 				return err
 			}
-			if err := i.store.SaveEdge(ctx, db.Edge{SourceID: parentID, TargetID: node.ID, Type: "DECLARES"}); err != nil {
-				return err
-			}
-			stats.NodesSaved++
-			stats.EdgesSaved++
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
-				ts, ok := spec.(*ast.TypeSpec)
-				if !ok {
-					continue
+				switch s := spec.(type) {
+				case *ast.TypeSpec:
+					name := s.Name.Name
+					snippet := snippetForNode(fset, content, s.Pos(), s.End())
+					if err := i.saveSymbol(ctx, "type", relPath, name, name, snippet, parentID, nil, stats); err != nil {
+						return err
+					}
+				case *ast.ValueSpec:
+					// Package-level var/const — the globals agents most often
+					// hallucinate about. Index each name as its own node.
+					kind := "var"
+					if d.Tok == token.CONST {
+						kind = "const"
+					}
+					snippet := snippetForNode(fset, content, s.Pos(), s.End())
+					for _, ident := range s.Names {
+						if ident.Name == "_" {
+							continue
+						}
+						props := map[string]string{"global": "true", "decl": kind}
+						if err := i.saveSymbol(ctx, kind, relPath, ident.Name, ident.Name, snippet, parentID, props, stats); err != nil {
+							return err
+						}
+					}
 				}
-				name := ts.Name.Name
-				snippet := snippetForNode(fset, content, ts.Pos(), ts.End())
-				node := db.Node{
-					ID:        i.nodeID("type", relPath+"::"+name),
-					Workspace: i.workspaceID,
-					Domain:    "code",
-					Type:      "type",
-					Name:      name,
-					Content:   truncateRunes(snippet, maxStoredContent),
-					URL:       relPath + "#" + name,
-					Path:      i.root,
-				}
-				embedding, err := i.embed(ctx, name+"\n\n"+snippet, stats)
-				if err != nil {
-					return fmt.Errorf("embed type %q: %w", name, err)
-				}
-				if len(embedding) > 0 {
-					node.Embedding = embedding
-				}
-				if err := i.store.SaveNode(ctx, node); err != nil {
-					return err
-				}
-				if err := i.store.SaveEdge(ctx, db.Edge{SourceID: parentID, TargetID: node.ID, Type: "DECLARES"}); err != nil {
-					return err
-				}
-				stats.NodesSaved++
-				stats.EdgesSaved++
 			}
 		}
 	}
 	return nil
+}
+
+// saveSymbol persists a code symbol node (with optional embedding and
+// properties) and links it to its declaring file.
+func (i *Indexer) saveSymbol(ctx context.Context, kind, relPath, key, name, snippet, parentID string, props map[string]string, stats *Stats) error {
+	node := db.Node{
+		ID:         i.nodeID(kind, relPath+"::"+key),
+		Workspace:  i.workspaceID,
+		Domain:     "code",
+		Type:       kind,
+		Name:       name,
+		Content:    truncateRunes(snippet, maxStoredContent),
+		URL:        relPath + "#" + key,
+		Path:       i.root,
+		Properties: props,
+	}
+	embedding, err := i.embed(ctx, name+"\n\n"+snippet, stats)
+	if err != nil {
+		return fmt.Errorf("embed %s %q: %w", kind, name, err)
+	}
+	if len(embedding) > 0 {
+		node.Embedding = embedding
+	}
+	if err := i.store.SaveNode(ctx, node); err != nil {
+		return err
+	}
+	if err := i.store.SaveEdge(ctx, db.Edge{SourceID: parentID, TargetID: node.ID, Type: "DECLARES"}); err != nil {
+		return err
+	}
+	stats.NodesSaved++
+	stats.EdgesSaved++
+	return nil
+}
+
+// receiverTypeName extracts the base type name from a method receiver, e.g.
+// *Indexer -> "Indexer".
+func receiverTypeName(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.StarExpr:
+		return receiverTypeName(t.X)
+	case *ast.Ident:
+		return t.Name
+	case *ast.IndexExpr: // generic receiver: T[P]
+		return receiverTypeName(t.X)
+	case *ast.IndexListExpr:
+		return receiverTypeName(t.X)
+	}
+	return ""
 }
 
 func (i *Indexer) indexFallbackChunks(ctx context.Context, relPath string, parentID string, content string, stats *Stats) error {
