@@ -666,7 +666,7 @@ func (m *MCPServerWrapper) registerTools() {
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "index_codebase",
-		Description: "Indexes a local codebase into the graph. Defaults to the MCP server working directory and replaces that workspace's existing indexed nodes. The result's stats.scip_active lists languages resolved compiler-grade; stats.scip_suggestions lists languages that would gain go/types-level cross-file accuracy via an installable indexer — each entry has an agent_action command (e.g. `raph scip install python`). PROTOCOL: always ask the user for permission before running an install command; if they decline, tell them the command to run themselves and continue with the bundled resolver. Never install without explicit approval. After an approved install, re-run index_codebase to upgrade.",
+		Description: "Indexes a local codebase into the graph. Defaults to the MCP server working directory and replaces that workspace's existing indexed nodes. The result's stats.scip_active lists languages resolved compiler-grade; stats.scip_suggestions lists languages that would gain go/types-level cross-file accuracy via an installable indexer — each entry has an agent_action command (e.g. `raph code-intel install python`). PROTOCOL: always ask the user for permission before running an install command; if they decline, tell them the command to run themselves and continue with the bundled resolver. Never install without explicit approval. After an approved install, re-run index_codebase to upgrade.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args IndexCodebaseArgs) (*mcpsdk.CallToolResult, IndexCodebaseOutput, error) {
 		path := strings.TrimSpace(args.Path)
 		if path == "" {

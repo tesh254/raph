@@ -130,7 +130,7 @@ func detectSCIPTools() ([]scipTool, map[string]bool) {
 }
 
 // SCIPToolStatus reports whether a registered compiler-grade indexer is
-// installed, for the `raph scip` discoverability command.
+// installed, for the `raph code-intel` discoverability command.
 type SCIPToolStatus struct {
 	Language  string   `json:"language"`
 	Binary    string   `json:"binary"`
@@ -236,7 +236,7 @@ func (i *Indexer) scipReport(available []scipTool) (active []string, suggestions
 				Language:    t.label,
 				Binary:      t.bin,
 				Install:     scipInstallHints[t.bin],
-				AgentAction: "raph scip install " + t.label,
+				AgentAction: "raph code-intel install " + t.label,
 				AgentNote:   scipPermissionNote,
 				AutoInstall: auto,
 			})

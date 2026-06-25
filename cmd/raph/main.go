@@ -344,25 +344,26 @@ func printSCIPGuidance(out io.Writer, stats indexer.Stats) {
 	fmt.Fprintln(out, "\nUpgrade available — these languages used the bundled import-aware resolver.")
 	fmt.Fprintln(out, "For go/types-level cross-file accuracy, install the matching indexer, then re-run `raph init`:")
 	for _, s := range stats.SCIPSuggestions {
-		fmt.Fprintf(out, "  %-12s raph scip install %s   (%s)\n", s.Language, s.Language, s.Install)
+		fmt.Fprintf(out, "  %-12s raph code-intel install %s   (%s)\n", s.Language, s.Language, s.Install)
 	}
 	fmt.Fprintln(out, "Agents: ask the user before installing. If they decline, give them the command above to run themselves.")
 }
 
 func newSCIPCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "scip",
-		Short: "Show compiler-grade (SCIP) code resolvers and their install state",
+		Use:     "code-intel",
+		Aliases: []string{"scip"},
+		Short:   "Show code-intelligence resolvers (compiler-grade cross-file accuracy) and install them",
 		Long: "raph reaches go/types-grade cross-file reference accuracy for non-Go languages " +
-			"by running an installed SCIP indexer (compiler-backed) during a full index. " +
-			"Languages without a tool fall back to the bundled import-aware resolver. " +
+			"by running an installed code-intelligence indexer (compiler-backed, SCIP) during a " +
+			"full index. Languages without a tool fall back to the bundled import-aware resolver. " +
 			"This lists each registered resolver and whether it is on PATH. " +
-			"Use `raph scip install <language>` to install one (agents must ask the user first).",
+			"Use `raph code-intel install <language>` to install one (agents must ask the user first).",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			status := indexer.SCIPStatus()
 			return output.Print(cmd.OutOrStdout(), resolveFormat(), status, func(w io.Writer) error {
 				var sb strings.Builder
-				sb.WriteString("Compiler-grade code resolvers (SCIP tier)\n")
+				sb.WriteString("Code-intelligence resolvers (compiler-grade tier)\n")
 				sb.WriteString("Go uses go/types natively. For others, install the tool below;\n")
 				sb.WriteString("raph runs it automatically on the next full index. Disable with RAPH_NO_SCIP=1.\n\n")
 				for _, s := range status {
@@ -372,7 +373,7 @@ func newSCIPCmd() *cobra.Command {
 					}
 					fmt.Fprintf(&sb, "  %-12s %-16s %s\n", s.Language, s.Binary, mark)
 					if !s.Installed {
-						fmt.Fprintf(&sb, "               raph scip install %s   (%s)\n", s.Language, s.Install)
+						fmt.Fprintf(&sb, "               raph code-intel install %s   (%s)\n", s.Language, s.Install)
 					}
 				}
 				_, err := io.WriteString(w, sb.String())
@@ -388,9 +389,9 @@ func newSCIPInstallCmd() *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "install <language>",
-		Short: "Install the compiler-grade SCIP resolver for a language",
-		Long: "Installs the SCIP indexer for a language (e.g. `raph scip install python`), then " +
-			"re-run `raph init` to upgrade resolution. AGENTS: ask the user for permission before " +
+		Short: "Install the compiler-grade code-intelligence resolver for a language",
+		Long: "Installs the code-intelligence indexer for a language (e.g. `raph code-intel install python`), " +
+			"then re-run `raph init` to upgrade resolution. AGENTS: ask the user for permission before " +
 			"running this; if they decline, tell them to run it themselves. Use --dry-run to print " +
 			"the command without executing it.",
 		Args: cobra.ExactArgs(1),

@@ -15,7 +15,7 @@ This repository now includes:
 - a zero-dependency Studio UI in `internal/studio`
 - scoped durable memory with lifecycle metadata for agent preferences, facts, procedures, and project knowledge
 - multi-language symbol extraction via a pure-Go tree-sitter runtime (Python, JS/JSX, TS/TSX, Rust, Elixir, Ruby, Java, C/C++, C#, PHP) producing function/type/global nodes and `USES` reference edges; Go uses `go/types` for type-accurate `USES`/`MUTATES` edges — so agents can see where globals are read and written instead of guessing
-- a two-tier cross-file resolution model. **Default (no install):** an import-aware fallback resolves references through import bindings (JS/TS/JSX/TSX relative imports, Python `from … import …`), so a symbol used in one file links to its declaration in another — pure Go, offline. **Opt-in ceiling (SCIP):** when a language's indexer is installed (`scip-typescript`, `scip-python`, `rust-analyzer`, `scip-ruby`, `scip-java`, `scip-clang`), raph runs it on a full index and links `USES`/`MUTATES` edges with go/types-level accuracy, superseding the fallback for that language. After indexing, `raph init` reports which languages got compiler-grade resolution and prints `raph scip install <language>` for any that could be upgraded. `raph scip install python` installs the resolver (re-run `raph init` after). The MCP `index_codebase` result carries the same as `scip_active` / `scip_suggestions` (each with an `agent_action` command) — **agents must ask the user for permission before installing, and if declined, hand the command to the user**; they never install unattended. Run `raph scip` for resolver status; disable SCIP with `RAPH_NO_SCIP=1`
+- a two-tier cross-file resolution model. **Default (no install):** an import-aware fallback resolves references through import bindings (JS/TS/JSX/TSX relative imports, Python `from … import …`), so a symbol used in one file links to its declaration in another — pure Go, offline. **Opt-in ceiling (SCIP):** when a language's indexer is installed (`scip-typescript`, `scip-python`, `rust-analyzer`, `scip-ruby`, `scip-java`, `scip-clang`), raph runs it on a full index and links `USES`/`MUTATES` edges with go/types-level accuracy, superseding the fallback for that language. After indexing, `raph init` reports which languages got compiler-grade resolution and prints `raph code-intel install <language>` for any that could be upgraded. `raph code-intel install python` installs the resolver (re-run `raph init` after). The MCP `index_codebase` result carries the same as `scip_active` / `scip_suggestions` (each with an `agent_action` command) — **agents must ask the user for permission before installing, and if declined, hand the command to the user**; they never install unattended. Run `raph code-intel` for resolver status; disable the tier with `RAPH_NO_SCIP=1`
 - codebase chunk indexing for remaining non-code files so README, docs, config, and other text assets are searchable alongside symbols
 - GoReleaser releases for macOS, Linux, and Windows
 - verified POSIX and PowerShell installers
@@ -182,8 +182,8 @@ These emit JSON automatically when called by an agent or through a pipe, and
 human-readable text in a terminal (override with `--format json|text`).
 
 ```text
-raph scip            Show compiler-grade (SCIP) resolvers and their install state
-raph scip install <lang> Install a resolver (agents must ask the user first)
+raph code-intel      Show code-intelligence resolvers and their install state
+raph code-intel install <lang> Install a resolver (agents must ask the user first)
 raph search <query>  Ripgrep-style search (--literal, --regex, --vector, --type, --global)
 raph mem set <text>  Create/update scoped memory (--scope project|shared|global)
 raph mem search <q>  Search memory in a scope
@@ -196,9 +196,9 @@ raph doc link <a> <b> Relate two nodes
 raph export --doc <id> Export a document/bundle; publish to gist/repo/S3/R2
 ```
 
-#### SCIP resolver prerequisites
+#### Code-intelligence resolver prerequisites
 
-`raph scip install` shells out to a package manager, so the matching runtime
+`raph code-intel install` shells out to a package manager, so the matching runtime
 must already be on the machine. raph does **not** bundle these (they are large
 native/runtime programs in other languages; embedding them would bloat the
 binary past 1GB and require license review). Install the prerequisite once:
@@ -212,7 +212,7 @@ binary past 1GB and require license review). Install the prerequisite once:
 | java | coursier (`scip-java`) | JVM |
 | c / c++ | prebuilt release (`scip-clang`) | — (manual download) |
 
-If the prerequisite is missing, `raph scip install` reports exactly which tool
+If the prerequisite is missing, `raph code-intel install` reports exactly which tool
 to install first. Without any resolver a language still gets the bundled
 pure-Go import-aware cross-file resolver — only compiler-grade precision is lost.
 
