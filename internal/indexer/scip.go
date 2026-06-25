@@ -333,6 +333,7 @@ func (i *Indexer) buildSymbolIndex(ctx context.Context) map[string]symbolNode {
 		Domain:    "code",
 		Types:     []string{"func", "type", "var", "const", "method"},
 		Limit:     1_000_000,
+		Lean:      true, // only id/type/name/url are used; skip content + embeddings
 	})
 	if err != nil {
 		verbose.Printf("scip: node index load failed: %v", err)

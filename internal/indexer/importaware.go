@@ -70,7 +70,14 @@ func (i *Indexer) linkImportAwareUsages(ctx context.Context, nodeIdx map[string]
 	}
 
 	var batch []db.Edge
-	seen := map[string]bool{} // dedupe owner|target within this pass
+	total := 0
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		total += i.saveEdges(ctx, batch)
+		batch = batch[:0]
+	}
 	_ = filepath.WalkDir(i.root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -106,18 +113,22 @@ func (i *Indexer) linkImportAwareUsages(ctx context.Context, nodeIdx map[string]
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
-		i.collectImportFileEdges(rel, entry, ispec, spec, nodeIdx, known, byFile[rel], seen, &batch)
+		i.collectImportFileEdges(rel, entry, ispec, spec, nodeIdx, known, byFile[rel], &batch)
+		if len(batch) >= edgeFlushChunk {
+			flush()
+		}
 		return nil
 	})
-	edges := i.saveEdges(ctx, batch)
-	stats.EdgesSaved += edges
-	verbose.Printf("import-aware fallback linked %d cross-file/within-file reference edges", edges)
+	flush()
+	stats.EdgesSaved += total
+	verbose.Printf("import-aware fallback linked %d cross-file/within-file reference edges", total)
 }
 
 // collectImportFileEdges appends this file's resolved reference edges to batch.
-// local is the file's name->nodeID bucket (precomputed from the shared index);
-// seen dedupes owner|target across the whole pass.
-func (i *Indexer) collectImportFileEdges(rel string, entry *grammars.LangEntry, ispec importSpec, spec langSpec, nodeIdx map[string]symbolNode, known map[string]bool, local map[string]string, seen map[string]bool, batch *[]db.Edge) {
+// local is the file's name->nodeID bucket (precomputed from the shared index).
+// Duplicate owner->target edges are de-duped within the file; cross-file dupes
+// are harmless (the store inserts ON CONFLICT DO NOTHING).
+func (i *Indexer) collectImportFileEdges(rel string, entry *grammars.LangEntry, ispec importSpec, spec langSpec, nodeIdx map[string]symbolNode, known map[string]bool, local map[string]string, batch *[]db.Edge) {
 	content, err := os.ReadFile(filepath.Join(i.root, rel))
 	if err != nil {
 		return
@@ -166,6 +177,7 @@ func (i *Indexer) collectImportFileEdges(rel string, entry *grammars.LangEntry, 
 	}
 
 	// Walk references, tracking the nearest enclosing declared symbol (owner).
+	seen := map[string]bool{} // dedupe owner|target within this file
 	var walk func(n *ts.Node, ownerID string)
 	walk = func(n *ts.Node, ownerID string) {
 		if n == nil {

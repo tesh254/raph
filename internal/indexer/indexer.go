@@ -132,6 +132,7 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	// Compiler-grade reference linking for other languages, when an external
 	// SCIP indexer is installed. Cross-file accurate; best-effort.
 	i.runSCIP(ctx, scipToolsAvailable, nodeIdx, &stats)
+	i.lineCache = nil // only SCIP name extraction needs it; release the source cache
 
 	// Import-aware cross-file fallback for tree-sitter languages a SCIP tool did
 	// not cover — resolves references through imports without any external tool.
@@ -488,6 +489,10 @@ func (i *Indexer) embed(ctx context.Context, text string, stats *Stats) ([]float
 	stats.EmbeddingsCreated++
 	return embedding, nil
 }
+
+// edgeFlushChunk bounds how many edges a streaming pass accumulates before
+// flushing, so a large workspace doesn't hold every pending edge in memory.
+const edgeFlushChunk = 4096
 
 // edgeBatcher is the optional batch-write capability some stores expose. The
 // indexer uses it when present (one transaction for an edge-heavy pass) and

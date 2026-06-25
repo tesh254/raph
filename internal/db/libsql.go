@@ -798,6 +798,11 @@ type NodeFilter struct {
 	PropertyEquals map[string]string
 	Query          string
 	Limit          int
+	// Lean selects only id/type/name/url and leaves content, properties, and
+	// embeddings empty. Use it for large listings (e.g. the indexer's symbol
+	// index) that never touch the heavy columns, to avoid pulling every node's
+	// content and embedding JSON into memory.
+	Lean bool
 }
 
 func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node, error) {
@@ -805,7 +810,11 @@ func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node,
 	if limit <= 0 {
 		limit = 50
 	}
-	sqlQuery := `SELECT ` + nodeColumns + ` FROM nodes`
+	selectCols := nodeColumns
+	if filter.Lean {
+		selectCols = `id, type, name, COALESCE(url, '')`
+	}
+	sqlQuery := `SELECT ` + selectCols + ` FROM nodes`
 	var where []string
 	var args []any
 	if ws := strings.TrimSpace(filter.Workspace); ws != "" {
@@ -852,6 +861,14 @@ func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node,
 	defer rows.Close()
 	var results []Node
 	for rows.Next() {
+		if filter.Lean {
+			var n Node
+			if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.URL); err != nil {
+				return nil, err
+			}
+			results = append(results, n)
+			continue
+		}
 		n, err := scanNode(rows)
 		if err != nil {
 			return nil, err
