@@ -174,6 +174,27 @@ raph update          Install the latest stable release
 raph version         Print version, commit, and build date
 ```
 
+### Agent commands
+
+These emit JSON automatically when called by an agent or through a pipe, and
+human-readable text in a terminal (override with `--format json|text`).
+
+```text
+raph search <query>  Ripgrep-style search (--literal, --regex, --vector, --type, --global)
+raph mem set <text>  Create/update scoped memory (--scope project|shared|global)
+raph mem search <q>  Search memory in a scope
+raph rules add <r>   Add a rule (--scope global|project)
+raph rules list      List rules (--all for global + project)
+raph doc add <src>   Add a local document (--type architecture|handoff|reference|note)
+raph doc list        List documents (--type, --status)
+raph doc read <id>   Read a document; reading a handoff marks it used
+raph doc link <a> <b> Relate two nodes
+raph export --doc <id> Export a document/bundle; publish to gist/repo/S3/R2
+```
+
+Documentation site: [tesh254/raph-docs](https://github.com/tesh254/raph-docs).
+Live dashboard: [tesh254/raph-studio](https://github.com/tesh254/raph-studio).
+
 ## Install from a release
 
 ### curl
