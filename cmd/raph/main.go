@@ -1063,10 +1063,6 @@ func newExportCmd() *cobra.Command {
 		Long: "Export local knowledge to a portable Markdown/JSON file, then optionally publish it " +
 			"to a GitHub gist, a repo, S3, or Cloudflare R2 so it transfers between machines.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.LoadConfigIfPresent()
-			if err != nil {
-				return err
-			}
 			store, err := db.InitStorage()
 			if err != nil {
 				return err
@@ -1081,11 +1077,15 @@ func newExportCmd() *cobra.Command {
 			var artifact exporter.Artifact
 			switch {
 			case bundle:
-				workspace, wsErr := resolveDocWorkspace(store, cfg, scope, path)
-				if wsErr != nil {
-					return wsErr
+				scopeSel := scope
+				if !cmd.Flags().Changed("scope") {
+					scopeSel = "portable" // brain bundle defaults to portable scopes
 				}
-				artifact, err = exporter.Bundle(cmd.Context(), store, workspace, fmtVal)
+				scopeTypes, scErr := brainScopeTypes(scopeSel)
+				if scErr != nil {
+					return scErr
+				}
+				artifact, err = exporter.Brain(cmd.Context(), store, scopeTypes, fmtVal)
 			case strings.TrimSpace(docID) != "":
 				artifact, err = exporter.Document(cmd.Context(), store, docID, fmtVal)
 			default:
@@ -1156,16 +1156,15 @@ func newExportCmd() *cobra.Command {
 }
 
 func newImportCmd() *cobra.Command {
-	var scope, path string
 	var noEmbed bool
 
 	cmd := &cobra.Command{
-		Use:   "import <file|url|gist-id|->",
-		Short: "Import a JSON knowledge export into the local graph",
-		Long: "Load a raph JSON export (from `raph export --out-format json`) into the local graph. " +
-			"The source can be a local file, an http(s) URL (e.g. a raw gist link), a GitHub gist id " +
-			"(fetched via the gh CLI), or `-` to read stdin. Documents are reconstructed into the target " +
-			"scope — chunks and embeddings are regenerated locally, so the file stays plain JSON with no vectors.",
+		Use:   "import <file|url|->",
+		Short: "Import a brain export (memory, rules, handoffs) into the local graph",
+		Long: "Load a raph brain export (from `raph export --bundle`) into the local graph. The source " +
+			"can be a local file, an http(s) URL (e.g. a raw JSON link), or `-` to read stdin. Memory and " +
+			"rules are restored under their original scope; handoffs are reconstructed (chunks and " +
+			"embeddings regenerate locally). Re-importing the same export updates records in place.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.LoadConfigIfPresent()
@@ -1182,39 +1181,45 @@ func newImportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			workspace, err := resolveDocWorkspace(store, cfg, scope, path)
-			if err != nil {
-				return err
-			}
-			res, err := exporter.Import(cmd.Context(), store, cfg, workspace, data, noEmbed)
+			res, err := exporter.Import(cmd.Context(), store, cfg, data, noEmbed)
 			if err != nil {
 				return err
 			}
 			return output.Print(cmd.OutOrStdout(), resolveFormat(), res, func(w io.Writer) error {
-				fmt.Fprintf(w, "Imported %d document(s)", res.Documents)
-				if res.Nodes > 0 {
-					fmt.Fprintf(w, ", %d node(s)", res.Nodes)
-				}
-				if res.Edges > 0 {
-					fmt.Fprintf(w, ", %d edge(s)", res.Edges)
-				}
+				fmt.Fprintf(w, "Imported %d memory/rule record(s), %d handoff(s)", res.Memory, res.Handoffs)
 				if res.Skipped > 0 {
 					fmt.Fprintf(w, " (%d skipped)", res.Skipped)
 				}
-				fmt.Fprintf(w, " into workspace %s\n", workspace)
+				fmt.Fprintln(w)
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&scope, "scope", "project", "Target scope: project or global")
-	cmd.Flags().StringVar(&path, "path", ".", "Workspace path for project scope")
 	cmd.Flags().BoolVar(&noEmbed, "no-embed", false, "Skip regenerating embeddings on import")
 	return cmd
 }
 
+// brainScopeTypes maps an export --scope selector to the memory scope types a
+// brain bundle should gather.
+func brainScopeTypes(scope string) ([]string, error) {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "", "portable":
+		return []string{"global", "shared"}, nil
+	case "all":
+		return []string{"global", "shared", "project"}, nil
+	case "global":
+		return []string{"global"}, nil
+	case "shared":
+		return []string{"shared"}, nil
+	case "project":
+		return []string{"project"}, nil
+	default:
+		return nil, fmt.Errorf("unknown scope %q (use portable, all, global, shared, or project)", scope)
+	}
+}
+
 // fetchImportSource resolves an import argument to raw bytes: `-` reads stdin,
-// an existing path reads the file, an http(s) URL is fetched directly, and any
-// other value is treated as a GitHub gist id and read via the gh CLI.
+// an existing path reads the file, and an http(s) URL is fetched directly.
 func fetchImportSource(ctx context.Context, source string, stdin io.Reader) ([]byte, error) {
 	source = strings.TrimSpace(source)
 	switch {
@@ -1238,15 +1243,7 @@ func fetchImportSource(ctx context.Context, source string, stdin io.Reader) ([]b
 		if _, statErr := os.Stat(source); statErr == nil {
 			return os.ReadFile(source)
 		}
-		// Treat as a gist id.
-		if _, err := exec.LookPath("gh"); err != nil {
-			return nil, fmt.Errorf("%q is not a file or URL, and gh CLI is not installed to fetch it as a gist", source)
-		}
-		out, err := exec.CommandContext(ctx, "gh", "gist", "view", source, "--raw").Output()
-		if err != nil {
-			return nil, fmt.Errorf("gh gist view %s: %w", source, err)
-		}
-		return out, nil
+		return nil, fmt.Errorf("%q is not a readable file, http(s) URL, or `-` (stdin)", source)
 	}
 }
 

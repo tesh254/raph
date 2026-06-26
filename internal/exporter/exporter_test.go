@@ -9,6 +9,7 @@ import (
 
 	"raph/internal/db"
 	"raph/internal/knowledge"
+	"raph/internal/memory"
 )
 
 func newStore(t *testing.T) *db.LibSQLStore {
@@ -53,74 +54,66 @@ func TestDocumentMarkdownAndWrite(t *testing.T) {
 	}
 }
 
-func TestBundleJSON(t *testing.T) {
-	store := newStore(t)
-	ctx := context.Background()
-	for _, in := range []knowledge.AddInput{
-		{Workspace: "ws", Title: "A", DocType: knowledge.DocNote, Content: "a", NoEmbed: true},
-		{Workspace: "ws", Title: "B", DocType: knowledge.DocNote, Content: "b", NoEmbed: true},
-	} {
-		if _, err := knowledge.Add(ctx, store, nil, in); err != nil {
-			t.Fatal(err)
-		}
-	}
-	art, err := Bundle(ctx, store, "ws", FormatJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(art.Content, "\"nodes\"") ||
-		!strings.Contains(art.Content, "\"raph_export_version\"") || art.Bytes == 0 {
-		t.Fatalf("bundle json malformed: %s", art.Content)
-	}
-}
-
-// TestExportImportRoundTrip exports a bundle to JSON and imports it into a fresh
-// store, confirming the documents come back with their content and doc_type.
-func TestExportImportRoundTrip(t *testing.T) {
+// TestBrainExportImportRoundTrip exports memory, a rule, and a handoff, then
+// imports the JSON into a fresh store and confirms each comes back intact.
+func TestBrainExportImportRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	src := newStore(t)
-	for _, in := range []knowledge.AddInput{
-		{Workspace: "ws", Title: "Arch", DocType: knowledge.DocArchitecture, Content: "the design doc", NoEmbed: true},
-		{Workspace: "ws", Title: "Handoff", DocType: knowledge.DocHandoff, Content: "the handoff notes", NoEmbed: true},
-	} {
-		if _, err := knowledge.Add(ctx, src, nil, in); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := memory.Store(ctx, src, nil, memory.StoreInput{
+		ScopeType: "global", ScopeID: "global", KnowledgeType: "decision", Title: "Use libsql",
+		Content: "we standardized on libsql", Source: "cli", WriterID: "tester", MemoryKey: "use-libsql",
+	}); err != nil {
+		t.Fatal(err)
 	}
-	art, err := Bundle(ctx, src, "ws", FormatJSON)
+	if _, err := memory.Store(ctx, src, nil, memory.StoreInput{
+		ScopeType: "global", ScopeID: "global", KnowledgeType: "rule", Title: "No self-credit",
+		Content: "never self-credit in commits", Source: "cli", WriterID: "tester", MemoryKey: "no-self-credit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := knowledge.Add(ctx, src, nil, knowledge.AddInput{
+		Workspace: "ws", Title: "Handoff 1", DocType: knowledge.DocHandoff,
+		Content: "what to do next", NoEmbed: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A non-handoff doc must NOT be exported.
+	if _, err := knowledge.Add(ctx, src, nil, knowledge.AddInput{
+		Workspace: "ws", Title: "Arch", DocType: knowledge.DocArchitecture,
+		Content: "design doc", NoEmbed: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	art, err := Brain(ctx, src, []string{"global", "shared"}, FormatJSON)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(art.Content, "\"raph_export_version\"") ||
+		!strings.Contains(art.Content, "\"memory\"") || strings.Contains(art.Content, "design doc") {
+		t.Fatalf("brain json malformed or leaked non-handoff doc: %s", art.Content)
 	}
 
 	dst := newStore(t)
-	res, err := Import(ctx, dst, nil, "ws2", []byte(art.Content), true)
+	res, err := Import(ctx, dst, nil, []byte(art.Content), true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Documents != 2 {
-		t.Fatalf("expected 2 documents imported, got %d", res.Documents)
+	if res.Memory != 2 || res.Handoffs != 1 {
+		t.Fatalf("expected 2 memory + 1 handoff, got memory=%d handoffs=%d", res.Memory, res.Handoffs)
 	}
-	docs, err := knowledge.List(ctx, dst, knowledge.ListFilter{Workspace: "ws2"})
+	rule, err := dst.GetMemoryRecordByKey(ctx, "global", "global", "rule", "no-self-credit")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("imported rule missing: %v", err)
 	}
-	if len(docs) != 2 {
-		t.Fatalf("expected 2 docs in target workspace, got %d", len(docs))
-	}
-	var found bool
-	for _, d := range docs {
-		if d.Name == "Arch" && strings.Contains(d.Content, "the design doc") && d.Prop("doc_type") == knowledge.DocArchitecture {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("imported Arch doc not found intact: %+v", docs)
+	if !strings.Contains(rule.Node.Content, "never self-credit") {
+		t.Fatalf("rule content not intact: %q", rule.Node.Content)
 	}
 }
 
 // TestParseEnvelopeRejectsNewer guards the version gate.
 func TestParseEnvelopeRejectsNewer(t *testing.T) {
-	_, err := ParseEnvelope([]byte(`{"raph_export_version":9999,"kind":"bundle","nodes":[{"id":"x"}]}`))
+	_, err := ParseEnvelope([]byte(`{"raph_export_version":9999,"kind":"brain","memory":[{"memory_key":"x"}]}`))
 	if err == nil {
 		t.Fatal("expected newer-version envelope to be rejected")
 	}

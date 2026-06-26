@@ -9,16 +9,15 @@ import (
 	"raph/internal/config"
 	"raph/internal/db"
 	"raph/internal/knowledge"
+	"raph/internal/memory"
 )
 
-// ImportResult summarizes what an import loaded into the local graph.
+// ImportResult summarizes what a brain import loaded into the local graph.
 type ImportResult struct {
-	Kind      string `json:"kind"`
-	Workspace string `json:"workspace"`
-	Documents int    `json:"documents"`
-	Nodes     int    `json:"nodes"`
-	Edges     int    `json:"edges"`
-	Skipped   int    `json:"skipped"`
+	Kind     string `json:"kind"`
+	Memory   int    `json:"memory"`   // memory + rule records restored
+	Handoffs int    `json:"handoffs"` // handoff documents restored
+	Skipped  int    `json:"skipped"`
 }
 
 // ParseEnvelope decodes export JSON. It is tolerant: any envelope whose version
@@ -31,76 +30,65 @@ func ParseEnvelope(data []byte) (Envelope, error) {
 	if env.Version > ExportVersion {
 		return Envelope{}, fmt.Errorf("export version %d is newer than this raph supports (%d); upgrade raph", env.Version, ExportVersion)
 	}
-	if len(env.Nodes) == 0 {
-		return Envelope{}, fmt.Errorf("export contains no nodes")
+	if len(env.Memory) == 0 && len(env.Handoffs) == 0 {
+		return Envelope{}, fmt.Errorf("export contains no memory, rules, or handoffs")
 	}
 	return env, nil
 }
 
-// Import loads an export envelope into the local graph under the given
-// workspace (empty -> the document's global scope). Documents are reconstructed
-// through knowledge.Add so chunks and embeddings are regenerated locally rather
-// than carried in the file; any other node types are saved verbatim. Edges are
-// applied best-effort: only those whose endpoints both resolve in the new graph.
-func Import(ctx context.Context, store db.GraphStore, cfg *config.Config, workspace string, data []byte, noEmbed bool) (ImportResult, error) {
+// Import loads a brain envelope into the local graph: memory and rules are
+// restored under their original scope via memory.Put (idempotent on the
+// scope/type/key natural key), and handoffs are reconstructed through
+// knowledge.Add (chunks/embeddings regenerate locally). Passing cfg == nil (or
+// noEmbed) skips embedding regeneration.
+func Import(ctx context.Context, store db.GraphStore, cfg *config.Config, data []byte, noEmbed bool) (ImportResult, error) {
 	env, err := ParseEnvelope(data)
 	if err != nil {
 		return ImportResult{}, err
 	}
-
-	res := ImportResult{Kind: env.Kind, Workspace: workspace}
-	// Map an exported node id to the id it lands on locally, so edges can be
-	// remapped (a reconstructed document gets a new, workspace-derived id).
-	idMap := map[string]string{}
-
-	for _, n := range env.Nodes {
-		switch n.Type {
-		case knowledge.TypeDoc:
-			doc, addErr := knowledge.Add(ctx, store, cfg, knowledge.AddInput{
-				Workspace:  workspace,
-				Key:        keyFromURL(n.URL),
-				Title:      n.Name,
-				Content:    n.Content,
-				DocType:    n.Prop("doc_type"),
-				Source:     firstNonEmpty(n.Prop("source"), "import"),
-				WriterID:   n.Prop("writer_id"),
-				Tags:       splitTags(n.Prop("tags")),
-				Properties: n.Properties,
-				NoEmbed:    noEmbed,
-			})
-			if addErr != nil {
-				return res, fmt.Errorf("import document %q: %w", n.Name, addErr)
-			}
-			idMap[n.ID] = doc.Node.ID
-			res.Documents++
-		case knowledge.TypeDocChunk:
-			// Chunks are regenerated from document content; never import them.
-			res.Skipped++
-		default:
-			node := n
-			if strings.TrimSpace(workspace) != "" {
-				node.Workspace = workspace
-			}
-			node.Embedding = nil // exports never carry vectors
-			if err := store.SaveNode(ctx, node); err != nil {
-				return res, fmt.Errorf("import node %q: %w", n.ID, err)
-			}
-			idMap[n.ID] = node.ID
-			res.Nodes++
-		}
+	if noEmbed {
+		cfg = nil // embedding paths short-circuit on a nil config
 	}
 
-	for _, e := range env.Edges {
-		src, okS := idMap[e.SourceID]
-		tgt, okT := idMap[e.TargetID]
-		if !okS || !okT {
+	res := ImportResult{Kind: env.Kind}
+
+	for _, r := range env.Memory {
+		if strings.TrimSpace(r.MemoryKey) == "" || strings.TrimSpace(r.ScopeType) == "" {
 			res.Skipped++
-			continue // endpoint not in this import; skip rather than dangle
+			continue
 		}
-		if err := store.SaveEdge(ctx, db.Edge{SourceID: src, TargetID: tgt, Type: e.Type}); err != nil {
-			return res, fmt.Errorf("import edge: %w", err)
+		if _, err := memory.Put(ctx, store, cfg, memory.StoreInput{
+			ScopeType:     r.ScopeType,
+			ScopeID:       r.ScopeID,
+			KnowledgeType: r.KnowledgeType,
+			Title:         r.Node.Name,
+			Content:       r.Node.Content,
+			Source:        firstNonEmpty(r.Source, "import"),
+			WriterID:      firstNonEmpty(r.WriterID, "import"),
+			Tags:          chooseTags(r.DisplayTags, r.NormalizedTags),
+			MemoryKey:     r.MemoryKey,
+		}); err != nil {
+			return res, fmt.Errorf("import memory %q: %w", r.MemoryKey, err)
 		}
-		res.Edges++
+		res.Memory++
+	}
+
+	for _, h := range env.Handoffs {
+		if _, err := knowledge.Add(ctx, store, cfg, knowledge.AddInput{
+			Workspace:  h.Workspace,
+			Key:        keyFromURL(h.URL),
+			Title:      h.Name,
+			Content:    h.Content,
+			DocType:    knowledge.DocHandoff,
+			Source:     firstNonEmpty(h.Prop("source"), "import"),
+			WriterID:   h.Prop("writer_id"),
+			Tags:       splitTags(h.Prop("tags")),
+			Properties: h.Properties,
+			NoEmbed:    noEmbed,
+		}); err != nil {
+			return res, fmt.Errorf("import handoff %q: %w", h.Name, err)
+		}
+		res.Handoffs++
 	}
 
 	return res, nil
@@ -110,14 +98,21 @@ func Import(ctx context.Context, store db.GraphStore, cfg *config.Config, worksp
 // re-import updates the same document instead of duplicating it.
 func keyFromURL(url string) string {
 	const prefix = "knowledge://"
-	if !strings.HasPrefix(url, prefix) {
+	rest, ok := strings.CutPrefix(url, prefix)
+	if !ok {
 		return ""
 	}
-	rest := strings.TrimPrefix(url, prefix)
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		return rest[i+1:]
+	if _, key, found := strings.Cut(rest, "/"); found {
+		return key
 	}
 	return ""
+}
+
+func chooseTags(primary, fallback []string) []string {
+	if len(primary) > 0 {
+		return primary
+	}
+	return fallback
 }
 
 func splitTags(value string) []string {

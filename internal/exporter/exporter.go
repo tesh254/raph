@@ -31,18 +31,19 @@ const (
 // lower one.
 const ExportVersion = 1
 
-// Envelope is the portable, plain-JSON export format. It is intentionally free
-// of binary or embedded vectors so a file can be dropped into a gist and read
-// back by `raph import` with no special handling. Embeddings are omitted (the
-// db.Node struct tags Embedding `json:"-"`); Import regenerates them locally
-// when an embedding provider is configured.
+// Envelope is the portable, plain-JSON "brain" export: the knowledge an agent
+// accumulates that is NOT derivable from the codebase — scoped memory, rules,
+// and handoffs. Indexed files, code symbols, and document chunks are
+// deliberately excluded (they regenerate on the next index). It carries no
+// binary blobs and no embedding vectors (db.Node tags Embedding `json:"-"`), so
+// a file drops straight onto any raw URL or disk and reads back via `raph
+// import`; embeddings regenerate locally on import.
 type Envelope struct {
-	Version    int       `json:"raph_export_version"`
-	Kind       string    `json:"kind"` // "document" | "bundle"
-	Workspace  string    `json:"workspace,omitempty"`
-	ExportedAt string    `json:"exported_at,omitempty"`
-	Nodes      []db.Node `json:"nodes"`
-	Edges      []db.Edge `json:"edges,omitempty"`
+	Version    int               `json:"raph_export_version"`
+	Kind       string            `json:"kind"` // "brain"
+	ExportedAt string            `json:"exported_at,omitempty"`
+	Memory     []db.MemoryRecord `json:"memory,omitempty"`   // scoped memory + rules (knowledge_type=rule)
+	Handoffs   []db.Node         `json:"handoffs,omitempty"` // knowledge docs, doc_type=handoff
 }
 
 // Artifact is the in-memory result of an export before it is written/uploaded.
@@ -71,15 +72,13 @@ func Document(ctx context.Context, store db.GraphStore, id string, format Format
 	}
 	base := slugify(doc.Node.Name)
 	if format == FormatJSON {
-		env := Envelope{Kind: "document", Workspace: doc.Node.Workspace, Nodes: []db.Node{doc.Node}}
-		for _, r := range doc.Related {
-			env.Edges = append(env.Edges, db.Edge{SourceID: doc.Node.ID, TargetID: r.ID, Type: knowledge.RelRelatesTo})
-		}
-		body, err := marshalEnvelope(env)
+		// Single-document export is for ad-hoc sharing/reading, not the importable
+		// brain bundle; emit the document as-is.
+		body, err := json.MarshalIndent(doc, "", "  ")
 		if err != nil {
 			return Artifact{}, err
 		}
-		return artifact(base+".json", body), nil
+		return artifact(base+".json", string(body)), nil
 	}
 
 	var sb strings.Builder
@@ -98,36 +97,77 @@ func Document(ctx context.Context, store db.GraphStore, id string, format Format
 	return artifact(base+".md", sb.String()), nil
 }
 
-// Bundle exports every document in a workspace plus an index, as a single file.
-func Bundle(ctx context.Context, store db.GraphStore, workspace string, format Format) (Artifact, error) {
-	docs, err := store.ListNodes(ctx, db.NodeFilter{
-		Workspace: workspace,
-		Types:     []string{knowledge.TypeDoc},
-		Limit:     1000,
+// brainLimit bounds how many records/handoffs a single brain export gathers.
+const brainLimit = 100_000
+
+// Brain exports the portable agent brain — scoped memory + rules + handoffs —
+// for the given memory scope types (e.g. "global", "shared"). Indexed files,
+// code symbols, and document chunks are never included. Handoffs (knowledge
+// docs of doc_type=handoff) are always gathered regardless of scope, since they
+// are the explicit "what happened / what's next" carryover.
+func Brain(ctx context.Context, store db.GraphStore, scopeTypes []string, format Format) (Artifact, error) {
+	var records []db.MemoryRecord
+	seen := map[string]bool{}
+	for _, st := range scopeTypes {
+		recs, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
+			ScopeType:       st,
+			LifecycleStates: []string{"active"},
+			Limit:           brainLimit,
+		})
+		if err != nil {
+			return Artifact{}, fmt.Errorf("list %s memory: %w", st, err)
+		}
+		for _, r := range recs {
+			if seen[r.Node.ID] {
+				continue
+			}
+			seen[r.Node.ID] = true
+			records = append(records, r)
+		}
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].Node.ID < records[j].Node.ID })
+
+	handoffs, err := store.ListNodes(ctx, db.NodeFilter{
+		Domain:         knowledge.DomainKnowledge,
+		Types:          []string{knowledge.TypeDoc},
+		PropertyEquals: map[string]string{"doc_type": knowledge.DocHandoff},
+		Limit:          brainLimit,
 	})
 	if err != nil {
-		return Artifact{}, err
+		return Artifact{}, fmt.Errorf("list handoffs: %w", err)
 	}
-	sort.Slice(docs, func(i, j int) bool { return docs[i].Name < docs[j].Name })
+	sort.Slice(handoffs, func(i, j int) bool { return handoffs[i].Name < handoffs[j].Name })
 
 	if format == FormatJSON {
-		body, err := marshalEnvelope(Envelope{Kind: "bundle", Workspace: workspace, Nodes: docs})
+		body, err := marshalEnvelope(Envelope{Kind: "brain", Memory: records, Handoffs: handoffs})
 		if err != nil {
 			return Artifact{}, err
 		}
-		return artifact("raph-knowledge-bundle.json", body), nil
+		return artifact("raph-brain.json", body), nil
 	}
 
+	// Markdown is a human-readable digest only (not importable).
 	var sb strings.Builder
-	sb.WriteString("# raph knowledge bundle\n\n")
-	fmt.Fprintf(&sb, "Workspace: `%s`  ·  %d documents\n\n", workspace, len(docs))
-	for _, d := range docs {
-		fmt.Fprintf(&sb, "## %s\n\n", d.Name)
-		fmt.Fprintf(&sb, "- type: %s\n- status: %s\n- id: `%s`\n\n", d.Prop("doc_type"), d.Prop("status"), d.ID)
-		sb.WriteString(strings.TrimSpace(d.Content))
-		sb.WriteString("\n\n---\n\n")
+	sb.WriteString("# raph brain export\n\n")
+	fmt.Fprintf(&sb, "%d memory/rule record(s)  ·  %d handoff(s)\n\n", len(records), len(handoffs))
+	if len(records) > 0 {
+		sb.WriteString("## Memory & rules\n\n")
+		for _, r := range records {
+			fmt.Fprintf(&sb, "### %s\n\n", firstNonEmpty(r.Node.Name, r.MemoryKey))
+			fmt.Fprintf(&sb, "- scope: %s  ·  type: %s  ·  key: `%s`\n\n", r.ScopeType, r.KnowledgeType, r.MemoryKey)
+			sb.WriteString(strings.TrimSpace(r.Node.Content))
+			sb.WriteString("\n\n---\n\n")
+		}
 	}
-	return artifact("raph-knowledge-bundle.md", sb.String()), nil
+	if len(handoffs) > 0 {
+		sb.WriteString("## Handoffs\n\n")
+		for _, h := range handoffs {
+			fmt.Fprintf(&sb, "### %s\n\n", h.Name)
+			sb.WriteString(strings.TrimSpace(h.Content))
+			sb.WriteString("\n\n---\n\n")
+		}
+	}
+	return artifact("raph-brain.md", sb.String()), nil
 }
 
 // Write persists an artifact to disk at outPath (or the artifact's default
