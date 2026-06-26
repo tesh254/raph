@@ -26,11 +26,40 @@ const (
 	FormatJSON     Format = "json"
 )
 
+// ExportVersion is the schema version of the JSON envelope. Bump it only on a
+// breaking change to the envelope shape; Import tolerates this version and any
+// lower one.
+const ExportVersion = 1
+
+// Envelope is the portable, plain-JSON export format. It is intentionally free
+// of binary or embedded vectors so a file can be dropped into a gist and read
+// back by `raph import` with no special handling. Embeddings are omitted (the
+// db.Node struct tags Embedding `json:"-"`); Import regenerates them locally
+// when an embedding provider is configured.
+type Envelope struct {
+	Version    int       `json:"raph_export_version"`
+	Kind       string    `json:"kind"` // "document" | "bundle"
+	Workspace  string    `json:"workspace,omitempty"`
+	ExportedAt string    `json:"exported_at,omitempty"`
+	Nodes      []db.Node `json:"nodes"`
+	Edges      []db.Edge `json:"edges,omitempty"`
+}
+
 // Artifact is the in-memory result of an export before it is written/uploaded.
 type Artifact struct {
 	Filename string `json:"filename"`
 	Content  string `json:"-"`
 	Bytes    int    `json:"bytes"`
+}
+
+// marshalEnvelope renders an envelope as indented JSON.
+func marshalEnvelope(env Envelope) (string, error) {
+	env.Version = ExportVersion
+	body, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 // Document exports one document (with its chunks reconstructed) as Markdown or
@@ -42,11 +71,15 @@ func Document(ctx context.Context, store db.GraphStore, id string, format Format
 	}
 	base := slugify(doc.Node.Name)
 	if format == FormatJSON {
-		body, err := json.MarshalIndent(doc, "", "  ")
+		env := Envelope{Kind: "document", Workspace: doc.Node.Workspace, Nodes: []db.Node{doc.Node}}
+		for _, r := range doc.Related {
+			env.Edges = append(env.Edges, db.Edge{SourceID: doc.Node.ID, TargetID: r.ID, Type: knowledge.RelRelatesTo})
+		}
+		body, err := marshalEnvelope(env)
 		if err != nil {
 			return Artifact{}, err
 		}
-		return artifact(base+".json", string(body)), nil
+		return artifact(base+".json", body), nil
 	}
 
 	var sb strings.Builder
@@ -78,11 +111,11 @@ func Bundle(ctx context.Context, store db.GraphStore, workspace string, format F
 	sort.Slice(docs, func(i, j int) bool { return docs[i].Name < docs[j].Name })
 
 	if format == FormatJSON {
-		body, err := json.MarshalIndent(map[string]any{"workspace": workspace, "documents": docs}, "", "  ")
+		body, err := marshalEnvelope(Envelope{Kind: "bundle", Workspace: workspace, Nodes: docs})
 		if err != nil {
 			return Artifact{}, err
 		}
-		return artifact("raph-knowledge-bundle.json", string(body)), nil
+		return artifact("raph-knowledge-bundle.json", body), nil
 	}
 
 	var sb strings.Builder

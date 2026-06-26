@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -74,6 +75,7 @@ func newRootCmd() *cobra.Command {
 				_ = os.Setenv("RAPH_VERBOSE", "1")
 				verbose.Printf("command=%s args=%v", cmd.CommandPath(), args)
 			}
+			applyMemoryLimit() // soft heap ceiling; honors GOMEMLIMIT / RAPH_MEMORY_LIMIT
 			if cmd.Name() == "update" || version.Version == "dev" || os.Getenv(autoUpdateEnvVar) != "1" || !updater.ShouldAutoCheck() {
 				return
 			}
@@ -96,6 +98,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newRulesCmd())
 	rootCmd.AddCommand(newDocCmd())
 	rootCmd.AddCommand(newExportCmd())
+	rootCmd.AddCommand(newImportCmd())
 	rootCmd.AddCommand(newCrawlCmd())
 	rootCmd.AddCommand(newStartCmd())
 	rootCmd.AddCommand(newStudioCmd())
@@ -1141,7 +1144,7 @@ func newExportCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&bundle, "bundle", false, "Export all documents in the scope as one bundle")
 	cmd.Flags().StringVar(&scope, "scope", "project", "Scope for --bundle: project or global")
 	cmd.Flags().StringVar(&path, "path", ".", "Workspace path for project scope")
-	cmd.Flags().StringVar(&format, "out-format", "md", "Export content format: md or json")
+	cmd.Flags().StringVar(&format, "out-format", "json", "Export content format: json (round-trippable via `raph import`) or md (human-readable only)")
 	cmd.Flags().StringVar(&out, "out", "", "Output file or directory (default: auto-named in cwd)")
 	cmd.Flags().BoolVar(&gist, "gist", false, "Publish the export as a GitHub gist")
 	cmd.Flags().BoolVar(&public, "public", false, "Make the gist public")
@@ -1150,6 +1153,101 @@ func newExportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&s3Dest, "s3", "", "Upload to an S3/R2 destination (s3://bucket/key)")
 	cmd.Flags().StringVar(&r2Endpoint, "r2-endpoint", "", "Custom S3 endpoint URL (e.g. Cloudflare R2)")
 	return cmd
+}
+
+func newImportCmd() *cobra.Command {
+	var scope, path string
+	var noEmbed bool
+
+	cmd := &cobra.Command{
+		Use:   "import <file|url|gist-id|->",
+		Short: "Import a JSON knowledge export into the local graph",
+		Long: "Load a raph JSON export (from `raph export --out-format json`) into the local graph. " +
+			"The source can be a local file, an http(s) URL (e.g. a raw gist link), a GitHub gist id " +
+			"(fetched via the gh CLI), or `-` to read stdin. Documents are reconstructed into the target " +
+			"scope — chunks and embeddings are regenerated locally, so the file stays plain JSON with no vectors.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			data, err := fetchImportSource(cmd.Context(), args[0], cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
+			workspace, err := resolveDocWorkspace(store, cfg, scope, path)
+			if err != nil {
+				return err
+			}
+			res, err := exporter.Import(cmd.Context(), store, cfg, workspace, data, noEmbed)
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), res, func(w io.Writer) error {
+				fmt.Fprintf(w, "Imported %d document(s)", res.Documents)
+				if res.Nodes > 0 {
+					fmt.Fprintf(w, ", %d node(s)", res.Nodes)
+				}
+				if res.Edges > 0 {
+					fmt.Fprintf(w, ", %d edge(s)", res.Edges)
+				}
+				if res.Skipped > 0 {
+					fmt.Fprintf(w, " (%d skipped)", res.Skipped)
+				}
+				fmt.Fprintf(w, " into workspace %s\n", workspace)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&scope, "scope", "project", "Target scope: project or global")
+	cmd.Flags().StringVar(&path, "path", ".", "Workspace path for project scope")
+	cmd.Flags().BoolVar(&noEmbed, "no-embed", false, "Skip regenerating embeddings on import")
+	return cmd
+}
+
+// fetchImportSource resolves an import argument to raw bytes: `-` reads stdin,
+// an existing path reads the file, an http(s) URL is fetched directly, and any
+// other value is treated as a GitHub gist id and read via the gh CLI.
+func fetchImportSource(ctx context.Context, source string, stdin io.Reader) ([]byte, error) {
+	source = strings.TrimSpace(source)
+	switch {
+	case source == "-":
+		return io.ReadAll(stdin)
+	case strings.HasPrefix(source, "http://"), strings.HasPrefix(source, "https://"):
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("fetch %s: %w", source, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("fetch %s: status %s", source, resp.Status)
+		}
+		return io.ReadAll(io.LimitReader(resp.Body, 64<<20)) // 64MiB ceiling
+	default:
+		if _, statErr := os.Stat(source); statErr == nil {
+			return os.ReadFile(source)
+		}
+		// Treat as a gist id.
+		if _, err := exec.LookPath("gh"); err != nil {
+			return nil, fmt.Errorf("%q is not a file or URL, and gh CLI is not installed to fetch it as a gist", source)
+		}
+		out, err := exec.CommandContext(ctx, "gh", "gist", "view", source, "--raw").Output()
+		if err != nil {
+			return nil, fmt.Errorf("gh gist view %s: %w", source, err)
+		}
+		return out, nil
+	}
 }
 
 func newCrawlCmd() *cobra.Command {

@@ -1012,6 +1012,53 @@ func (s *LibSQLStore) GetNeighbors(ctx context.Context, nodeID string) ([]Node, 
 	return nodes, edges, nil
 }
 
+// GraphElementsLean returns the whole graph without loading embeddings, and
+// with node content capped to contentLimit bytes in SQL (0 = no content). It
+// exists so the studio graph/stats views don't pull every node's full content
+// and parse every embedding JSON just to render a summary. Not on the
+// GraphStore interface — callers detect it via a type assertion and fall back
+// to GetAllGraphElements.
+func (s *LibSQLStore) GraphElementsLean(ctx context.Context, contentLimit int) ([]Node, []Edge, error) {
+	if contentLimit < 0 {
+		contentLimit = 0
+	}
+	nodeRows, err := s.db.QueryContext(ctx,
+		`SELECT id, workspace, domain, type, name, substr(content, 1, ?), COALESCE(url, ''), COALESCE(path, '') FROM nodes ORDER BY domain, type, name`,
+		contentLimit)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer nodeRows.Close()
+
+	var nodes []Node
+	for nodeRows.Next() {
+		var n Node
+		if err := nodeRows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path); err != nil {
+			return nil, nil, err
+		}
+		nodes = append(nodes, n)
+	}
+	if err := nodeRows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	edgeRows, err := s.db.QueryContext(ctx, `SELECT source_id, target_id, type FROM edges ORDER BY source_id, target_id, type`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer edgeRows.Close()
+
+	var edges []Edge
+	for edgeRows.Next() {
+		var e Edge
+		if err := edgeRows.Scan(&e.SourceID, &e.TargetID, &e.Type); err != nil {
+			return nil, nil, err
+		}
+		edges = append(edges, e)
+	}
+	return nodes, edges, edgeRows.Err()
+}
+
 func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, error) {
 	nodeRows, err := s.db.QueryContext(ctx, `SELECT `+nodeColumns+` FROM nodes ORDER BY domain, type, name`)
 	if err != nil {

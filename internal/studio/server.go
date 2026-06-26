@@ -148,13 +148,12 @@ func (s *StudioServer) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nodes, edges, err := s.store.GetAllGraphElements(r.Context())
+	// Lean read: content is capped in SQL and embeddings are never loaded — the
+	// graph view only needs a short preview per node.
+	nodes, edges, err := s.store.GraphElementsLean(r.Context(), 640)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-	for idx := range nodes {
-		nodes[idx].Content = previewContent(nodes[idx].Content, 640)
 	}
 	verbose.Printf("studio graph request served nodes=%d edges=%d", len(nodes), len(edges))
 	w.Header().Set("Content-Type", "application/json")
@@ -493,7 +492,8 @@ func (s *StudioServer) handleStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	nodes, edges, err := s.store.GetAllGraphElements(r.Context())
+	// Stats only counts by type/domain/workspace — load no content at all.
+	nodes, edges, err := s.store.GraphElementsLean(r.Context(), 0)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -521,18 +521,4 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func previewContent(content string, maxRunes int) string {
-	if maxRunes <= 0 || len(content) == 0 {
-		return ""
-	}
-	count := 0
-	for idx := range content {
-		if count == maxRunes {
-			return content[:idx] + "\n..."
-		}
-		count++
-	}
-	return content
 }
