@@ -1,0 +1,39 @@
+internal/exporter/exporter_test.go
+  s_b59b6278ace8a9::t_bdae5f5ece32e1 71-72,76-127
+internal/exporter/importer.go
+  s_b59b6278ace8a9::t_3a0701db1c0b13 1-145
+cmd/raph/memlimit.go
+  s_b59b6278ace8a9::t_a4c4a36bcae4f1 1-120
+internal/exporter/exporter.go
+  s_b59b6278ace8a9::t_65a533ffeacfc3 29-47,55-63
+  s_b59b6278ace8a9::t_4448d732c6382d 114,118
+  s_b59b6278ace8a9::t_831528a1645f3a 74-78,82
+  s_b59b6278ace8a9::t_f744e331bfbaba 64
+cmd/raph/main.go
+  s_b59b6278ace8a9::t_2006cd87818f36 1158-1252
+  s_b59b6278ace8a9::t_727670468a1d47 8
+  s_b59b6278ace8a9::t_86d51e12363899 78
+  s_b59b6278ace8a9::t_4641623f161351 101
+  s_b59b6278ace8a9::t_18f44a82692683 1147
+internal/db/libsql.go
+  s_b59b6278ace8a9::t_c5e8bb8fde86e0 1015-1061
+internal/studio/server.go
+  s_b59b6278ace8a9::t_2405de4a799bee 151-153
+  s_b59b6278ace8a9::t_3e33a987bbb242 495-496
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.3",
+  "base_commit_sha": "bddd0f42856135179738688815700c501e328cf1",
+  "prompts": {},
+  "sessions": {
+    "s_b59b6278ace8a9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "33666a8f-f10a-497e-b063-142e5a406ebc",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
