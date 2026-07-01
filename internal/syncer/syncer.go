@@ -338,6 +338,7 @@ func syncRepository(ctx context.Context, cfg *config.Config, repo Repository, pr
 		return false, err
 	}
 	changed := false
+	var changedPaths []string
 	for relativePath := range previous {
 		if _, exists := current[relativePath]; !exists {
 			if err := idx.RemoveFile(ctx, relativePath); err != nil {
@@ -356,7 +357,14 @@ func syncRepository(ctx context.Context, cfg *config.Config, repo Repository, pr
 			return false, fmt.Errorf("sync %s: %w", relativePath, err)
 		}
 		fmt.Printf("%s synced %s in %s (%d nodes, %d embeddings)\n", time.Now().Format(time.RFC3339), relativePath, repo.Path, stats.NodesSaved, stats.EmbeddingsCreated)
+		changedPaths = append(changedPaths, relativePath)
 		changed = true
+	}
+	// Restore outgoing cross-file references for the changed import-aware files
+	// once per cycle (SyncFile only re-creates nodes and preserves incoming
+	// edges; a saved file's own outgoing edges need the workspace symbol index).
+	if len(changedPaths) > 0 {
+		idx.RelinkImportAware(ctx, changedPaths)
 	}
 	return changed, nil
 }

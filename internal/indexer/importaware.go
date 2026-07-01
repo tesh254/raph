@@ -49,25 +49,7 @@ func (i *Indexer) linkImportAwareUsages(ctx context.Context, nodeIdx map[string]
 	if i.store == nil || len(nodeIdx) == 0 {
 		return
 	}
-	// Derive both lookups from nodeIdx in a single O(symbols) pass: the set of
-	// known files (for import resolution) and a per-file name->id bucket (so a
-	// file's local declarations don't require rescanning every workspace symbol).
-	known := map[string]bool{}
-	byFile := map[string]map[string]string{}
-	for key, sn := range nodeIdx {
-		h := strings.IndexByte(key, 0)
-		if h < 0 {
-			continue
-		}
-		rel, name := key[:h], key[h+1:]
-		known[rel] = true
-		bucket := byFile[rel]
-		if bucket == nil {
-			bucket = map[string]string{}
-			byFile[rel] = bucket
-		}
-		bucket[name] = sn.id
-	}
+	known, byFile := deriveImportLookups(nodeIdx)
 
 	var batch []db.Edge
 	total := 0
@@ -122,6 +104,79 @@ func (i *Indexer) linkImportAwareUsages(ctx context.Context, nodeIdx map[string]
 	flush()
 	stats.EdgesSaved += total
 	verbose.Printf("import-aware fallback linked %d cross-file/within-file reference edges", total)
+}
+
+// deriveImportLookups turns the shared symbol index into the two lookups the
+// import-aware resolver needs, in a single O(symbols) pass: the set of known
+// files (for import resolution) and a per-file name->id bucket (so a file's
+// local declarations don't require rescanning every workspace symbol).
+func deriveImportLookups(nodeIdx map[string]symbolNode) (known map[string]bool, byFile map[string]map[string]string) {
+	known = map[string]bool{}
+	byFile = map[string]map[string]string{}
+	for key, sn := range nodeIdx {
+		h := strings.IndexByte(key, 0)
+		if h < 0 {
+			continue
+		}
+		rel, name := key[:h], key[h+1:]
+		known[rel] = true
+		bucket := byFile[rel]
+		if bucket == nil {
+			bucket = map[string]string{}
+			byFile[rel] = bucket
+		}
+		bucket[name] = sn.id
+	}
+	return known, byFile
+}
+
+// RelinkImportAware re-emits the outgoing reference edges for a set of changed
+// files (import-aware tree-sitter languages only). The incremental sync calls it
+// once per cycle after re-indexing the changed files: a saved file's own
+// outgoing edges were cascaded away with its old nodes and SyncFile does not
+// recreate them (the within-file pass is skipped for import-aware languages), so
+// without this a just-edited .ts/.js/.py file keeps no outgoing references until
+// a full reindex. Building the symbol index once and re-collecting only the
+// changed files keeps the cost bounded (no external tools, no embeddings).
+func (i *Indexer) RelinkImportAware(ctx context.Context, changedRel []string) {
+	if i.store == nil || len(changedRel) == 0 {
+		return
+	}
+	nodeIdx := i.buildSymbolIndex(ctx)
+	if len(nodeIdx) == 0 {
+		return
+	}
+	known, byFile := deriveImportLookups(nodeIdx)
+	var batch []db.Edge
+	relinked := 0
+	for _, rel := range changedRel {
+		rel = filepath.ToSlash(rel)
+		entry := grammars.DetectLanguage(rel)
+		if entry == nil || entry.Language == nil {
+			continue
+		}
+		if i.scipCovered[entry.Name] {
+			continue
+		}
+		ispec, ok := importSpecs[entry.Name]
+		if !ok {
+			continue
+		}
+		spec, ok := langSpecs[entry.Name]
+		if !ok {
+			continue
+		}
+		i.collectImportFileEdges(rel, entry, ispec, spec, nodeIdx, known, byFile[rel], &batch)
+		relinked++
+		if len(batch) >= edgeFlushChunk {
+			i.saveEdges(ctx, batch)
+			batch = batch[:0]
+		}
+	}
+	total := i.saveEdges(ctx, batch)
+	if relinked > 0 {
+		verbose.Printf("sync relink: re-emitted outgoing edges for %d changed import-aware file(s) (+%d in final flush)", relinked, total)
+	}
 }
 
 // collectImportFileEdges appends this file's resolved reference edges to batch.

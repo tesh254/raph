@@ -354,6 +354,12 @@ func (s *LibSQLStore) ensureNodeColumns() error {
 			continue
 		}
 		if _, err := s.db.Exec(add.ddl); err != nil {
+			// A second raph process migrating the same fresh DB concurrently may
+			// have added the column between our PRAGMA read and this ALTER; that's
+			// benign, not a startup failure.
+			if strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+				continue
+			}
 			return fmt.Errorf("add nodes column %s: %w", add.name, err)
 		}
 	}
@@ -361,17 +367,14 @@ func (s *LibSQLStore) ensureNodeColumns() error {
 }
 
 // backfillNodesFTS seeds the FTS index from existing rows the first time the
-// virtual table is created on a pre-existing database.
+// virtual table is created on a pre-existing database. The WHERE NOT EXISTS
+// guard makes it a single atomic statement, so two processes migrating the same
+// DB concurrently can't both insert and double the index (busy_timeout, set via
+// the DSN, serializes their writes).
 func (s *LibSQLStore) backfillNodesFTS() error {
-	var count int
-	if err := s.db.QueryRow(`SELECT count(*) FROM nodes_fts`).Scan(&count); err != nil {
-		return fmt.Errorf("count nodes_fts: %w", err)
-	}
-	if count > 0 {
-		return nil
-	}
 	if _, err := s.db.Exec(`INSERT INTO nodes_fts (node_id, workspace, domain, type, name, content, path)
-		SELECT id, workspace, domain, type, name, content, COALESCE(path, '') FROM nodes`); err != nil {
+		SELECT id, workspace, domain, type, name, content, COALESCE(path, '') FROM nodes
+		WHERE NOT EXISTS (SELECT 1 FROM nodes_fts)`); err != nil {
 		return fmt.Errorf("backfill nodes_fts: %w", err)
 	}
 	return nil
@@ -482,7 +485,23 @@ func stringifySQLiteValue(value any) string {
 	}
 }
 
+// execer is satisfied by both *sql.DB and *sql.Tx, so a write body can run
+// either standalone (autocommit) or inside a caller's transaction.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 func (s *LibSQLStore) SaveNode(ctx context.Context, node Node) error {
+	// The node row and its FTS index must move together — a crash between them
+	// would leave a node invisible to search (or a stale FTS row) that the
+	// count(*)==0 backfill can never repair. One transaction keeps them in sync.
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		return saveNodeExec(ctx, tx, node)
+	})
+}
+
+// saveNodeExec upserts a node row and its FTS index using the given executor.
+func saveNodeExec(ctx context.Context, e execer, node Node) error {
 	embeddingJSON, err := json.Marshal(node.Embedding)
 	if err != nil {
 		return fmt.Errorf("marshal embedding: %w", err)
@@ -515,18 +534,19 @@ func (s *LibSQLStore) SaveNode(ctx context.Context, node Node) error {
 			updated_at = excluded.updated_at,
 			embedding_json = excluded.embedding_json;`
 
-	if _, err = s.db.ExecContext(ctx, query, node.ID, node.Workspace, node.Domain, node.Type, node.Name, node.Content, node.URL, node.Path, propertiesJSON, createdAt, now, string(embeddingJSON)); err != nil {
+	if _, err := e.ExecContext(ctx, query, node.ID, node.Workspace, node.Domain, node.Type, node.Name, node.Content, node.URL, node.Path, propertiesJSON, createdAt, now, string(embeddingJSON)); err != nil {
 		return err
 	}
-	return s.syncNodeFTS(ctx, node)
+	return syncNodeFTSTx(ctx, e, node)
 }
 
-// syncNodeFTS keeps the trigram FTS index in lockstep with a node row.
-func (s *LibSQLStore) syncNodeFTS(ctx context.Context, node Node) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, node.ID); err != nil {
+// syncNodeFTSTx keeps the trigram FTS index in lockstep with a node row, using
+// the caller's executor.
+func syncNodeFTSTx(ctx context.Context, e execer, node Node) error {
+	if _, err := e.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, node.ID); err != nil {
 		return fmt.Errorf("clear fts row: %w", err)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO nodes_fts (node_id, workspace, domain, type, name, content, path)
+	_, err := e.ExecContext(ctx, `INSERT INTO nodes_fts (node_id, workspace, domain, type, name, content, path)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		node.ID, node.Workspace, node.Domain, node.Type, node.Name, node.Content, node.Path)
 	if err != nil {
@@ -565,6 +585,30 @@ func (s *LibSQLStore) SaveEdges(ctx context.Context, edges []Edge) error {
 			_ = tx.Rollback()
 			return err
 		}
+	}
+	return tx.Commit()
+}
+
+// withTx runs fn inside a single transaction, rolling back on any error (or
+// panic) and committing otherwise. It exists so multi-statement writes are
+// atomic: an interrupt or mid-sequence failure can't leave the graph with a
+// node but no FTS row, orphaned edges, or a half-applied delete.
+func (s *LibSQLStore) withTx(ctx context.Context, fn func(tx *sql.Tx) error) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if err = fn(tx); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -1109,6 +1153,10 @@ func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, 
 }
 
 func (s *LibSQLStore) UpsertMemoryRecord(ctx context.Context, record MemoryRecord) error {
+	return upsertMemoryRecordExec(ctx, s.db, record)
+}
+
+func upsertMemoryRecordExec(ctx context.Context, e execer, record MemoryRecord) error {
 	normalizedTagsJSON, err := json.Marshal(record.NormalizedTags)
 	if err != nil {
 		return fmt.Errorf("marshal normalized tags: %w", err)
@@ -1137,7 +1185,7 @@ func (s *LibSQLStore) UpsertMemoryRecord(ctx context.Context, record MemoryRecor
 		revision = excluded.revision,
 		replaced_by_node_id = excluded.replaced_by_node_id,
 		deprecated_message = excluded.deprecated_message`
-	_, err = s.db.ExecContext(ctx, query,
+	_, err = e.ExecContext(ctx, query,
 		record.Node.ID,
 		record.ScopeType,
 		record.ScopeID,
@@ -1196,6 +1244,10 @@ func (s *LibSQLStore) getMemoryRecord(ctx context.Context, where string, args ..
 }
 
 func (s *LibSQLStore) InsertMemoryRevision(ctx context.Context, revision MemoryRevision) error {
+	return insertMemoryRevisionExec(ctx, s.db, revision)
+}
+
+func insertMemoryRevisionExec(ctx context.Context, e execer, revision MemoryRevision) error {
 	normalizedTagsJSON, err := json.Marshal(revision.NormalizedTags)
 	if err != nil {
 		return fmt.Errorf("marshal revision normalized tags: %w", err)
@@ -1204,7 +1256,7 @@ func (s *LibSQLStore) InsertMemoryRevision(ctx context.Context, revision MemoryR
 	if err != nil {
 		return fmt.Errorf("marshal revision display tags: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO memory_revisions (
+	_, err = e.ExecContext(ctx, `INSERT INTO memory_revisions (
 		node_id, revision, title, content, source, writer_id, lifecycle_state,
 		normalized_tags_json, display_tags_json, created_at, deprecated_reason
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1213,6 +1265,32 @@ func (s *LibSQLStore) InsertMemoryRevision(ctx context.Context, revision MemoryR
 		revision.CreatedAt, revision.DeprecatedReason,
 	)
 	return err
+}
+
+// CommitMemoryRecord persists a memory write atomically: it appends the prior
+// state to the revision history (when prev != nil), optionally re-saves the
+// content node (+FTS), and upserts the record — all in one transaction, so an
+// interruption can't orphan a revision row or half-apply an update. The
+// embedding must already be set on record.Node; embedding is a network call and
+// must not run inside the write transaction. Exposed as an optional capability
+// (memory.commitMemory falls back to sequential writes for stores without it).
+func (s *LibSQLStore) CommitMemoryRecord(ctx context.Context, prev *MemoryRevision, record MemoryRecord, saveNode bool) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if prev != nil {
+			if err := insertMemoryRevisionExec(ctx, tx, *prev); err != nil {
+				return fmt.Errorf("save memory revision: %w", err)
+			}
+		}
+		if saveNode {
+			if err := saveNodeExec(ctx, tx, record.Node); err != nil {
+				return fmt.Errorf("save memory node: %w", err)
+			}
+		}
+		if err := upsertMemoryRecordExec(ctx, tx, record); err != nil {
+			return fmt.Errorf("save memory metadata: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *LibSQLStore) ListMemoryRevisions(ctx context.Context, nodeID string) ([]MemoryRevision, error) {
@@ -1364,94 +1442,118 @@ func (s *LibSQLStore) SaveWebCrawlVersion(ctx context.Context, version WebCrawlV
 }
 
 func (s *LibSQLStore) DeleteNodeByID(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
-	if err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE source_id = ? OR target_id = ?`, id, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, id); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, id)
 		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM edges WHERE source_id = ? OR target_id = ?`, id, id)
-	if err != nil {
-		return err
-	}
-	if _, err = s.db.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, id); err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, id)
-	return err
+	})
 }
 
 func (s *LibSQLStore) DeleteFileNodes(ctx context.Context, workspace string, relativePath string) error {
 	relativePath = filepath.ToSlash(relativePath)
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM nodes_fts
-		WHERE node_id IN (
-			SELECT id FROM nodes WHERE workspace = ?1
-			AND (url = ?2 OR (substr(url, 1, length(?2)) = ?2 AND substr(url, length(?2) + 1, 1) = '#'))
-		)`, workspace, relativePath); err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts
+			WHERE node_id IN (SELECT id FROM nodes WHERE `+fileNodeMatch+`)`, workspace, relativePath); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM edges
+			WHERE source_id IN (SELECT id FROM nodes WHERE `+fileNodeMatch+`)
+			OR target_id IN (SELECT id FROM nodes WHERE `+fileNodeMatch+`)`, workspace, relativePath); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE `+fileNodeMatch, workspace, relativePath)
 		return err
-	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM edges
-		WHERE source_id IN (
-			SELECT id FROM nodes WHERE workspace = ?1
-			AND (url = ?2 OR (substr(url, 1, length(?2)) = ?2 AND substr(url, length(?2) + 1, 1) = '#'))
-		)
-		OR target_id IN (
-			SELECT id FROM nodes WHERE workspace = ?1
-			AND (url = ?2 OR (substr(url, 1, length(?2)) = ?2 AND substr(url, length(?2) + 1, 1) = '#'))
-		)`, workspace, relativePath)
+	})
+}
+
+// fileNodeMatch is the WHERE fragment (params: workspace ?1, relPath ?2) that
+// selects every node belonging to one file — the file node plus its chunk/symbol
+// children, whose urls are the path itself or "<path>#…".
+const fileNodeMatch = `workspace = ?1 AND (url = ?2 OR (substr(url, 1, length(?2)) = ?2 AND substr(url, length(?2) + 1, 1) = '#'))`
+
+// FileNodeIDs returns the ids of every node belonging to a file. Used by the
+// incremental sync to tell which symbols survived a re-index so incoming edges
+// to them can be restored.
+func (s *LibSQLStore) FileNodeIDs(ctx context.Context, workspace, relativePath string) ([]string, error) {
+	relativePath = filepath.ToSlash(relativePath)
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM nodes WHERE `+fileNodeMatch, workspace, relativePath)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM nodes WHERE workspace = ?1
-		AND (url = ?2 OR (substr(url, 1, length(?2)) = ?2 AND substr(url, length(?2) + 1, 1) = '#'))`,
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// IncomingFileEdges returns edges that point INTO a file's nodes from a node
+// outside the file. The incremental sync snapshots these before deleting a file
+// (the edges CASCADE away), then restores the ones whose target symbol still
+// exists after re-index — so a save doesn't wipe cross-file references that other
+// files make to this one.
+func (s *LibSQLStore) IncomingFileEdges(ctx context.Context, workspace, relativePath string) ([]Edge, error) {
+	relativePath = filepath.ToSlash(relativePath)
+	rows, err := s.db.QueryContext(ctx, `SELECT source_id, target_id, type FROM edges
+		WHERE target_id IN (SELECT id FROM nodes WHERE `+fileNodeMatch+`)
+		AND source_id NOT IN (SELECT id FROM nodes WHERE `+fileNodeMatch+`)`,
 		workspace, relativePath)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var edges []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.SourceID, &e.TargetID, &e.Type); err != nil {
+			return nil, err
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
 }
 
 func (s *LibSQLStore) DeleteWorkspace(ctx context.Context, workspace string) error {
-	_, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
-	if err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE workspace = ?) OR target_id IN (SELECT id FROM nodes WHERE workspace = ?)`, workspace, workspace); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE workspace = ?`, workspace); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE workspace = ?`, workspace)
 		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE workspace = ?) OR target_id IN (SELECT id FROM nodes WHERE workspace = ?)`, workspace, workspace)
-	if err != nil {
-		return err
-	}
-	if _, err = s.db.ExecContext(ctx, `DELETE FROM nodes_fts WHERE workspace = ?`, workspace); err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM nodes WHERE workspace = ?`, workspace)
-	return err
+	})
 }
 
 func (s *LibSQLStore) ClearAll(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM edges`)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM nodes`)
-	if err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM nodes_fts`); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM access_events`); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM memory_revisions`); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM memory_records`); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM web_crawl_versions`); err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM web_corpora`)
-	return err
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		for _, stmt := range []string{
+			`DELETE FROM edges`,
+			`DELETE FROM nodes`,
+			`DELETE FROM nodes_fts`,
+			`DELETE FROM access_events`,
+			`DELETE FROM memory_revisions`,
+			`DELETE FROM memory_records`,
+			`DELETE FROM web_crawl_versions`,
+			`DELETE FROM web_corpora`,
+		} {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func embeddingLength(jsonStr string) int {

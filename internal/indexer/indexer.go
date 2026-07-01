@@ -155,6 +155,14 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	return stats, nil
 }
 
+// fileEdgeStore is the optional capability the incremental sync uses to preserve
+// cross-file references across a single-file re-index. Stores that don't
+// implement it (e.g. test mocks) simply lose the preservation, not correctness.
+type fileEdgeStore interface {
+	FileNodeIDs(ctx context.Context, workspace, relativePath string) ([]string, error)
+	IncomingFileEdges(ctx context.Context, workspace, relativePath string) ([]db.Edge, error)
+}
+
 func (i *Indexer) SyncFile(ctx context.Context, path string) (Stats, error) {
 	var stats Stats
 	absPath, err := filepath.Abs(path)
@@ -166,6 +174,22 @@ func (i *Indexer) SyncFile(ctx context.Context, path string) (Stats, error) {
 		return stats, fmt.Errorf("file %s is outside workspace %s", absPath, i.root)
 	}
 	relPath = filepath.ToSlash(relPath)
+
+	// Snapshot the edges other files make INTO this one before we delete it.
+	// DeleteFileNodes cascades those edges away (edges FK ON DELETE CASCADE), but
+	// re-indexing recreates this file's symbol nodes with the SAME deterministic
+	// ids — so any incoming edge whose target symbol still exists can be restored.
+	// Without this, every save silently strips the reference graph pointing at the
+	// saved file until a full reindex.
+	fes, canPreserve := i.store.(fileEdgeStore)
+	var incoming []db.Edge
+	if canPreserve {
+		if incoming, err = fes.IncomingFileEdges(ctx, i.workspaceID, relPath); err != nil {
+			verbose.Printf("sync: snapshot incoming edges for %s failed: %v", relPath, err)
+			incoming = nil
+		}
+	}
+
 	if err := i.store.DeleteFileNodes(ctx, i.workspaceID, relPath); err != nil {
 		return stats, fmt.Errorf("clear existing file graph: %w", err)
 	}
@@ -179,6 +203,27 @@ func (i *Indexer) SyncFile(ctx context.Context, path string) (Stats, error) {
 	}
 	if err := i.indexFile(ctx, absPath, &stats); err != nil {
 		return stats, err
+	}
+
+	// Restore incoming edges whose target symbol survived the re-index. Symbols
+	// removed from the file won't be in the new id set, so their edges stay gone.
+	if canPreserve && len(incoming) > 0 {
+		newIDs, err := fes.FileNodeIDs(ctx, i.workspaceID, relPath)
+		if err != nil {
+			verbose.Printf("sync: reload node ids for %s failed: %v", relPath, err)
+		} else {
+			present := make(map[string]struct{}, len(newIDs))
+			for _, id := range newIDs {
+				present[id] = struct{}{}
+			}
+			survivors := incoming[:0]
+			for _, e := range incoming {
+				if _, ok := present[e.TargetID]; ok {
+					survivors = append(survivors, e)
+				}
+			}
+			stats.EdgesSaved += i.saveEdges(ctx, survivors)
+		}
 	}
 	return stats, nil
 }

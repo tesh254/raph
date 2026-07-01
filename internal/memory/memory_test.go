@@ -159,3 +159,59 @@ func TestPutCreatesThenUpdates(t *testing.T) {
 		t.Fatalf("Put did not update content: %q", second.Record.Node.Content)
 	}
 }
+
+// TestUpdateAtomicRevisionOnRealStore exercises the transactional commit path
+// (LibSQLStore.CommitMemoryRecord) rather than the mock fallback: an update must
+// bump the record revision AND append exactly one revision-history row, and the
+// two must land together.
+func TestUpdateAtomicRevisionOnRealStore(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	in := StoreInput{
+		ScopeType: "global", ScopeID: "global", KnowledgeType: "decision",
+		MemoryKey: "db-choice", Title: "DB", Content: "sqlite",
+		Source: "cli", WriterID: "cli",
+	}
+	created, err := Store(ctx, store, nil, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revs, err := store.ListMemoryRevisions(ctx, created.Record.Node.ID); err != nil {
+		t.Fatal(err)
+	} else if len(revs) != 0 {
+		t.Fatalf("create should not write a history row yet, got %d", len(revs))
+	}
+
+	in.Content = "libsql"
+	updated, err := Update(ctx, store, nil, UpdateInput(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Record.Revision != 2 {
+		t.Fatalf("expected revision 2 after update, got %d", updated.Record.Revision)
+	}
+	revs, err := store.ListMemoryRevisions(ctx, updated.Record.Node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revs) != 1 {
+		t.Fatalf("expected exactly 1 history row after one update, got %d", len(revs))
+	}
+	if revs[0].Content != "sqlite" || revs[0].Revision != 1 {
+		t.Fatalf("history row should snapshot the pre-update state (rev1/sqlite), got rev%d/%q", revs[0].Revision, revs[0].Content)
+	}
+	// The live record reflects the new content.
+	live, err := store.GetMemoryRecord(ctx, updated.Record.Node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Node.Content != "libsql" || live.Revision != 2 {
+		t.Fatalf("live record not updated atomically: rev%d/%q", live.Revision, live.Node.Content)
+	}
+}
