@@ -1,0 +1,91 @@
+cmd/raph/main.go
+  s_d071be8e5cb50b::t_df14f7cbf07be7 1230-1232,1237-1238
+  s_d071be8e5cb50b::t_619a296bc50a59 14
+  s_d071be8e5cb50b::t_ea9548233e5307 166
+  s_d071be8e5cb50b::t_a13156a80d62b0 1339-1341
+  s_d071be8e5cb50b::t_63b7d769f0019d 1379-1381
+internal/exporter/exporter.go
+  s_d071be8e5cb50b::t_2b47743d8f1130 182-183
+internal/studio/server_test.go
+  s_d071be8e5cb50b::t_6372cf2c9474fe 19
+  s_d071be8e5cb50b::t_79133cc725e681 275-278,280-281,287,291-340
+internal/crawler/ssrf.go
+  s_d071be8e5cb50b::t_ae9be76daccfb9 1-73
+internal/db/libsql.go
+  s_d071be8e5cb50b::t_3447e7cfbc3ce8 1025
+  s_d071be8e5cb50b::t_a71019e3767622 162-168
+  s_d071be8e5cb50b::t_5afae64e75ad68 1327-1330,1332-1333
+  s_d071be8e5cb50b::t_db6b6d454709cc 634,1090-1092,1108
+  s_d071be8e5cb50b::t_fa133f57e0a0e8 629,632-633
+  s_d071be8e5cb50b::t_5110de6ca920fe 588-591,597
+internal/studio/server.go
+  s_d071be8e5cb50b::t_230ed425bef4f4 498-502,505
+  s_d071be8e5cb50b::t_4e66d60ae2454e 103-105,130,136-153
+  s_d071be8e5cb50b::t_c725743fa93333 431-448,450-455,458-462,465-469,472-480,485-497,503-504,506-535
+  s_d071be8e5cb50b::t_84586fdb07c429 8
+  s_d071be8e5cb50b::t_0feabf97e7f45a 456-457
+  s_d071be8e5cb50b::t_b3e4672f0f20eb 536
+internal/exporter/importer.go
+  s_d071be8e5cb50b::t_25a6d9ab791d2c 55-75
+  s_d071be8e5cb50b::t_f5cd7a84856ef0 98-102,104-105
+  s_d071be8e5cb50b::t_972a3ef09a76da 123-128,132,134-136,138
+internal/indexer/indexer.go
+  s_d071be8e5cb50b::t_fbf91c0dd07ea7 33
+  s_d071be8e5cb50b::t_ae651c53984ab1 521-522,526
+  s_d071be8e5cb50b::t_cd7d6bde04973d 529,533-534,537-538
+  s_d071be8e5cb50b::t_dfd385e77b0361 116-124
+  s_d071be8e5cb50b::t_21bf3837acfa5f 539
+internal/syncer/syncer.go
+  s_d071be8e5cb50b::t_8e83c9089f5289 315-318,323-324
+cmd/raph/memlimit.go
+  s_d071be8e5cb50b::t_f274be08aaf0ad 31,33-35
+  s_d071be8e5cb50b::t_e1cc0359102654 46-47,49,55
+  s_d071be8e5cb50b::t_f64d46768e4334 4
+  s_d071be8e5cb50b::t_7b7ba5dca713cb 106-109,111-121,136-162
+  s_d071be8e5cb50b::t_2469d16aeefb81 163
+internal/config/config.go
+  s_d071be8e5cb50b::t_16a8003296c911 134-135,137
+  s_d071be8e5cb50b::t_16b2b9305716f9 152,155-156,163,172
+  s_d071be8e5cb50b::t_389dd0194874bf 198-209
+internal/exporter/exporter_test.go
+  s_d071be8e5cb50b::t_fbba16081eeece 112-129
+internal/knowledge/knowledge.go
+  s_d071be8e5cb50b::t_957f554b4cc5a2 136,151,165-187
+  s_d071be8e5cb50b::t_347530e16b171c 188
+internal/crawler/crawler_test.go
+  s_d071be8e5cb50b::t_b060f9cb990725 78
+  s_d071be8e5cb50b::t_b3b76128c19d17 133
+  s_d071be8e5cb50b::t_c9e23f71987dd5 193
+internal/crawler/crawler.go
+  s_d071be8e5cb50b::t_e44664c5c22fb4 40
+  s_d071be8e5cb50b::t_46ec7478888fd2 202-204,207-224
+  s_d071be8e5cb50b::t_a06081f41f293b 80-84
+  s_d071be8e5cb50b::t_8c4a61c0670df9 146-159,161
+  s_d071be8e5cb50b::t_59341b6009c8c5 48
+internal/indexer/scip.go
+  s_d071be8e5cb50b::t_3ed3c5929865ea 513
+  s_d071be8e5cb50b::t_51881e63f407f4 527-529,531-533
+  s_d071be8e5cb50b::t_ba87b2ba479c44 380-387
+internal/syncer/watcher.go
+  s_d071be8e5cb50b::t_c33e9728692df7 8-9
+  s_d071be8e5cb50b::t_4b46b01d372890 29-34
+  s_d071be8e5cb50b::t_2404b316d70542 69,75-104
+  s_d071be8e5cb50b::t_922da8bf4adb83 107-113,127-131,139
+  s_d071be8e5cb50b::t_3f68177063affa 105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "1af9adb0576c161140d8baf85e6194d839587448",
+  "prompts": {},
+  "sessions": {
+    "s_d071be8e5cb50b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c01fabe8-80a1-4765-97b7-90dc339f424d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
