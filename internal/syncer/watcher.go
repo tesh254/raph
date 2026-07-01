@@ -5,6 +5,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"raph/internal/indexer"
@@ -24,6 +26,12 @@ const debounceWindow = 150 * time.Millisecond
 type repoWatcher struct {
 	fsw     *fsnotify.Watcher
 	trigger chan struct{}
+
+	// mu guards watched, which is mutated from two goroutines: the worker's
+	// ensureDirs reconcile and the event loop's create/remove handling. Without
+	// it a concurrent map read+write can trigger a fatal runtime error that
+	// takes down the whole sync daemon.
+	mu      sync.Mutex
 	watched map[string]struct{}
 }
 
@@ -58,20 +66,51 @@ func (w *repoWatcher) ensureDirs(roots []string) {
 			if path != root && indexer.ShouldSkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
-			if _, ok := w.watched[path]; ok {
-				return nil
-			}
-			if addErr := w.fsw.Add(path); addErr != nil {
-				verbose.Printf("watch add failed dir=%s: %v", path, addErr)
-				return nil
-			}
-			w.watched[path] = struct{}{}
+			w.addWatch(path)
 			return nil
 		})
 	}
 }
 
+// addWatch registers a directory watch if not already present. Safe to call
+// from either goroutine.
+func (w *repoWatcher) addWatch(path string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.watched[path]; ok {
+		return
+	}
+	if err := w.fsw.Add(path); err != nil {
+		verbose.Printf("watch add failed dir=%s: %v", path, err)
+		return
+	}
+	w.watched[path] = struct{}{}
+}
+
+// removeWatch drops a directory and any of its descendants from the watch set
+// (fsnotify already tears down the OS-level watch when a dir is deleted, but the
+// map entry would otherwise linger and block re-watching if the path is later
+// recreated — e.g. across a branch switch or a regenerated build dir).
+func (w *repoWatcher) removeWatch(path string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	prefix := path + string(filepath.Separator)
+	for p := range w.watched {
+		if p == path || strings.HasPrefix(p, prefix) {
+			delete(w.watched, p)
+			_ = w.fsw.Remove(p)
+		}
+	}
+}
+
 func (w *repoWatcher) loop(ctx context.Context) {
+	// A panic in this goroutine would otherwise crash the whole daemon with no
+	// trace; log and exit the loop instead.
+	defer func() {
+		if r := recover(); r != nil {
+			verbose.Printf("watcher loop panic: %v", r)
+		}
+	}()
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	for {
@@ -85,6 +124,11 @@ func (w *repoWatcher) loop(ctx context.Context) {
 			if !ok {
 				return
 			}
+			// Prune watches for removed/renamed directories before filtering, so a
+			// recreated path can be watched again.
+			if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				w.removeWatch(event.Name)
+			}
 			if !relevantEvent(event) {
 				continue
 			}
@@ -92,11 +136,7 @@ func (w *repoWatcher) loop(ctx context.Context) {
 			// inside them are not missed before the next reconcile.
 			if event.Op&fsnotify.Create != 0 {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() && !indexer.ShouldSkipDir(filepath.Base(event.Name)) {
-					if _, ok := w.watched[event.Name]; !ok {
-						if err := w.fsw.Add(event.Name); err == nil {
-							w.watched[event.Name] = struct{}{}
-						}
-					}
+					w.addWatch(event.Name)
 				}
 			}
 			if timer == nil {

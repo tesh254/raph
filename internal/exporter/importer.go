@@ -52,6 +52,27 @@ func Import(ctx context.Context, store db.GraphStore, cfg *config.Config, data [
 
 	res := ImportResult{Kind: env.Kind}
 
+	// Pre-validate the whole envelope before writing anything. Without this a
+	// record that passes the light check here but fails deep inside memory.Put
+	// (e.g. missing scope_id) would abort mid-loop, leaving memory half-imported
+	// and no handoffs processed. Records missing key/scope are treated as
+	// skippable placeholders (counted below); anything else invalid is a hard
+	// error surfaced before any write.
+	for i, r := range env.Memory {
+		if strings.TrimSpace(r.MemoryKey) == "" || strings.TrimSpace(r.ScopeType) == "" {
+			continue
+		}
+		if strings.TrimSpace(r.ScopeID) == "" {
+			return ImportResult{}, fmt.Errorf("memory record %d (key %q): scope_id is required", i, r.MemoryKey)
+		}
+		if strings.TrimSpace(r.KnowledgeType) == "" {
+			return ImportResult{}, fmt.Errorf("memory record %d (key %q): knowledge_type is required", i, r.MemoryKey)
+		}
+		if strings.TrimSpace(r.Node.Content) == "" {
+			return ImportResult{}, fmt.Errorf("memory record %d (key %q): content is required", i, r.MemoryKey)
+		}
+	}
+
 	for _, r := range env.Memory {
 		if strings.TrimSpace(r.MemoryKey) == "" || strings.TrimSpace(r.ScopeType) == "" {
 			res.Skipped++
@@ -74,9 +95,14 @@ func Import(ctx context.Context, store db.GraphStore, cfg *config.Config, data [
 	}
 
 	for _, h := range env.Handoffs {
+		// Node.Workspace is json:"-", so it's empty after unmarshal; recover it
+		// (and the key) from the knowledge://<workspace>/<key> URL, otherwise
+		// every handoff would land in the global workspace and re-imports would
+		// duplicate rather than update.
+		workspace, key := workspaceAndKeyFromURL(h.URL)
 		if _, err := knowledge.Add(ctx, store, cfg, knowledge.AddInput{
-			Workspace:  h.Workspace,
-			Key:        keyFromURL(h.URL),
+			Workspace:  workspace,
+			Key:        key,
 			Title:      h.Name,
 			Content:    h.Content,
 			DocType:    knowledge.DocHandoff,
@@ -94,18 +120,22 @@ func Import(ctx context.Context, store db.GraphStore, cfg *config.Config, data [
 	return res, nil
 }
 
-// keyFromURL recovers a document's stable key from its knowledge:// URL so a
-// re-import updates the same document instead of duplicating it.
-func keyFromURL(url string) string {
+// workspaceAndKeyFromURL recovers a handoff's workspace and stable key from its
+// knowledge://<workspace>/<key> URL (see knowledge.Add), so a re-import lands in
+// the original workspace and updates the same document instead of duplicating
+// it. Returns empty strings when the URL isn't in the expected form, letting
+// knowledge.Add fall back to its defaults (global workspace, slug of title).
+func workspaceAndKeyFromURL(url string) (workspace, key string) {
 	const prefix = "knowledge://"
 	rest, ok := strings.CutPrefix(url, prefix)
 	if !ok {
-		return ""
+		return "", ""
 	}
-	if _, key, found := strings.Cut(rest, "/"); found {
-		return key
+	ws, k, found := strings.Cut(rest, "/")
+	if !found {
+		return "", ""
 	}
-	return ""
+	return ws, k
 }
 
 func chooseTags(primary, fallback []string) []string {

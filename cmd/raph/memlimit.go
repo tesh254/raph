@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime/debug"
@@ -27,8 +28,11 @@ func applyMemoryLimit() {
 		if bytes := parseByteSize(v); bytes > 0 {
 			debug.SetMemoryLimit(bytes)
 			verbose.Printf("memory limit set to %d bytes (RAPH_MEMORY_LIMIT)", bytes)
+			return
 		}
-		return
+		// Unparseable value: warn and fall through to auto-detection rather than
+		// silently leaving the process with no guard at all.
+		fmt.Fprintf(os.Stderr, "raph: warning: ignoring unparseable RAPH_MEMORY_LIMIT=%q; using detected memory\n", v)
 	}
 	total := detectTotalMemory()
 	if total <= 0 {
@@ -39,15 +43,16 @@ func applyMemoryLimit() {
 	verbose.Printf("memory limit set to %d bytes (80%% of detected %d)", limit, total)
 }
 
-// parseByteSize accepts raw bytes or a IEC/SI suffix (KiB/MiB/GiB, KB/MB/GB, K/M/G).
+// parseByteSize accepts raw bytes or an IEC/SI suffix (KiB/MiB/GiB, KB/MB/GB,
+// K/M/G), case-insensitively ("2gb", "1500MiB", "2GB" all work).
 func parseByteSize(s string) int64 {
-	s = strings.TrimSpace(s)
+	s = strings.ToUpper(strings.TrimSpace(s))
 	mult := int64(1)
 	for _, suf := range []struct {
 		tag string
 		m   int64
 	}{
-		{"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10},
+		{"GIB", 1 << 30}, {"MIB", 1 << 20}, {"KIB", 1 << 10},
 		{"GB", 1 << 30}, {"MB", 1 << 20}, {"KB", 1 << 10},
 		{"G", 1 << 30}, {"M", 1 << 20}, {"K", 1 << 10}, {"B", 1},
 	} {
@@ -98,12 +103,22 @@ func hostMemory() int64 {
 }
 
 // cgroupMemoryLimit reads a container's memory ceiling (cgroup v2, then v1),
-// returning 0 when unlimited or unset.
+// returning 0 when unlimited or unset. It resolves the process's own cgroup
+// path from /proc/self/cgroup first, because in nested slices (Kubernetes,
+// systemd) the limit lives there, not at the controller root — reading only the
+// root file would miss the pod limit and let the guard fall back to host RAM.
 func cgroupMemoryLimit() int64 {
-	for _, p := range []string{
-		"/sys/fs/cgroup/memory.max",                 // v2
-		"/sys/fs/cgroup/memory/memory.limit_in_bytes", // v1
-	} {
+	candidates := []string{
+		"/sys/fs/cgroup/memory.max",                   // v2 root
+		"/sys/fs/cgroup/memory/memory.limit_in_bytes", // v1 root
+	}
+	if rel := cgroupRelPath(); rel != "" {
+		candidates = append([]string{
+			"/sys/fs/cgroup" + rel + "/memory.max",                   // v2 nested
+			"/sys/fs/cgroup/memory" + rel + "/memory.limit_in_bytes", // v1 nested
+		}, candidates...)
+	}
+	for _, p := range candidates {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			continue
@@ -117,4 +132,32 @@ func cgroupMemoryLimit() int64 {
 		}
 	}
 	return 0
+}
+
+// cgroupRelPath returns the process's cgroup path relative to the mount root
+// (e.g. "/kubepods/pod123/abc"), or "" if it can't be determined. It prefers
+// the cgroup v2 unified line ("0::<path>").
+func cgroupRelPath() string {
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return ""
+	}
+	var fallback string
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.SplitN(line, ":", 3)
+		if len(fields) != 3 {
+			continue
+		}
+		path := strings.TrimSpace(fields[2])
+		if path == "" || path == "/" {
+			continue
+		}
+		if fields[0] == "0" { // cgroup v2 unified hierarchy
+			return path
+		}
+		if strings.Contains(fields[1], "memory") && fallback == "" {
+			fallback = path // cgroup v1 memory controller
+		}
+	}
+	return fallback
 }

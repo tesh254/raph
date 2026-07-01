@@ -312,12 +312,16 @@ func syncOnce(ctx context.Context, snapshots map[string]map[string]indexer.FileS
 		}
 		changed, err := syncRepository(ctx, cfg, repo, previous, current)
 		if err != nil {
-			return false, err
+			// One repo failing (busy DB, transient embed error, deleted dir) must
+			// not starve every repo after it in the list — log and move on.
+			fmt.Fprintf(os.Stderr, "%s sync failed %s: %v\n", time.Now().Format(time.RFC3339), repo.Path, err)
+			continue
 		}
 		changedAny = changedAny || changed
 		snapshots[repo.Path] = current
 		if err := updateSnapshot(repo.Path, current); err != nil {
-			return false, err
+			fmt.Fprintf(os.Stderr, "%s snapshot save failed %s: %v\n", time.Now().Format(time.RFC3339), repo.Path, err)
+			continue
 		}
 	}
 	return changedAny, nil

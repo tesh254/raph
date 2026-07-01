@@ -37,6 +37,7 @@ type DocumentationCrawler struct {
 
 	mu       sync.Mutex
 	firstErr error
+	pageErr  error
 	stats    Stats
 }
 
@@ -44,6 +45,7 @@ type Stats struct {
 	PagesIndexed      int `json:"pages_indexed"`
 	ChunksIndexed     int `json:"chunks_indexed"`
 	EmbeddingsCreated int `json:"embeddings_created"`
+	PagesFailed       int `json:"pages_failed,omitempty"`
 }
 
 func NewDocumentationCrawler(store db.GraphStore, cfg *config.Config, rawURL string) (*DocumentationCrawler, error) {
@@ -75,6 +77,11 @@ func newDocumentationCrawler(store db.GraphStore, cfg *config.Config, rawURL str
 		colly.MaxDepth(3),
 		colly.Async(true),
 	)
+	// SSRF hardening: refuse connections to internal/loopback addresses on every
+	// hop (redirects included), cap response bodies, and bound each request.
+	collector.WithTransport(safeHTTPTransport())
+	collector.MaxBodySize = crawlMaxBodySize
+	collector.SetRequestTimeout(crawlRequestTimeout)
 	if err := collector.Limit(&colly.LimitRule{
 		DomainRegexp: regexp.QuoteMeta(parsedURL.Hostname()),
 		Parallelism:  2,
@@ -136,8 +143,22 @@ func (c *DocumentationCrawler) Run(ctx context.Context) error {
 	if err := c.getErr(); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// If not a single page made it in, the crawl effectively failed (bad seed,
+	// SSRF-blocked host, everything 4xx/5xx) — surface the first page error.
+	c.mu.Lock()
+	pageErr, indexed, failed := c.pageErr, c.stats.PagesIndexed, c.stats.PagesFailed
+	c.mu.Unlock()
+	if indexed == 0 && pageErr != nil {
+		return pageErr
+	}
+	if failed > 0 {
+		verbose.Printf("crawl run complete with %d skipped page(s)", failed)
+	}
 	verbose.Printf("crawl run complete")
-	return ctx.Err()
+	return nil
 }
 
 func (c *DocumentationCrawler) registerCorpus(ctx context.Context) error {
@@ -178,13 +199,29 @@ func (c *DocumentationCrawler) registerCallbacks() {
 	})
 
 	c.collector.OnError(func(r *colly.Response, err error) {
-		if r != nil && r.Request != nil && r.Request.URL != nil {
-			verbose.Printf("crawl error url=%s err=%v", r.Request.URL.String(), err)
-			c.setErr(fmt.Errorf("crawl %s: %w", r.Request.URL.String(), err))
+		// Context cancellation aborts the whole run.
+		if c.runCtx != nil && c.runCtx.Err() != nil {
+			c.setErr(c.runCtx.Err())
 			return
 		}
-		verbose.Printf("crawl error err=%v", err)
-		c.setErr(err)
+		failedURL := ""
+		if r != nil && r.Request != nil && r.Request.URL != nil {
+			failedURL = r.Request.URL.String()
+		}
+		// A single dead link or transient 5xx must not fail an otherwise-good
+		// crawl. Record it as a counted warning; Run() only surfaces an error if
+		// nothing at all was indexed (e.g. a bad or SSRF-blocked seed).
+		verbose.Printf("crawl page error (skipped) url=%s err=%v", failedURL, err)
+		c.mu.Lock()
+		c.stats.PagesFailed++
+		if c.pageErr == nil {
+			if failedURL != "" {
+				c.pageErr = fmt.Errorf("crawl %s: %w", failedURL, err)
+			} else {
+				c.pageErr = err
+			}
+		}
+		c.mu.Unlock()
 	})
 
 	c.collector.OnHTML("html", func(e *colly.HTMLElement) {

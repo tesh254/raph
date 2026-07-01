@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"raph/internal/agentsetup"
@@ -162,7 +163,7 @@ func newSyncCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			if worker {
 				verbose.Printf("starting sync worker in foreground mode interval=%s", interval)
-				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 				defer cancel()
 				return syncer.RunWorker(ctx, interval)
 			}
@@ -1226,11 +1227,15 @@ func fetchImportSource(ctx context.Context, source string, stdin io.Reader) ([]b
 	case source == "-":
 		return io.ReadAll(stdin)
 	case strings.HasPrefix(source, "http://"), strings.HasPrefix(source, "https://"):
+		if strings.HasPrefix(source, "http://") {
+			fmt.Fprintf(os.Stderr, "raph: warning: importing over plain http is susceptible to tampering; prefer https for %s\n", source)
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 		if err != nil {
 			return nil, err
 		}
-		resp, err := http.DefaultClient.Do(req)
+		client := &http.Client{Timeout: 60 * time.Second}
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("fetch %s: %w", source, err)
 		}
@@ -1331,7 +1336,9 @@ func newStartCmd() *cobra.Command {
 			verbose.Printf("creating MCP server wrapper")
 			server := serverpkg.NewMCPServerWrapper(store, cfg)
 			verbose.Printf("starting MCP server over stdio")
-			return server.Run(context.Background())
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			return server.Run(ctx)
 		},
 	}
 }
@@ -1369,7 +1376,9 @@ func newStudioCmd() *cobra.Command {
 			}
 			verbose.Printf("launching studio on host=%s port=%d", host, port)
 			fmt.Fprintf(out, "Starting raph Studio at http://%s:%d...\n", host, port)
-			return srv.Start()
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			return srv.Start(ctx)
 		},
 	}
 

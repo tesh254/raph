@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -99,7 +100,9 @@ func (s *StudioServer) SetSeedURL(rawURL string) {
 	}
 }
 
-func (s *StudioServer) Start() error {
+// Start serves the studio UI until ctx is cancelled, then drains in-flight
+// requests with a bounded graceful shutdown.
+func (s *StudioServer) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/graph", s.handleGetGraph)
@@ -124,13 +127,30 @@ func (s *StudioServer) Start() error {
 	verbose.Printf("studio routes ready at %s", addr)
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           withCORS(mux),
+		Handler:           s.withSecurity(mux),
 		ReadHeaderTimeout: studioReadHeaderTimeout,
 		ReadTimeout:       studioReadTimeout,
 		WriteTimeout:      studioWriteTimeout,
 		IdleTimeout:       studioIdleTimeout,
 	}
-	return server.ListenAndServe()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		verbose.Printf("studio shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), studioWriteTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		return nil
+	}
 }
 
 func (s *StudioServer) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -408,25 +428,110 @@ func (s *StudioServer) initDemoData(ctx context.Context) (InitDemoResponse, erro
 	}, nil
 }
 
-// withCORS allows the hosted raph-studio dashboard (a different origin) to read
-// this local server. The data is the user's own local graph, so a permissive
-// policy for read/inspect endpoints is acceptable.
-func withCORS(next http.Handler) http.Handler {
+// withSecurity locks down the local studio server. The graph holds the user's
+// private memory, rules, handoffs and indexed source, and there is no auth, so
+// the browser threat model matters: any site the developer visits can reach a
+// loopback server. This middleware closes three holes that a reflected-origin,
+// permissive CORS policy left open:
+//
+//  1. DNS-rebinding — reject requests whose Host header isn't a loopback name
+//     (or the operator's explicitly-chosen --host).
+//  2. Cross-origin reads — only echo Access-Control-Allow-Origin for an
+//     allowlisted origin, so a foreign page can't read /api/sqlite etc.
+//  3. Cross-origin state changes (CSRF) — reject mutating requests carrying a
+//     non-allowlisted Origin, so a foreign page can't trigger ClearAll/delete.
+//
+// The hosted dashboard (a different origin) can be allowlisted explicitly via
+// RAPH_STUDIO_ALLOWED_ORIGINS (comma-separated) instead of reflecting everything.
+func (s *StudioServer) withSecurity(next http.Handler) http.Handler {
+	allowedHosts := s.allowedHosts()
+	allowedOrigins := s.allowedOrigins()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			origin = "*"
-		}
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Vary", "Origin")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+		if !hostAllowed(r.Host, allowedHosts) {
+			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
 		}
+
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		_, originOK := allowedOrigins[strings.ToLower(origin)]
+		originOK = originOK && origin != ""
+		if originOK {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		}
+		if r.Method == http.MethodOptions {
+			if originOK {
+				w.WriteHeader(http.StatusNoContent)
+			} else {
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+			}
+			return
+		}
+
+		// A cross-origin page can issue a "simple" POST without a preflight, so
+		// CORS alone doesn't stop CSRF against the mutating endpoints. Reject any
+		// state-changing request that carries a foreign Origin.
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && origin != "" && !originOK {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+
 		next.ServeHTTP(w, r)
 	})
+}
+
+// allowedHosts is the set of Host header values (host portion, no port) served.
+func (s *StudioServer) allowedHosts() map[string]struct{} {
+	hosts := map[string]struct{}{
+		"127.0.0.1": {},
+		"localhost": {},
+		"::1":       {},
+	}
+	if h := strings.ToLower(strings.TrimSpace(s.host)); h != "" {
+		hosts[h] = struct{}{}
+	}
+	return hosts
+}
+
+// hostedStudioOrigin is the deployed dashboard that legitimately reads a local
+// studio server cross-origin. Additional origins can be added via
+// RAPH_STUDIO_ALLOWED_ORIGINS.
+const hostedStudioOrigin = "https://raph-studio.pages.dev"
+
+// allowedOrigins is the set of browser origins permitted to read/mutate.
+func (s *StudioServer) allowedOrigins() map[string]struct{} {
+	origins := map[string]struct{}{hostedStudioOrigin: {}}
+	schemes := []string{"http://", "https://"}
+	hosts := []string{"127.0.0.1", "localhost", "[::1]"}
+	if h := strings.TrimSpace(s.host); h != "" && h != defaultStudioHost {
+		hosts = append(hosts, h)
+	}
+	for _, sch := range schemes {
+		for _, h := range hosts {
+			origins[strings.ToLower(fmt.Sprintf("%s%s:%d", sch, h, s.port))] = struct{}{}
+		}
+	}
+	for _, o := range strings.Split(os.Getenv("RAPH_STUDIO_ALLOWED_ORIGINS"), ",") {
+		if o = strings.ToLower(strings.TrimSpace(o)); o != "" {
+			origins[o] = struct{}{}
+		}
+	}
+	return origins
+}
+
+func hostAllowed(hostHeader string, allowed map[string]struct{}) bool {
+	h := hostHeader
+	if host, _, err := net.SplitHostPort(hostHeader); err == nil {
+		h = host
+	}
+	h = strings.ToLower(strings.TrimSpace(strings.Trim(h, "[]")))
+	if h == "" {
+		return false
+	}
+	_, ok := allowed[h]
+	return ok
 }
 
 // ActivityItem is a recently changed node, surfaced as a near-realtime feed of

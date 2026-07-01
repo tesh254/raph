@@ -159,7 +159,13 @@ func InitStorage() (*LibSQLStore, error) {
 
 	dbFile := filepath.Join(paths.DataDir, "brain.db")
 	verbose.Printf("opening database file=%s", dbFile)
-	db, err := sql.Open("sqlite", dbFile)
+	// Encode the per-connection PRAGMAs in the DSN so EVERY connection the pool
+	// hands out has them — not just the one that happened to run migrate(). If
+	// database/sql discards and reopens a connection, a DSN-less open would come
+	// back with busy_timeout=0 (instant SQLITE_BUSY under concurrency) and
+	// foreign_keys=OFF (cascade deletes silently stop firing).
+	dsn := dbFile + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open embedded database: %w", err)
 	}
@@ -579,13 +585,16 @@ func (s *LibSQLStore) vectorSearch(ctx context.Context, workspace string, queryV
 		return nil, nil
 	}
 
-	query := `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), embedding_json FROM nodes`
+	// Only scan rows that actually carry an embedding — skipping the (often
+	// numerous) embedding-less code nodes at the SQL layer avoids loading their
+	// content and attempting to decode an empty vector for every query.
+	query := `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), embedding_json FROM nodes WHERE embedding_json IS NOT NULL AND embedding_json <> '' AND embedding_json <> '[]'`
 	var rows *sql.Rows
 	var err error
 	if workspace == "" {
 		rows, err = s.db.QueryContext(ctx, query)
 	} else {
-		rows, err = s.db.QueryContext(ctx, query+` WHERE workspace = ?`, workspace)
+		rows, err = s.db.QueryContext(ctx, query+` AND workspace = ?`, workspace)
 	}
 	if err != nil {
 		return nil, err
@@ -617,7 +626,11 @@ func (s *LibSQLStore) vectorSearch(ctx context.Context, workspace string, queryV
 		if math.IsNaN(score) || score <= 0 {
 			continue
 		}
+		n.Embedding = nil // scored — drop the vector so it doesn't sit in memory
 		ranked = append(ranked, rankedNode{node: n, score: score})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	sort.Slice(ranked, func(i, j int) bool {
@@ -1009,7 +1022,7 @@ func (s *LibSQLStore) GetNeighbors(ctx context.Context, nodeID string) ([]Node, 
 			edges = append(edges, e)
 		}
 	}
-	return nodes, edges, nil
+	return nodes, edges, rows.Err()
 }
 
 // GraphElementsLean returns the whole graph without loading embeddings, and
@@ -1074,6 +1087,9 @@ func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, 
 		}
 		nodes = append(nodes, n)
 	}
+	if err := nodeRows.Err(); err != nil {
+		return nil, nil, err
+	}
 
 	edgeRows, err := s.db.QueryContext(ctx, `SELECT source_id, target_id, type FROM edges ORDER BY source_id, target_id, type`)
 	if err != nil {
@@ -1089,7 +1105,7 @@ func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, 
 		}
 		edges = append(edges, e)
 	}
-	return nodes, edges, nil
+	return nodes, edges, edgeRows.Err()
 }
 
 func (s *LibSQLStore) UpsertMemoryRecord(ctx context.Context, record MemoryRecord) error {
@@ -1308,9 +1324,13 @@ func (s *LibSQLStore) SearchMemoryRecords(ctx context.Context, filter MemorySear
 }
 
 func (s *LibSQLStore) SetMemoryLifecycle(ctx context.Context, nodeID string, lifecycleState string, replacedByNodeID string, deprecatedMessage string) error {
+	// Use nowTimestamp() (RFC3339) to match every other writer. SQLite's
+	// CURRENT_TIMESTAMP renders "2006-01-02 15:04:05" (space-separated), which
+	// sorts before the "T"-separated RFC3339 values in the string-ordered
+	// `ORDER BY updated_at DESC` used by SearchMemoryRecords, corrupting recency.
 	_, err := s.db.ExecContext(ctx, `UPDATE memory_records
-		SET lifecycle_state = ?, replaced_by_node_id = ?, deprecated_message = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE node_id = ?`, lifecycleState, replacedByNodeID, deprecatedMessage, nodeID)
+		SET lifecycle_state = ?, replaced_by_node_id = ?, deprecated_message = ?, updated_at = ?
+		WHERE node_id = ?`, lifecycleState, replacedByNodeID, deprecatedMessage, nowTimestamp(), nodeID)
 	return err
 }
 

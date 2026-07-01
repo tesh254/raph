@@ -30,6 +30,7 @@ const (
 
 type Stats struct {
 	FilesIndexed      int `json:"files_indexed"`
+	FilesSkipped      int `json:"files_skipped,omitempty"`
 	NodesSaved        int `json:"nodes_saved"`
 	EdgesSaved        int `json:"edges_saved"`
 	EmbeddingsCreated int `json:"embeddings_created"`
@@ -112,7 +113,15 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 			return nil
 		}
 		if err := i.indexFile(ctx, path, &stats); err != nil {
-			return fmt.Errorf("index %s: %w", path, err)
+			// Cancellation aborts the whole run; a single bad file (unreadable,
+			// transient embedding failure) must not — the workspace graph was
+			// already cleared, so aborting would leave it gutted. Skip and count.
+			if ctx.Err() != nil {
+				return fmt.Errorf("index %s: %w", path, err)
+			}
+			verbose.Printf("skipping file=%s: %v", path, err)
+			stats.FilesSkipped++
+			return nil
 		}
 		return nil
 	})
@@ -509,16 +518,24 @@ func (i *Indexer) saveEdges(ctx context.Context, edges []db.Edge) int {
 		return 0
 	}
 	if b, ok := i.store.(edgeBatcher); ok {
-		if err := b.SaveEdges(ctx, edges); err == nil {
+		err := b.SaveEdges(ctx, edges)
+		if err == nil {
 			return len(edges)
 		}
 		// Batch failed (and rolled back atomically): fall through to per-edge.
+		verbose.Printf("edge batch of %d failed, retrying per-edge: %v", len(edges), err)
 	}
 	n := 0
+	var lastErr error
 	for _, e := range edges {
 		if err := i.store.SaveEdge(ctx, e); err == nil {
 			n++
+		} else {
+			lastErr = err
 		}
+	}
+	if n < len(edges) {
+		verbose.Printf("edge save incomplete: wrote %d/%d (last error: %v)", n, len(edges), lastErr)
 	}
 	return n
 }

@@ -109,6 +109,24 @@ func TestBrainExportImportRoundTrip(t *testing.T) {
 	if !strings.Contains(rule.Node.Content, "never self-credit") {
 		t.Fatalf("rule content not intact: %q", rule.Node.Content)
 	}
+
+	// The handoff must be restored under its original workspace ("ws"), not
+	// dumped into the global workspace (regression guard for the json:"-"
+	// workspace-drop bug).
+	inWS, err := knowledge.List(ctx, dst, knowledge.ListFilter{Workspace: "ws", DocType: knowledge.DocHandoff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inWS) != 1 {
+		t.Fatalf("handoff not restored to workspace 'ws': got %d", len(inWS))
+	}
+	inGlobal, err := knowledge.List(ctx, dst, knowledge.ListFilter{Workspace: knowledge.GlobalWorkspace, DocType: knowledge.DocHandoff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inGlobal) != 0 {
+		t.Fatalf("handoff leaked into global workspace: got %d", len(inGlobal))
+	}
 }
 
 // TestParseEnvelopeRejectsNewer guards the version gate.

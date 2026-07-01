@@ -16,6 +16,7 @@ import (
 
 func TestStudioInitAndClearActions(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("RAPH_CRAWL_ALLOW_PRIVATE", "1") // init crawls a loopback httptest server
 
 	store, err := db.InitStorage()
 	if err != nil {
@@ -271,15 +272,69 @@ func TestStudioCORSPreflight(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	handler := withCORS(http.NewServeMux())
+	srv := NewStudioServer(store, "127.0.0.1", 4545)
+	handler := srv.withSecurity(http.NewServeMux())
+
+	// Allowlisted hosted dashboard: preflight succeeds and echoes the origin.
 	req := httptest.NewRequest(http.MethodOptions, "/api/graph", nil)
-	req.Header.Set("Origin", "https://raph-studio.pages.dev")
+	req.Host = "127.0.0.1:4545"
+	req.Header.Set("Origin", hostedStudioOrigin)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("preflight status %d", rec.Code)
 	}
-	if rec.Header().Get("Access-Control-Allow-Origin") != "https://raph-studio.pages.dev" {
+	if rec.Header().Get("Access-Control-Allow-Origin") != hostedStudioOrigin {
 		t.Fatalf("missing CORS origin header: %v", rec.Header())
+	}
+}
+
+func TestStudioRejectsForeignOrigin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	srv := NewStudioServer(store, "127.0.0.1", 4545)
+	handler := srv.withSecurity(http.NewServeMux())
+
+	// A foreign origin must not have the response exposed to it (no ACAO) and a
+	// mutating request from it must be refused outright.
+	get := httptest.NewRequest(http.MethodGet, "/api/sqlite", nil)
+	get.Host = "127.0.0.1:4545"
+	get.Header.Set("Origin", "https://evil.example")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, get)
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("leaked ACAO to foreign origin: %v", rec.Header())
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "/api/actions/clear", nil)
+	post.Host = "127.0.0.1:4545"
+	post.Header.Set("Origin", "https://evil.example")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, post)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for cross-origin mutation, got %d", rec.Code)
+	}
+}
+
+func TestStudioRejectsRebindingHost(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	srv := NewStudioServer(store, "127.0.0.1", 4545)
+	handler := srv.withSecurity(http.NewServeMux())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sqlite", nil)
+	req.Host = "attacker.example"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for foreign Host header, got %d", rec.Code)
 	}
 }

@@ -179,7 +179,8 @@ func Write(a Artifact, outPath string) (string, error) {
 	} else if info, err := os.Stat(outPath); err == nil && info.IsDir() {
 		target = filepath.Join(outPath, a.Filename)
 	}
-	if err := os.WriteFile(target, []byte(a.Content), 0o644); err != nil {
+	// 0600: an export carries private memory, rules, and handoffs.
+	if err := os.WriteFile(target, []byte(a.Content), 0o600); err != nil {
 		return "", fmt.Errorf("write export: %w", err)
 	}
 	return target, nil

@@ -133,6 +133,7 @@ func Add(ctx context.Context, store db.GraphStore, cfg *config.Config, in AddInp
 
 	// Replace chunk children: re-derive them from current content.
 	chunks := chunk(content)
+	newChunkIDs := make(map[string]struct{}, len(chunks))
 	for idx, c := range chunks {
 		chunkNode := db.Node{
 			ID:        nodeID(TypeDocChunk, fmt.Sprintf("%s|%s|%d", workspace, key, idx)),
@@ -147,6 +148,7 @@ func Add(ctx context.Context, store db.GraphStore, cfg *config.Config, in AddInp
 				"doc_id":   docID,
 			},
 		}
+		newChunkIDs[chunkNode.ID] = struct{}{}
 		if !in.NoEmbed {
 			if emb := embed(ctx, cfg, c); len(emb) > 0 {
 				chunkNode.Embedding = emb
@@ -157,6 +159,30 @@ func Add(ctx context.Context, store db.GraphStore, cfg *config.Config, in AddInp
 		}
 		if err := store.SaveEdge(ctx, db.Edge{SourceID: docID, TargetID: chunkNode.ID, Type: RelHasChunk}); err != nil {
 			return Document{}, fmt.Errorf("link chunk: %w", err)
+		}
+	}
+
+	// Prune stale chunks left over from a previous, longer version of this doc.
+	// Chunk IDs are deterministic per (workspace,key,index), so overwriting only
+	// covers indices [0,len(chunks)); anything beyond would otherwise linger in
+	// FTS/vector search with contradicted content. DeleteNodeByID also clears the
+	// HAS_CHUNK edge.
+	existing, err := store.ListNodes(ctx, db.NodeFilter{
+		Workspace:      workspace,
+		Types:          []string{TypeDocChunk},
+		PropertyEquals: map[string]string{"doc_id": docID},
+		Lean:           true,
+		Limit:          10000,
+	})
+	if err != nil {
+		return Document{}, fmt.Errorf("list existing chunks: %w", err)
+	}
+	for _, old := range existing {
+		if _, keep := newChunkIDs[old.ID]; keep {
+			continue
+		}
+		if err := store.DeleteNodeByID(ctx, old.ID); err != nil {
+			return Document{}, fmt.Errorf("prune stale chunk %s: %w", old.ID, err)
 		}
 	}
 

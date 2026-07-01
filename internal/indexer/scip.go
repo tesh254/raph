@@ -377,7 +377,14 @@ type scipOcc struct {
 // linkSCIPIndex decodes a SCIP index and emits USES / MUTATES edges from each
 // enclosing function/method to the symbols it references, resolved by the
 // indexer's compiler-grade analysis.
-func (i *Indexer) linkSCIPIndex(ctx context.Context, data []byte, nodeIdx map[string]symbolNode, stats *Stats) int {
+func (i *Indexer) linkSCIPIndex(ctx context.Context, data []byte, nodeIdx map[string]symbolNode, stats *Stats) (linked int) {
+	// A corrupt/truncated tool index must never crash `raph init` — the
+	// workspace graph was already cleared, and reference linking is best-effort.
+	defer func() {
+		if r := recover(); r != nil {
+			verbose.Printf("scip: recovered from panic while linking index: %v", r)
+		}
+	}()
 	docs := decodeSCIP(data)
 	if len(docs) == 0 {
 		return 0
@@ -503,7 +510,7 @@ func (i *Indexer) fileLines(relPath string) []string {
 
 // identAt extracts the identifier text at a definition occurrence's range.
 func identAt(lines []string, o scipOcc) string {
-	if int(o.startLine) >= len(lines) {
+	if o.startLine < 0 || int(o.startLine) >= len(lines) {
 		return ""
 	}
 	line := lines[o.startLine]
@@ -517,7 +524,13 @@ func identAt(lines []string, o scipOcc) string {
 	return line[start:end]
 }
 
+// clampLen bounds a byte offset to [0, max]. It must clamp negatives too: a
+// corrupt/oversized SCIP varint can decode to a negative offset, and
+// line[negative:] would panic.
 func clampLen(n, max int) int {
+	if n < 0 {
+		return 0
+	}
 	if n < max {
 		return n
 	}
