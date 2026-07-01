@@ -1,0 +1,47 @@
+internal/indexer/sync_relink_test.go
+  s_d071be8e5cb50b::t_e690db09adc2d3 1-141
+internal/memory/memory_test.go
+  s_d071be8e5cb50b::t_2a8e036882bff3 162-217
+internal/syncer/syncer.go
+  s_d071be8e5cb50b::t_4ba34de8508cae 341,360,363-367
+  s_d071be8e5cb50b::t_7831c7581f6183 368
+internal/memory/memory.go
+  s_d071be8e5cb50b::t_ef3e56a3b92b14 106
+  s_d071be8e5cb50b::t_858335baa231c0 189,213-215
+  s_d071be8e5cb50b::t_ed83b4d06f9aa5 144-146,172
+  s_d071be8e5cb50b::t_312a7e3f3081df 305-338,347-348
+internal/db/libsql.go
+  s_d071be8e5cb50b::t_698cde9e6dc27e 357-362,370-373,376-377
+  s_d071be8e5cb50b::t_c96022872ff03f 1247-1250,1259,1270-1293
+  s_d071be8e5cb50b::t_df9507bf930b12 1294,1474-1484,1486,1488-1495,1497,1500-1510,1512,1514-1521,1523-1525
+  s_d071be8e5cb50b::t_455137ff97a4c9 1156-1159
+  s_d071be8e5cb50b::t_c8d0178b5b1eea 1459-1469,1471
+  s_d071be8e5cb50b::t_829810a5b65a42 488-493,495-504,537,540,543-546,549
+  s_d071be8e5cb50b::t_8330c22cae4d9b 592-615
+  s_d071be8e5cb50b::t_be533bbf9ca440 1188
+  s_d071be8e5cb50b::t_851f0a0145d794 1445-1452,1454
+  s_d071be8e5cb50b::t_f49f4e97d9af8c 1527-1534,1536-1556
+  s_d071be8e5cb50b::t_47cd0cfafd005f 1295
+  s_d071be8e5cb50b::t_413b9ef045a801 1526
+internal/indexer/indexer.go
+  s_d071be8e5cb50b::t_80b19ba867303b 158-165,177-192,207-227
+internal/indexer/importaware.go
+  s_d071be8e5cb50b::t_82efa0c7d14c86 109-181
+  s_d071be8e5cb50b::t_00baa4dffdda77 52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "e0d5fe3b37d54d498764f09459b546544a2b6917",
+  "prompts": {},
+  "sessions": {
+    "s_d071be8e5cb50b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c01fabe8-80a1-4765-97b7-90dc339f424d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
