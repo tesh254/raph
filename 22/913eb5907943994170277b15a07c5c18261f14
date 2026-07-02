@@ -1,0 +1,23 @@
+internal/studio/server.go
+  s_d071be8e5cb50b::t_a5015f2ce6398d 10
+  s_d071be8e5cb50b::t_d47302babeee93 449,457
+  s_d071be8e5cb50b::t_54e04d3de53be5 503-535,537-545
+internal/studio/server_test.go
+  s_d071be8e5cb50b::t_9a1edf85121dd8 292-313
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.9",
+  "base_commit_sha": "22913eb5907943994170277b15a07c5c18261f14",
+  "prompts": {},
+  "sessions": {
+    "s_d071be8e5cb50b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c01fabe8-80a1-4765-97b7-90dc339f424d",
+        "model": "claude-fable-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
