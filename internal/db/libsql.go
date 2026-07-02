@@ -164,7 +164,13 @@ func InitStorage() (*LibSQLStore, error) {
 	// database/sql discards and reopens a connection, a DSN-less open would come
 	// back with busy_timeout=0 (instant SQLITE_BUSY under concurrency) and
 	// foreign_keys=OFF (cascade deletes silently stop firing).
-	dsn := dbFile + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	//
+	// _txlock=immediate makes every transaction acquire the write lock at BEGIN.
+	// That's what lets the memory revision read-modify-write be race-free across
+	// processes: a second writer blocks at BEGIN (up to busy_timeout) and then
+	// reads the first writer's committed revision, instead of both reading the
+	// same revision and one clobbering the other (or hitting a busy-snapshot).
+	dsn := dbFile + "?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open embedded database: %w", err)
@@ -1213,7 +1219,18 @@ func (s *LibSQLStore) GetMemoryRecordByKey(ctx context.Context, scopeType string
 	return s.getMemoryRecord(ctx, `mr.scope_type = ? AND mr.scope_id = ? AND mr.knowledge_type = ? AND mr.memory_key = ?`, scopeType, scopeID, knowledgeType, memoryKey)
 }
 
+// rowQueryer is satisfied by both *sql.DB and *sql.Tx, so a single-row read can
+// run standalone or inside a caller's transaction (needed for the in-transaction
+// revision read-modify-write).
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 func (s *LibSQLStore) getMemoryRecord(ctx context.Context, where string, args ...any) (MemoryRecord, error) {
+	return getMemoryRecordQ(ctx, s.db, where, args...)
+}
+
+func getMemoryRecordQ(ctx context.Context, q rowQueryer, where string, args ...any) (MemoryRecord, error) {
 	query := `SELECT
 		n.id, n.workspace, n.domain, n.type, n.name, n.content, COALESCE(n.url, ''), COALESCE(n.path, ''), COALESCE(n.embedding_json, '[]'),
 		mr.memory_key, mr.scope_type, mr.scope_id, mr.lifecycle_state, mr.knowledge_type, mr.source, mr.writer_id,
@@ -1227,7 +1244,7 @@ func (s *LibSQLStore) getMemoryRecord(ctx context.Context, where string, args ..
 	var normalizedTagsJSON string
 	var displayTagsJSON string
 	var embeddingJSON string
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(
+	err := q.QueryRowContext(ctx, query, args...).Scan(
 		&record.Node.ID, &record.Node.Workspace, &record.Node.Domain, &record.Node.Type, &record.Node.Name, &record.Node.Content,
 		&record.Node.URL, &record.Node.Path, &embeddingJSON,
 		&record.MemoryKey, &record.ScopeType, &record.ScopeID, &record.LifecycleState, &record.KnowledgeType, &record.Source, &record.WriterID,
@@ -1267,19 +1284,49 @@ func insertMemoryRevisionExec(ctx context.Context, e execer, revision MemoryRevi
 	return err
 }
 
-// CommitMemoryRecord persists a memory write atomically: it appends the prior
-// state to the revision history (when prev != nil), optionally re-saves the
-// content node (+FTS), and upserts the record — all in one transaction, so an
-// interruption can't orphan a revision row or half-apply an update. The
-// embedding must already be set on record.Node; embedding is a network call and
-// must not run inside the write transaction. Exposed as an optional capability
-// (memory.commitMemory falls back to sequential writes for stores without it).
-func (s *LibSQLStore) CommitMemoryRecord(ctx context.Context, prev *MemoryRevision, record MemoryRecord, saveNode bool) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		if prev != nil {
-			if err := insertMemoryRevisionExec(ctx, tx, *prev); err != nil {
+// memoryRevisionFromRecord snapshots a record's current state as a history row.
+func memoryRevisionFromRecord(r MemoryRecord) MemoryRevision {
+	return MemoryRevision{
+		NodeID:           r.Node.ID,
+		Revision:         r.Revision,
+		Title:            r.Node.Name,
+		Content:          r.Node.Content,
+		Source:           r.Source,
+		WriterID:         r.WriterID,
+		LifecycleState:   r.LifecycleState,
+		NormalizedTags:   r.NormalizedTags,
+		DisplayTags:      r.DisplayTags,
+		CreatedAt:        r.UpdatedAt,
+		DeprecatedReason: r.DeprecatedMessage,
+	}
+}
+
+// CommitMemoryRecord persists a memory write atomically and race-free. Inside a
+// single (IMMEDIATE) transaction it reads the current record under the write
+// lock, appends that authoritative prior state to the revision history, sets the
+// new revision to current+1 (or 1 on first write), optionally re-saves the
+// content node (+FTS), and upserts the record. Doing the revision
+// read-modify-write inside the transaction is what closes the cross-process race
+// where two writers both read revision N and one clobbers the other. It returns
+// the finalized record (with the assigned revision and preserved created_at).
+//
+// The embedding must already be set on record.Node; embedding is a network call
+// and must not run inside the write transaction. Exposed as an optional
+// capability (memory.commitMemory falls back to sequential writes without it).
+func (s *LibSQLStore) CommitMemoryRecord(ctx context.Context, record MemoryRecord, saveNode bool) (MemoryRecord, error) {
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		current, cerr := getMemoryRecordQ(ctx, tx, `mr.node_id = ?`, record.Node.ID)
+		switch {
+		case cerr == nil:
+			if err := insertMemoryRevisionExec(ctx, tx, memoryRevisionFromRecord(current)); err != nil {
 				return fmt.Errorf("save memory revision: %w", err)
 			}
+			record.Revision = current.Revision + 1
+			record.CreatedAt = current.CreatedAt // never let an update rewrite the original
+		case cerr == sql.ErrNoRows:
+			record.Revision = 1
+		default:
+			return fmt.Errorf("load current memory: %w", cerr)
 		}
 		if saveNode {
 			if err := saveNodeExec(ctx, tx, record.Node); err != nil {
@@ -1291,6 +1338,10 @@ func (s *LibSQLStore) CommitMemoryRecord(ctx context.Context, prev *MemoryRevisi
 		}
 		return nil
 	})
+	if err != nil {
+		return MemoryRecord{}, err
+	}
+	return record, nil
 }
 
 func (s *LibSQLStore) ListMemoryRevisions(ctx context.Context, nodeID string) ([]MemoryRevision, error) {

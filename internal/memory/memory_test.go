@@ -3,8 +3,10 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"raph/internal/config"
@@ -213,5 +215,82 @@ func TestUpdateAtomicRevisionOnRealStore(t *testing.T) {
 	}
 	if live.Node.Content != "libsql" || live.Revision != 2 {
 		t.Fatalf("live record not updated atomically: rev%d/%q", live.Revision, live.Node.Content)
+	}
+}
+
+// TestConcurrentUpdatesAssignUniqueRevisions drives concurrent updates to the
+// same key through TWO independent store handles on one DB file (simulating two
+// raph processes). With the in-transaction revision read-modify-write and
+// IMMEDIATE transactions, every update must land a distinct, monotonic revision
+// — no lost updates, no duplicate revision numbers.
+func TestConcurrentUpdatesAssignUniqueRevisions(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	storeA, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeA.Close()
+	storeB, err := db.InitStorage() // separate connection pool -> acts like a 2nd process
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeB.Close()
+	ctx := context.Background()
+
+	base := StoreInput{
+		ScopeType: "global", ScopeID: "global", KnowledgeType: "decision",
+		MemoryKey: "hot-key", Title: "K", Content: "v0", Source: "cli", WriterID: "cli",
+	}
+	created, err := Store(ctx, storeA, nil, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID := created.Record.Node.ID
+
+	const writers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			store := storeA
+			if i%2 == 1 {
+				store = storeB
+			}
+			in := base
+			in.Content = fmt.Sprintf("v%d", i+1)
+			_, err := Update(ctx, store, nil, UpdateInput(in))
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent update failed: %v", err)
+		}
+	}
+
+	live, err := storeA.GetMemoryRecordByKey(ctx, "global", "global", "decision", "hot-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Revision != writers+1 {
+		t.Fatalf("expected final revision %d after %d concurrent updates, got %d", writers+1, writers, live.Revision)
+	}
+	revs, err := storeA.ListMemoryRevisions(ctx, nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revs) != writers {
+		t.Fatalf("expected %d history rows, got %d", writers, len(revs))
+	}
+	seen := map[int]bool{}
+	for _, r := range revs {
+		if seen[r.Revision] {
+			t.Fatalf("duplicate revision number %d in history (lost-update race)", r.Revision)
+		}
+		seen[r.Revision] = true
 	}
 }

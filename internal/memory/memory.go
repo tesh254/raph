@@ -103,7 +103,7 @@ func Store(ctx context.Context, store db.GraphStore, cfg *config.Config, input S
 		NormalizedTags: prepared.NormalizedTags,
 		DisplayTags:    prepared.DisplayTags,
 		Revision:       1,
-	}, nil)
+	})
 	if err != nil {
 		return StoreOutput{}, err
 	}
@@ -141,22 +141,8 @@ func Update(ctx context.Context, store db.GraphStore, cfg *config.Config, input 
 		return StoreOutput{}, fmt.Errorf("load memory: %w", err)
 	}
 
-	// Snapshot the pre-update state; it's written to the revision history in the
-	// same transaction as the update so an interrupt can't orphan it.
-	prev := db.MemoryRevision{
-		NodeID:           existing.Node.ID,
-		Revision:         existing.Revision,
-		Title:            existing.Node.Name,
-		Content:          existing.Node.Content,
-		Source:           existing.Source,
-		WriterID:         existing.WriterID,
-		LifecycleState:   existing.LifecycleState,
-		NormalizedTags:   existing.NormalizedTags,
-		DisplayTags:      existing.DisplayTags,
-		CreatedAt:        existing.UpdatedAt,
-		DeprecatedReason: existing.DeprecatedMessage,
-	}
-
+	// Apply the new field values; the revision bump and history append are done
+	// atomically inside commitMemory from the current stored state.
 	existing.Node.Name = prepared.Title
 	existing.Node.Content = prepared.Content
 	existing.Source = prepared.Source
@@ -164,12 +150,11 @@ func Update(ctx context.Context, store db.GraphStore, cfg *config.Config, input 
 	existing.NormalizedTags = prepared.NormalizedTags
 	existing.DisplayTags = prepared.DisplayTags
 	existing.UpdatedAt = nowUTC()
-	existing.Revision++
 	existing.LifecycleState = lifecycleActive
 	existing.ReplacedByNodeID = ""
 	existing.DeprecatedMessage = ""
 
-	record, embedded, err := upsertRecord(ctx, store, cfg, existing, &prev)
+	record, embedded, err := upsertRecord(ctx, store, cfg, existing)
 	if err != nil {
 		return StoreOutput{}, err
 	}
@@ -186,20 +171,6 @@ func Deprecate(ctx context.Context, store db.GraphStore, input DeprecateInput) (
 	if err != nil {
 		return db.MemoryRecord{}, err
 	}
-	prev := db.MemoryRevision{
-		NodeID:           record.Node.ID,
-		Revision:         record.Revision,
-		Title:            record.Node.Name,
-		Content:          record.Node.Content,
-		Source:           record.Source,
-		WriterID:         record.WriterID,
-		LifecycleState:   record.LifecycleState,
-		NormalizedTags:   record.NormalizedTags,
-		DisplayTags:      record.DisplayTags,
-		CreatedAt:        record.UpdatedAt,
-		DeprecatedReason: record.DeprecatedMessage,
-	}
-
 	state := lifecycleDeprecated
 	replacement := strings.TrimSpace(input.ReplacementNodeID)
 	if replacement != "" {
@@ -209,10 +180,9 @@ func Deprecate(ctx context.Context, store db.GraphStore, input DeprecateInput) (
 	record.ReplacedByNodeID = replacement
 	record.DeprecatedMessage = strings.TrimSpace(input.Reason)
 	record.UpdatedAt = nowUTC()
-	record.Revision++
-	// Lifecycle change only: append the prior revision and upsert the record in
-	// one transaction; the content node is unchanged so it isn't re-saved.
-	if err := commitMemory(ctx, store, &prev, record, false); err != nil {
+	// Lifecycle change only: the revision bump and history append happen atomically
+	// inside commitMemory; the content node is unchanged so it isn't re-saved.
+	if _, err := commitMemory(ctx, store, record, false); err != nil {
 		return db.MemoryRecord{}, fmt.Errorf("update lifecycle: %w", err)
 	}
 	return store.GetMemoryRecord(ctx, record.Node.ID)
@@ -303,39 +273,68 @@ func prepareInput(scopeType string, scopeID string, knowledgeType string, title 
 }
 
 // memoryCommitter is the optional store capability that persists a memory write
-// (revision snapshot + node + record) in a single transaction. Stores without
-// it (e.g. test mocks) fall back to sequential, non-atomic writes.
+// in a single transaction, assigning the revision under the write lock. Stores
+// without it (e.g. test mocks) fall back to sequential, non-atomic writes.
 type memoryCommitter interface {
-	CommitMemoryRecord(ctx context.Context, prev *db.MemoryRevision, record db.MemoryRecord, saveNode bool) error
+	CommitMemoryRecord(ctx context.Context, record db.MemoryRecord, saveNode bool) (db.MemoryRecord, error)
 }
 
-// commitMemory persists a memory write. prev (if non-nil) is appended to the
-// revision history; saveNode re-saves the content node. It uses the store's
-// transactional commit when available so an interrupt can't orphan a revision
-// or half-apply, and falls back to sequential writes otherwise.
-func commitMemory(ctx context.Context, store db.GraphStore, prev *db.MemoryRevision, record db.MemoryRecord, saveNode bool) error {
+// commitMemory persists a memory write, returning the record with its assigned
+// revision. The caller supplies the desired end state (fields + node identity);
+// the revision read-modify-write and revision-history append are decided here
+// from the CURRENT stored state, not from a value the caller read earlier — so
+// concurrent writers can't both land the same revision. With a transactional
+// store this happens atomically inside one write-locked transaction; the
+// fallback (test mocks) does the same steps sequentially.
+func commitMemory(ctx context.Context, store db.GraphStore, record db.MemoryRecord, saveNode bool) (db.MemoryRecord, error) {
 	if c, ok := store.(memoryCommitter); ok {
-		return c.CommitMemoryRecord(ctx, prev, record, saveNode)
+		return c.CommitMemoryRecord(ctx, record, saveNode)
 	}
-	if prev != nil {
-		if err := store.InsertMemoryRevision(ctx, *prev); err != nil {
-			return fmt.Errorf("save memory revision: %w", err)
+	current, cerr := store.GetMemoryRecord(ctx, record.Node.ID)
+	switch {
+	case cerr == nil:
+		if err := store.InsertMemoryRevision(ctx, revisionSnapshot(current)); err != nil {
+			return db.MemoryRecord{}, fmt.Errorf("save memory revision: %w", err)
 		}
+		record.Revision = current.Revision + 1
+		record.CreatedAt = current.CreatedAt
+	case cerr == sql.ErrNoRows:
+		record.Revision = 1
+	default:
+		return db.MemoryRecord{}, fmt.Errorf("load current memory: %w", cerr)
 	}
 	if saveNode {
 		if err := store.SaveNode(ctx, record.Node); err != nil {
-			return fmt.Errorf("save memory node: %w", err)
+			return db.MemoryRecord{}, fmt.Errorf("save memory node: %w", err)
 		}
 	}
 	if err := store.UpsertMemoryRecord(ctx, record); err != nil {
-		return fmt.Errorf("save memory metadata: %w", err)
+		return db.MemoryRecord{}, fmt.Errorf("save memory metadata: %w", err)
 	}
-	return nil
+	return record, nil
+}
+
+// revisionSnapshot captures a record's current state as a history row.
+func revisionSnapshot(r db.MemoryRecord) db.MemoryRevision {
+	return db.MemoryRevision{
+		NodeID:           r.Node.ID,
+		Revision:         r.Revision,
+		Title:            r.Node.Name,
+		Content:          r.Node.Content,
+		Source:           r.Source,
+		WriterID:         r.WriterID,
+		LifecycleState:   r.LifecycleState,
+		NormalizedTags:   r.NormalizedTags,
+		DisplayTags:      r.DisplayTags,
+		CreatedAt:        r.UpdatedAt,
+		DeprecatedReason: r.DeprecatedMessage,
+	}
 }
 
 // upsertRecord embeds (outside any transaction — it's a network call) then
-// commits the node + record (+ prior revision, if prev != nil) atomically.
-func upsertRecord(ctx context.Context, store db.GraphStore, cfg *config.Config, record db.MemoryRecord, prev *db.MemoryRevision) (db.MemoryRecord, bool, error) {
+// commits the node + record atomically, returning the record with its assigned
+// revision.
+func upsertRecord(ctx context.Context, store db.GraphStore, cfg *config.Config, record db.MemoryRecord) (db.MemoryRecord, bool, error) {
 	if cfg != nil && cfg.HasEmbeddingProvider() {
 		embedding, err := config.GenerateEmbedding(ctx, cfg, record.Node.Name+"\n\n"+record.Node.Content)
 		if err != nil {
@@ -344,11 +343,13 @@ func upsertRecord(ctx context.Context, store db.GraphStore, cfg *config.Config, 
 		record.Node.Embedding = embedding
 		record.Node.EmbeddingLength = len(embedding)
 	}
-	if err := commitMemory(ctx, store, prev, record, true); err != nil {
+	embeddingLength := record.Node.EmbeddingLength
+	committed, err := commitMemory(ctx, store, record, true)
+	if err != nil {
 		return db.MemoryRecord{}, false, err
 	}
-	record.Node.Embedding = nil
-	return record, record.Node.EmbeddingLength > 0, nil
+	committed.Node.Embedding = nil
+	return committed, embeddingLength > 0, nil
 }
 
 func normalizeTags(tags []string) ([]string, []string) {
