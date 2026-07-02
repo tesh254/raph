@@ -289,6 +289,28 @@ func TestStudioCORSPreflight(t *testing.T) {
 	}
 }
 
+func TestStudioAllowsLoopbackDevOrigin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	srv := NewStudioServer(store, "127.0.0.1", 4545)
+	handler := srv.withSecurity(http.NewServeMux())
+
+	// A dev build of the dashboard runs on a different loopback port (e.g. :3000)
+	// and must be allowed to read the local server.
+	req := httptest.NewRequest(http.MethodGet, "/api/graph", nil)
+	req.Host = "127.0.0.1:4545"
+	req.Header.Set("Origin", "http://localhost:3000")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
+		t.Fatalf("loopback dev origin not allowed: %v", rec.Header())
+	}
+}
+
 func TestStudioRejectsForeignOrigin(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	store, err := db.InitStorage()

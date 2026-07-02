@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -445,7 +446,7 @@ func (s *StudioServer) initDemoData(ctx context.Context) (InitDemoResponse, erro
 // RAPH_STUDIO_ALLOWED_ORIGINS (comma-separated) instead of reflecting everything.
 func (s *StudioServer) withSecurity(next http.Handler) http.Handler {
 	allowedHosts := s.allowedHosts()
-	allowedOrigins := s.allowedOrigins()
+	extraOrigins := extraAllowedOrigins()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !hostAllowed(r.Host, allowedHosts) {
 			http.Error(w, "forbidden host", http.StatusForbidden)
@@ -453,8 +454,7 @@ func (s *StudioServer) withSecurity(next http.Handler) http.Handler {
 		}
 
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
-		_, originOK := allowedOrigins[strings.ToLower(origin)]
-		originOK = originOK && origin != ""
+		originOK := origin != "" && s.originAllowed(origin, extraOrigins)
 		if originOK {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
@@ -500,19 +500,49 @@ func (s *StudioServer) allowedHosts() map[string]struct{} {
 // RAPH_STUDIO_ALLOWED_ORIGINS.
 const hostedStudioOrigin = "https://raph-studio.pages.dev"
 
-// allowedOrigins is the set of browser origins permitted to read/mutate.
-func (s *StudioServer) allowedOrigins() map[string]struct{} {
-	origins := map[string]struct{}{hostedStudioOrigin: {}}
-	schemes := []string{"http://", "https://"}
-	hosts := []string{"127.0.0.1", "localhost", "[::1]"}
-	if h := strings.TrimSpace(s.host); h != "" && h != defaultStudioHost {
-		hosts = append(hosts, h)
+// originAllowed reports whether a browser origin may read/mutate. It permits any
+// loopback origin regardless of port — those come from the developer's own
+// machine (the studio UI on :4545, or a dev build of the dashboard on some other
+// localhost port), and a drive-by attacker's page is never served from loopback.
+// The Host-header guard independently blocks DNS-rebinding. The hosted dashboard
+// and any RAPH_STUDIO_ALLOWED_ORIGINS entries are also permitted.
+func (s *StudioServer) originAllowed(origin string, extra map[string]struct{}) bool {
+	lower := strings.ToLower(origin)
+	if lower == hostedStudioOrigin {
+		return true
 	}
-	for _, sch := range schemes {
-		for _, h := range hosts {
-			origins[strings.ToLower(fmt.Sprintf("%s%s:%d", sch, h, s.port))] = struct{}{}
-		}
+	if _, ok := extra[lower]; ok {
+		return true
 	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if isLoopbackHost(u.Hostname()) {
+		return true
+	}
+	// An operator serving on an explicit non-loopback --host may reach it from a
+	// same-host origin.
+	if h := strings.ToLower(strings.TrimSpace(s.host)); h != "" && h != defaultStudioHost && strings.EqualFold(u.Hostname(), h) {
+		return true
+	}
+	return false
+}
+
+func isLoopbackHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// extraAllowedOrigins parses RAPH_STUDIO_ALLOWED_ORIGINS (comma-separated).
+func extraAllowedOrigins() map[string]struct{} {
+	origins := map[string]struct{}{}
 	for _, o := range strings.Split(os.Getenv("RAPH_STUDIO_ALLOWED_ORIGINS"), ",") {
 		if o = strings.ToLower(strings.TrimSpace(o)); o != "" {
 			origins[o] = struct{}{}
