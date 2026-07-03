@@ -449,10 +449,10 @@ func newSearchCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "search <query>",
-		Short: "Search the indexed graph (ripgrep-style) for code, docs, and knowledge",
+		Short: "Search the indexed graph with familiar CLI ergonomics",
 		Long: "Search indexed nodes without learning raph query syntax. Defaults to ranked " +
-			"keyword search; use --literal for exact substrings, --regex for patterns, or " +
-			"--vector for semantic matches. Emits JSON for agents and text for terminals.",
+			"keyword search; use --literal for exact substrings, --regex for Go regexp patterns, or " +
+			"--vector for semantic graph matches. Use --format json for the stable agent format.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.LoadConfigIfPresent()
@@ -505,9 +505,9 @@ func newSearchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&global, "global", false, "Search across all indexed workspaces")
 	cmd.Flags().StringSliceVar(&types, "type", nil, "Filter by node type (func, type, file, markdown_chunk, file_chunk, doc, doc_chunk)")
 	cmd.Flags().IntVar(&limit, "limit", 10, "Maximum number of matches")
-	cmd.Flags().BoolVar(&literal, "literal", false, "Exact substring match (ripgrep -F style)")
-	cmd.Flags().BoolVar(&regex, "regex", false, "Treat the query as a regular expression")
-	cmd.Flags().BoolVar(&vector, "vector", false, "Semantic search (requires a configured embedding provider)")
+	cmd.Flags().BoolVar(&literal, "literal", false, "Exact substring match")
+	cmd.Flags().BoolVar(&regex, "regex", false, "Treat the query as a Go regular expression")
+	cmd.Flags().BoolVar(&vector, "vector", false, "Semantic graph search (requires a configured embedding provider)")
 	return cmd
 }
 

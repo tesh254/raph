@@ -702,7 +702,7 @@ func (m *MCPServerWrapper) registerTools() {
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "search",
-		Description: "Ripgrep-style search over the indexed graph (code, docs, knowledge). Modes: auto (ranked keyword), literal (exact substring), regex, vector (semantic). Filter by node type; scope to the current workspace or all.",
+		Description: "Search over the indexed graph (code, docs, knowledge) with familiar CLI ergonomics for agents that do not have this MCP server connected. Modes: auto (ranked keyword), literal (exact substring), regex (Go regexp), vector (semantic graph search). Filter by node type; scope to the current workspace or all.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchArgs) (*mcpsdk.CallToolResult, query.Result, error) {
 		workspace := ""
 		if !args.Global {

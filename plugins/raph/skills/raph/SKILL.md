@@ -25,17 +25,18 @@ raph sync --path .        # ensure background sync is running
 The background watcher refreshes the graph within ~150ms of a file save, so the
 graph is always current — you do not need to re-index manually.
 
-## Search code & docs (ripgrep-style, no raph syntax to learn)
+## Search code & docs (CLI fallback when MCP is unavailable)
 ```bash
 raph search "database connection" --format json        # ranked keyword (bm25)
 raph search "ResponseWriter" --literal                  # exact substring
-raph search "Open[A-Z]\w+" --regex                       # regular expression
+raph search "Open[A-Z]\w+" --regex                       # Go regexp
 raph search "auth" --type func --type type --limit 20    # filter by node type
-raph search "config loader" --vector                     # semantic (needs provider)
+raph search "config loader" --vector                     # semantic graph search (needs provider)
 raph search "TODO" --global                              # across all workspaces
 ```
 Each match returns id, type, name, url (path#symbol), and an excerpt. Use this
-instead of shelling out to grep/rg for indexed content.
+instead of shelling out to grep/rg when MCP is unavailable and graph-aware search
+will give better context. JSON output is the stable agent format.
 
 ## Memory — project, shared, or global scope
 Project memory affects only this codebase; global memory affects all your work;

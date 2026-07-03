@@ -163,7 +163,7 @@ raph --verbose start
 raph init            Scan a workspace and build graph relationships
 raph start           Start the MCP server over stdio
 raph studio          Launch the local graph explorer UI
-raph agents mcp setup Install or refresh project MCP config for supported coding agents
+raph agents mcp setup Install or refresh auto-detected project MCP config
 raph sync            Index and continuously synchronize a repository
 raph sync --status   Show the worker and registered repositories
 raph sync --remove   Unregister a repository and clean its graph data
@@ -184,7 +184,7 @@ human-readable text in a terminal (override with `--format json|text`).
 ```text
 raph code-intel      Show code-intelligence resolvers and their install state
 raph code-intel install <lang> Install a resolver (agents must ask the user first)
-raph search <query>  Ripgrep-style search (--literal, --regex, --vector, --type, --global)
+raph search <query>  CLI-friendly graph search (--literal, --regex, --vector, --type, --global)
 raph mem set <text>  Create/update scoped memory (--scope project|shared|global)
 raph mem search <q>  Search memory in a scope
 raph rules add <r>   Add a rule (--scope global|project)
@@ -195,6 +195,19 @@ raph doc read <id>   Read a document; reading a handoff marks it used
 raph doc link <a> <b> Relate two nodes
 raph export --doc <id> Export a document/bundle; publish to gist/repo/S3/R2
 ```
+
+`raph agents mcp setup --path . --dry-run` previews the opencode, Claude Code,
+Codex, Cursor, and Pi config files that would be created or refreshed. Run it
+without `--dry-run` to write project-scoped config for the supported agents on
+the machine.
+
+`raph search` gives agents a simple CLI fallback when the MCP server is not
+available. The flags follow familiar search ergonomics so agents can get useful
+graph results without learning a new query language: default mode is ranked
+keyword search; `--literal` performs exact substring search; `--regex` uses Go
+`regexp`; `--vector` runs semantic search over indexed graph nodes when
+embeddings are configured. Use `--format json` for the stable machine-readable
+interface.
 
 #### Code-intelligence resolver prerequisites
 
@@ -360,7 +373,8 @@ GoReleaser builds these targets:
 - `windows/amd64`
 - `windows/arm64`
 
-Usage docs deploy from `docs/` to `https://raph.madebyknnls.com/`.
+Usage docs live in the separate [`tesh254/raph-docs`](https://github.com/tesh254/raph-docs)
+repository and deploy to `https://raph.madebyknnls.com/`.
 
 ## License
 

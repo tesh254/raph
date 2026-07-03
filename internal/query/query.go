@@ -1,7 +1,7 @@
 // Package query provides a single search entry point shared by the CLI and MCP
 // so agents and humans use identical ranking and filtering. It deliberately
-// mirrors ripgrep ergonomics (literal by default, optional regex, type/path
-// filters) so agents need not learn raph-specific query syntax.
+// uses familiar CLI search ergonomics (literal/regex toggles and type/path
+// filters) so agents can use raph effectively even without MCP access.
 package query
 
 import (
@@ -185,8 +185,8 @@ func excerpt(content string, max int) string {
 	return string(runes[:max]) + "..."
 }
 
-// RenderText writes ripgrep-style output: one match per block, location line
-// then an indented excerpt.
+// RenderText writes compact terminal output: one match per block, location line
+// then an indented excerpt. JSON remains the stable machine-readable format.
 func (r Result) RenderText(sb *strings.Builder) {
 	if len(r.Matches) == 0 {
 		sb.WriteString(fmt.Sprintf("No matches for %q (mode=%s)\n", r.Query, r.Mode))
