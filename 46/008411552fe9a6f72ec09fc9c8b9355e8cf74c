@@ -1,0 +1,36 @@
+internal/query/query.go
+  s_86c05dd61d07ec::t_963243865631b3 189
+  s_86c05dd61d07ec::t_8b29495d796b54 3-4,188
+cmd/raph/main.go
+  s_86c05dd61d07ec::t_8b29495d796b54 452,455
+  s_86c05dd61d07ec::t_bc9e6d1c3fe2f3 454,508-510
+internal/mcp/server.go
+  s_86c05dd61d07ec::t_8b29495d796b54 705
+README.md
+  s_86c05dd61d07ec::t_ea73ecd5a93d9e 187
+  s_86c05dd61d07ec::t_a909a04dc3b979 376-377
+  s_86c05dd61d07ec::t_8b29495d796b54 204-210
+  s_86c05dd61d07ec::t_aff1fd05297ae9 166,199-203
+  s_86c05dd61d07ec::t_64b8e14227781c 211
+CONTRIBUTING.md
+  s_86c05dd61d07ec::t_a909a04dc3b979 99
+plugins/raph/skills/raph/SKILL.md
+  s_86c05dd61d07ec::t_8b29495d796b54 28,38-39
+  s_86c05dd61d07ec::t_04f2e07fec77b0 32,34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.9",
+  "base_commit_sha": "46008411552fe9a6f72ec09fc9c8b9355e8cf74c",
+  "prompts": {},
+  "sessions": {
+    "s_86c05dd61d07ec": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f2482-65c8-71c1-a499-89a2b4ef7182",
+        "model": "gpt-5.5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
