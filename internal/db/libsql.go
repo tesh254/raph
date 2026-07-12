@@ -1137,49 +1137,53 @@ type GraphStats struct {
 
 // GraphStats computes counts with SQL aggregates instead of materializing every
 // node/edge in memory, so a dashboard polling /api/stats on a large graph stays
-// cheap.
+// cheap. The four queries run in one transaction so they observe a single
+// database snapshot — otherwise a concurrent write could make the counts
+// internally inconsistent within a response (e.g. sum(ByType) != sum(ByDomain)).
 func (s *LibSQLStore) GraphStats(ctx context.Context) (GraphStats, error) {
 	stats := GraphStats{ByType: map[string]int{}, ByDomain: map[string]int{}}
-
-	typeRows, err := s.db.QueryContext(ctx, `SELECT type, COUNT(*) FROM nodes GROUP BY type`)
-	if err != nil {
-		return GraphStats{}, err
-	}
-	defer typeRows.Close()
-	for typeRows.Next() {
-		var t string
-		var n int
-		if err := typeRows.Scan(&t, &n); err != nil {
-			return GraphStats{}, err
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		typeRows, err := tx.QueryContext(ctx, `SELECT type, COUNT(*) FROM nodes GROUP BY type`)
+		if err != nil {
+			return err
 		}
-		stats.ByType[t] = n
-		stats.Nodes += n
-	}
-	if err := typeRows.Err(); err != nil {
-		return GraphStats{}, err
-	}
-
-	domainRows, err := s.db.QueryContext(ctx, `SELECT domain, COUNT(*) FROM nodes GROUP BY domain`)
-	if err != nil {
-		return GraphStats{}, err
-	}
-	defer domainRows.Close()
-	for domainRows.Next() {
-		var d string
-		var n int
-		if err := domainRows.Scan(&d, &n); err != nil {
-			return GraphStats{}, err
+		defer typeRows.Close()
+		for typeRows.Next() {
+			var t string
+			var n int
+			if err := typeRows.Scan(&t, &n); err != nil {
+				return err
+			}
+			stats.ByType[t] = n
+			stats.Nodes += n
 		}
-		stats.ByDomain[d] = n
-	}
-	if err := domainRows.Err(); err != nil {
-		return GraphStats{}, err
-	}
+		if err := typeRows.Err(); err != nil {
+			return err
+		}
 
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM edges`).Scan(&stats.Edges); err != nil {
-		return GraphStats{}, err
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT workspace) FROM nodes WHERE TRIM(workspace) <> ''`).Scan(&stats.Workspaces); err != nil {
+		domainRows, err := tx.QueryContext(ctx, `SELECT domain, COUNT(*) FROM nodes GROUP BY domain`)
+		if err != nil {
+			return err
+		}
+		defer domainRows.Close()
+		for domainRows.Next() {
+			var d string
+			var n int
+			if err := domainRows.Scan(&d, &n); err != nil {
+				return err
+			}
+			stats.ByDomain[d] = n
+		}
+		if err := domainRows.Err(); err != nil {
+			return err
+		}
+
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM edges`).Scan(&stats.Edges); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT workspace) FROM nodes WHERE TRIM(workspace) <> ''`).Scan(&stats.Workspaces)
+	})
+	if err != nil {
 		return GraphStats{}, err
 	}
 	return stats, nil
