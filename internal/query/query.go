@@ -13,6 +13,7 @@ import (
 
 	"raph/internal/config"
 	"raph/internal/db"
+	"raph/internal/verbose"
 )
 
 type Mode string
@@ -117,6 +118,11 @@ func Search(ctx context.Context, store db.GraphStore, cfg *config.Config, opts O
 	return result, nil
 }
 
+// regexCandidateCap bounds how many nodes regex search pulls into memory to
+// scan (regex can't be pushed into SQLite/FTS). A warning is logged when it's
+// hit so an incomplete result on a very large workspace isn't silent.
+const regexCandidateCap = 5000
+
 // regexSearch fetches a broad candidate set and applies a Go regexp, since
 // SQLite/FTS cannot evaluate arbitrary regular expressions.
 func regexSearch(ctx context.Context, store db.GraphStore, opts Options, pattern string, limit int) ([]db.Node, error) {
@@ -127,10 +133,15 @@ func regexSearch(ctx context.Context, store db.GraphStore, opts Options, pattern
 	candidates, err := store.ListNodes(ctx, db.NodeFilter{
 		Workspace: opts.Workspace,
 		Types:     opts.Types,
-		Limit:     5000,
+		Limit:     regexCandidateCap,
 	})
 	if err != nil {
 		return nil, err
+	}
+	if len(candidates) == regexCandidateCap {
+		// The candidate set was capped, so matches beyond it are not considered.
+		// Surface it rather than returning a silently-incomplete result.
+		verbose.Printf("regex search scanned the first %d nodes only; results may be incomplete on this workspace", regexCandidateCap)
 	}
 	var matched []db.Node
 	for _, n := range candidates {

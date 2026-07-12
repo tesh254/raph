@@ -62,7 +62,10 @@ func (i *Indexer) linkImportAwareUsages(ctx context.Context, nodeIdx map[string]
 	}
 	_ = filepath.WalkDir(i.root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			// Skip an unreadable path (permission/transient) and keep linking the
+			// rest — a best-effort pass shouldn't abort the whole workspace.
+			verbose.Printf("import-aware walk skipped %s: %v", path, walkErr)
+			return nil
 		}
 		if d.IsDir() {
 			if shouldSkipDir(d.Name()) {
@@ -233,8 +236,8 @@ func (i *Indexer) collectImportFileEdges(rel string, entry *grammars.LangEntry, 
 
 	// Walk references, tracking the nearest enclosing declared symbol (owner).
 	seen := map[string]bool{} // dedupe owner|target within this file
-	var walk func(n *ts.Node, ownerID string)
-	walk = func(n *ts.Node, ownerID string) {
+	var walk func(n, parent *ts.Node, ownerID string)
+	walk = func(n, parent *ts.Node, ownerID string) {
 		if n == nil {
 			return
 		}
@@ -247,26 +250,42 @@ func (i *Indexer) collectImportFileEdges(rel string, entry *grammars.LangEntry, 
 			}
 		}
 		if t == "identifier" || t == "type_identifier" || t == "constant" {
-			name := n.Text(src)
-			var targetID string
-			if id, ok := local[name]; ok {
-				targetID = id
-			} else if id, ok := imported[name]; ok {
-				targetID = id
-			}
-			if targetID != "" && ownerID != "" && targetID != ownerID {
-				key := ownerID + "\x00" + targetID
-				if !seen[key] {
-					seen[key] = true
-					*batch = append(*batch, db.Edge{SourceID: ownerID, TargetID: targetID, Type: "USES"})
+			// Skip the attribute of a member access (e.g. Python `obj.LIMIT`,
+			// where `LIMIT` is an identifier): it names a field on some object, not
+			// the imported/top-level `LIMIT`, so linking it would be a false edge.
+			if !isMemberAttribute(parent, n, lang) {
+				name := n.Text(src)
+				var targetID string
+				if id, ok := local[name]; ok {
+					targetID = id
+				} else if id, ok := imported[name]; ok {
+					targetID = id
+				}
+				if targetID != "" && ownerID != "" && targetID != ownerID {
+					key := ownerID + "\x00" + targetID
+					if !seen[key] {
+						seen[key] = true
+						*batch = append(*batch, db.Edge{SourceID: ownerID, TargetID: targetID, Type: "USES"})
+					}
 				}
 			}
 		}
 		for _, c := range n.Children() {
-			walk(c, ownerID)
+			walk(c, n, ownerID)
 		}
 	}
-	walk(tree.RootNode(), "")
+	walk(tree.RootNode(), nil, "")
+}
+
+// isMemberAttribute reports whether n is the attribute part of a member-access
+// node (Python `attribute`: `object.attribute`). Those identifiers reference a
+// field on a value, not a top-level/imported symbol of the same name.
+func isMemberAttribute(parent, n *ts.Node, lang *ts.Language) bool {
+	if parent == nil || parent.Type(lang) != "attribute" {
+		return false
+	}
+	a := parent.ChildByFieldName("attribute", lang)
+	return a != nil && a.StartByte() == n.StartByte() && a.EndByte() == n.EndByte()
 }
 
 // --- JavaScript / TypeScript ---

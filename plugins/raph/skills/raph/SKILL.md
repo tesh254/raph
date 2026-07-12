@@ -13,9 +13,11 @@ rules, and documents. Prefer the **raph MCP server** when connected (tools:
 `crawl_url`/`crawl_website`, `index_codebase`/`search_codebase`,
 `graph_neighbors`). If no MCP is available, use the CLI below.
 
-All commands accept `--format json` for machine-readable output (this is the
-default when raph detects it is being called by an agent or through a pipe). Add
-`--format text` for human-readable output.
+The data commands (`search`, `mem`, `rules`, `doc`, `export`, `import`) accept
+`--format json` for machine-readable output — the default when raph detects it is
+being called by an agent or through a pipe; add `--format text` for human-readable
+output. Operational commands like `init`, `sync`, `update`, and `version` emit
+plain text regardless.
 
 ## Index & keep a codebase current
 ```bash
@@ -87,7 +89,7 @@ After crawling, the content is searchable with `raph search`.
 ```bash
 raph export --doc <id> --out notes.md                 # to a file
 raph export --doc <id> --gist --public                # publish as a GitHub gist
-raph export --bundle --out-format json --out kb.json  # whole-workspace bundle
+raph export --bundle --out-format json --out kb.json  # portable brain (memory + rules + handoffs)
 raph export --doc <id> --s3 s3://bucket/key --r2-endpoint https://<acct>.r2.cloudflarestorage.com
 ```
 

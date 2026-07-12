@@ -627,28 +627,19 @@ func (s *StudioServer) handleStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// Stats only counts by type/domain/workspace — load no content at all.
-	nodes, edges, err := s.store.GraphElementsLean(r.Context(), 0)
+	// Counts come from SQL aggregates, not a full node/edge scan, so polling this
+	// on a large graph stays cheap.
+	stats, err := s.store.GraphStats(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	byType := map[string]int{}
-	byDomain := map[string]int{}
-	workspaces := map[string]struct{}{}
-	for _, n := range nodes {
-		byType[n.Type]++
-		byDomain[n.Domain]++
-		if strings.TrimSpace(n.Workspace) != "" {
-			workspaces[n.Workspace] = struct{}{}
-		}
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nodes":      len(nodes),
-		"edges":      len(edges),
-		"workspaces": len(workspaces),
-		"by_type":    byType,
-		"by_domain":  byDomain,
+		"nodes":      stats.Nodes,
+		"edges":      stats.Edges,
+		"workspaces": stats.Workspaces,
+		"by_type":    stats.ByType,
+		"by_domain":  stats.ByDomain,
 	})
 }
 

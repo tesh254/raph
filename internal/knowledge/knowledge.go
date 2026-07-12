@@ -101,9 +101,17 @@ func Add(ctx context.Context, store db.GraphStore, cfg *config.Config, in AddInp
 		props[k] = v
 	}
 	props["doc_type"] = docType
-	props["status"] = StatusFresh
 	props["source"] = source
-	props["freshness"] = now
+	// Preserve incoming lifecycle metadata (e.g. a handoff imported as already
+	// `used`) instead of resetting it to fresh — resetting would resurrect a
+	// claimed handoff while its stale used_at/used_by fields still say otherwise.
+	// Default to fresh only when the caller supplied no status.
+	if strings.TrimSpace(props["status"]) == "" {
+		props["status"] = StatusFresh
+	}
+	if strings.TrimSpace(props["freshness"]) == "" {
+		props["freshness"] = now
+	}
 	if w := strings.TrimSpace(in.WriterID); w != "" {
 		props["writer_id"] = w
 	}

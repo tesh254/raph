@@ -508,6 +508,10 @@ func newSearchCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&literal, "literal", false, "Exact substring match")
 	cmd.Flags().BoolVar(&regex, "regex", false, "Treat the query as a Go regular expression")
 	cmd.Flags().BoolVar(&vector, "vector", false, "Semantic graph search (requires a configured embedding provider)")
+	// The three modes are mutually exclusive; reject conflicting input instead of
+	// silently applying an undocumented precedence (which could quietly trigger
+	// embedding work the user didn't ask for).
+	cmd.MarkFlagsMutuallyExclusive("literal", "regex", "vector")
 	return cmd
 }
 
@@ -805,18 +809,25 @@ func newRulesCmd() *cobra.Command {
 			if lAll {
 				scopes = []string{"global", "project"}
 			}
+			// --limit is an overall maximum. When listing multiple scopes, spend a
+			// shared budget across them so `--all --limit N` never returns > N.
+			remaining := lLimit
 			for _, sc := range scopes {
+				if remaining <= 0 {
+					break
+				}
 				scopeType, resolvedID, err := resolveMemoryScope(cfg, sc, "", lPath)
 				if err != nil {
 					return err
 				}
 				res, err := memory.Search(cmd.Context(), store, memory.SearchInput{
-					Query: lQuery, ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: "rule", Limit: lLimit,
+					Query: lQuery, ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: "rule", Limit: remaining,
 				})
 				if err != nil {
 					return err
 				}
 				all = append(all, res.Matches...)
+				remaining -= len(res.Matches)
 			}
 			return output.Print(cmd.OutOrStdout(), resolveFormat(), memory.SearchOutput{Matches: all}, func(w io.Writer) error {
 				return renderMemoryRecords(w, all)
@@ -1021,8 +1032,15 @@ func newDocCmd() *cobra.Command {
 			if err := knowledge.Link(cmd.Context(), store, args[0], args[1], rel); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Linked %s -> %s (%s)\n", args[0], args[1], rel)
-			return nil
+			linkResult := struct {
+				From string `json:"from"`
+				To   string `json:"to"`
+				Rel  string `json:"rel"`
+			}{From: args[0], To: args[1], Rel: rel}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), linkResult, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Linked %s -> %s (%s)\n", linkResult.From, linkResult.To, linkResult.Rel)
+				return err
+			})
 		},
 	}
 	linkCmd.Flags().StringVar(&rel, "rel", knowledge.RelRelatesTo, "Relation type")
@@ -1070,6 +1088,8 @@ func newExportCmd() *cobra.Command {
 			}
 			defer store.Close()
 
+			cfg, _ := config.LoadConfigIfPresent() // only used for project-scope resolution; optional
+
 			fmtVal := exporter.Format(format)
 			if fmtVal != exporter.FormatJSON {
 				fmtVal = exporter.FormatMarkdown
@@ -1086,7 +1106,21 @@ func newExportCmd() *cobra.Command {
 				if scErr != nil {
 					return scErr
 				}
-				artifact, err = exporter.Brain(cmd.Context(), store, scopeTypes, fmtVal)
+				brainScope := exporter.BrainScope{ScopeTypes: scopeTypes}
+				// A project-only bundle must be pinned to the current repo, or it
+				// would sweep in every indexed repo's project-scoped memory and
+				// handoffs — a data leak when publishing to gist/repo/S3.
+				if len(scopeTypes) == 1 && scopeTypes[0] == "project" {
+					_, pid, e := resolveMemoryScope(cfg, "project", "", path)
+					if e != nil {
+						return fmt.Errorf("resolve project scope for export: %w", e)
+					}
+					brainScope.ProjectScopeID = pid
+					if ws, wErr := resolveWorkspaceID(store, cfg, path); wErr == nil {
+						brainScope.ProjectWorkspace = ws
+					}
+				}
+				artifact, err = exporter.Brain(cmd.Context(), store, brainScope, fmtVal)
 			case strings.TrimSpace(docID) != "":
 				artifact, err = exporter.Document(cmd.Context(), store, docID, fmtVal)
 			default:

@@ -85,7 +85,7 @@ func TestBrainExportImportRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	art, err := Brain(ctx, src, []string{"global", "shared"}, FormatJSON)
+	art, err := Brain(ctx, src, BrainScope{ScopeTypes: []string{"global", "shared"}}, FormatJSON)
 	if err != nil {
 		t.Fatal(err)
 	}

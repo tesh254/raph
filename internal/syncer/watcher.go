@@ -169,10 +169,14 @@ func relevantEvent(event fsnotify.Event) bool {
 	if indexer.ShouldSkipDir(base) {
 		return false
 	}
-	// A create may be a directory (no extension); let those through. For files,
-	// only react to indexable extensions to avoid waking on lockfiles etc.
+	// A newly-created directory must pass so its subtree gets watched. A newly
+	// created file, though, should only wake a sync if it's indexable — otherwise
+	// lockfiles, temp files, logs, and images trigger an expensive full scan.
 	if event.Op&fsnotify.Create != 0 {
-		return true
+		if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+			return true
+		}
+		return indexer.IndexablePath(event.Name)
 	}
 	return indexer.IndexablePath(event.Name)
 }

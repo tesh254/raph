@@ -944,24 +944,28 @@ func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node,
 // SetNodeProperties merges properties into an existing node and bumps its
 // updated_at timestamp. Existing keys not present in props are preserved.
 func (s *LibSQLStore) SetNodeProperties(ctx context.Context, id string, props map[string]string) error {
-	var current string
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(properties_json, '{}') FROM nodes WHERE id = ?`, id).Scan(&current)
-	if err != nil {
+	// Read-modify-write must be serialized under the write lock, or two concurrent
+	// property merges on the same node (e.g. a handoff claim vs another writer)
+	// can read the same JSON and clobber each other's keys.
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		var current string
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(properties_json, '{}') FROM nodes WHERE id = ?`, id).Scan(&current); err != nil {
+			return err
+		}
+		merged := unmarshalProperties(current)
+		if merged == nil {
+			merged = map[string]string{}
+		}
+		for k, v := range props {
+			merged[k] = v
+		}
+		encoded, err := marshalProperties(merged)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE nodes SET properties_json = ?, updated_at = ? WHERE id = ?`, encoded, nowTimestamp(), id)
 		return err
-	}
-	merged := unmarshalProperties(current)
-	if merged == nil {
-		merged = map[string]string{}
-	}
-	for k, v := range props {
-		merged[k] = v
-	}
-	encoded, err := marshalProperties(merged)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `UPDATE nodes SET properties_json = ?, updated_at = ? WHERE id = ?`, encoded, nowTimestamp(), id)
-	return err
+	})
 }
 
 func (s *LibSQLStore) GetNodeByID(ctx context.Context, id string) (Node, error) {
@@ -1120,6 +1124,65 @@ func (s *LibSQLStore) GraphElementsLean(ctx context.Context, contentLimit int) (
 		edges = append(edges, e)
 	}
 	return nodes, edges, edgeRows.Err()
+}
+
+// GraphStats holds aggregate graph counts for the studio stats view.
+type GraphStats struct {
+	Nodes      int            `json:"nodes"`
+	Edges      int            `json:"edges"`
+	Workspaces int            `json:"workspaces"`
+	ByType     map[string]int `json:"by_type"`
+	ByDomain   map[string]int `json:"by_domain"`
+}
+
+// GraphStats computes counts with SQL aggregates instead of materializing every
+// node/edge in memory, so a dashboard polling /api/stats on a large graph stays
+// cheap.
+func (s *LibSQLStore) GraphStats(ctx context.Context) (GraphStats, error) {
+	stats := GraphStats{ByType: map[string]int{}, ByDomain: map[string]int{}}
+
+	typeRows, err := s.db.QueryContext(ctx, `SELECT type, COUNT(*) FROM nodes GROUP BY type`)
+	if err != nil {
+		return GraphStats{}, err
+	}
+	defer typeRows.Close()
+	for typeRows.Next() {
+		var t string
+		var n int
+		if err := typeRows.Scan(&t, &n); err != nil {
+			return GraphStats{}, err
+		}
+		stats.ByType[t] = n
+		stats.Nodes += n
+	}
+	if err := typeRows.Err(); err != nil {
+		return GraphStats{}, err
+	}
+
+	domainRows, err := s.db.QueryContext(ctx, `SELECT domain, COUNT(*) FROM nodes GROUP BY domain`)
+	if err != nil {
+		return GraphStats{}, err
+	}
+	defer domainRows.Close()
+	for domainRows.Next() {
+		var d string
+		var n int
+		if err := domainRows.Scan(&d, &n); err != nil {
+			return GraphStats{}, err
+		}
+		stats.ByDomain[d] = n
+	}
+	if err := domainRows.Err(); err != nil {
+		return GraphStats{}, err
+	}
+
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM edges`).Scan(&stats.Edges); err != nil {
+		return GraphStats{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT workspace) FROM nodes WHERE TRIM(workspace) <> ''`).Scan(&stats.Workspaces); err != nil {
+		return GraphStats{}, err
+	}
+	return stats, nil
 }
 
 func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, error) {

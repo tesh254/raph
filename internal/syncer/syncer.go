@@ -261,12 +261,18 @@ func RunWorker(ctx context.Context, interval time.Duration) error {
 	snapshots := make(map[string]map[string]indexer.FileState)
 	lastChange := time.Now()
 	for {
-		changed, err := syncOnce(ctx, snapshots)
+		changed, hadErrors, err := syncOnce(ctx, snapshots)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s sync error: %v\n", time.Now().Format(time.RFC3339), err)
 		} else if changed {
 			lastChange = time.Now()
 			verbose.Printf("worker observed repository change; idle timer reset")
+		} else if hadErrors {
+			// A repo is actively failing (busy DB, transient embed error, etc.).
+			// Treat that as activity so the worker doesn't declare itself idle and
+			// exit while work is still outstanding.
+			lastChange = time.Now()
+			verbose.Printf("worker deferring idle shutdown; last cycle had per-repo errors")
 		} else if time.Since(lastChange) >= idleTimeout {
 			verbose.Printf("worker idle for %s; shutting down", idleTimeout)
 			return nil
@@ -290,20 +296,23 @@ func RunWorker(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-func syncOnce(ctx context.Context, snapshots map[string]map[string]indexer.FileState) (bool, error) {
+// syncOnce runs one reconcile pass. It returns whether any repo changed, whether
+// any repo hit a (non-fatal, per-repo) error this pass, and a fatal error that
+// should be surfaced to the caller.
+func syncOnce(ctx context.Context, snapshots map[string]map[string]indexer.FileState) (changedAny bool, hadErrors bool, fatal error) {
 	repositories, err := List()
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	cfg, err := config.LoadConfigIfPresent()
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	changedAny := false
 	for _, repo := range repositories {
 		current, err := indexer.CollectFileStates(repo.Path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s skipped %s: %v\n", time.Now().Format(time.RFC3339), repo.Path, err)
+			hadErrors = true
 			continue
 		}
 		previous, initialized := snapshots[repo.Path]
@@ -315,16 +324,18 @@ func syncOnce(ctx context.Context, snapshots map[string]map[string]indexer.FileS
 			// One repo failing (busy DB, transient embed error, deleted dir) must
 			// not starve every repo after it in the list — log and move on.
 			fmt.Fprintf(os.Stderr, "%s sync failed %s: %v\n", time.Now().Format(time.RFC3339), repo.Path, err)
+			hadErrors = true
 			continue
 		}
 		changedAny = changedAny || changed
 		snapshots[repo.Path] = current
 		if err := updateSnapshot(repo.Path, current); err != nil {
 			fmt.Fprintf(os.Stderr, "%s snapshot save failed %s: %v\n", time.Now().Format(time.RFC3339), repo.Path, err)
+			hadErrors = true
 			continue
 		}
 	}
-	return changedAny, nil
+	return changedAny, hadErrors, nil
 }
 
 func syncRepository(ctx context.Context, cfg *config.Config, repo Repository, previous, current map[string]indexer.FileState) (bool, error) {

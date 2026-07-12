@@ -105,15 +105,32 @@ const brainLimit = 100_000
 // code symbols, and document chunks are never included. Handoffs (knowledge
 // docs of doc_type=handoff) are always gathered regardless of scope, since they
 // are the explicit "what happened / what's next" carryover.
-func Brain(ctx context.Context, store db.GraphStore, scopeTypes []string, format Format) (Artifact, error) {
+// BrainScope selects what a bundle export includes. When ProjectScopeID is set,
+// project-scoped memory is filtered to that repo's identity (not every indexed
+// project); when ProjectWorkspace is set, handoffs are filtered to that repo's
+// workspace. Both empty means no project narrowing (the record set is whatever
+// the scope types select across all workspaces).
+type BrainScope struct {
+	ScopeTypes       []string
+	ProjectScopeID   string
+	ProjectWorkspace string
+}
+
+func Brain(ctx context.Context, store db.GraphStore, scope BrainScope, format Format) (Artifact, error) {
 	var records []db.MemoryRecord
 	seen := map[string]bool{}
-	for _, st := range scopeTypes {
-		recs, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
+	for _, st := range scope.ScopeTypes {
+		filter := db.MemorySearchFilter{
 			ScopeType:       st,
 			LifecycleStates: []string{"active"},
 			Limit:           brainLimit,
-		})
+		}
+		// Scope project-scoped records to the requested repo so a project export
+		// can't leak another repo's memory into a published gist/repo/S3 object.
+		if st == "project" && scope.ProjectScopeID != "" {
+			filter.ScopeID = scope.ProjectScopeID
+		}
+		recs, err := store.SearchMemoryRecords(ctx, filter)
 		if err != nil {
 			return Artifact{}, fmt.Errorf("list %s memory: %w", st, err)
 		}
@@ -127,12 +144,17 @@ func Brain(ctx context.Context, store db.GraphStore, scopeTypes []string, format
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Node.ID < records[j].Node.ID })
 
-	handoffs, err := store.ListNodes(ctx, db.NodeFilter{
+	handoffFilter := db.NodeFilter{
 		Domain:         knowledge.DomainKnowledge,
 		Types:          []string{knowledge.TypeDoc},
 		PropertyEquals: map[string]string{"doc_type": knowledge.DocHandoff},
 		Limit:          brainLimit,
-	})
+	}
+	// A project-only export restricts handoffs to that repo's workspace.
+	if scope.ProjectWorkspace != "" {
+		handoffFilter.Workspace = scope.ProjectWorkspace
+	}
+	handoffs, err := store.ListNodes(ctx, handoffFilter)
 	if err != nil {
 		return Artifact{}, fmt.Errorf("list handoffs: %w", err)
 	}
@@ -301,6 +323,11 @@ func slugify(value string) string {
 	out := strings.Trim(b.String(), "-")
 	if out == "" {
 		return "raph-export"
+	}
+	// Cap the slug so a very long title can't produce a filename that exceeds the
+	// ~255-byte limit on common filesystems (matches knowledge/mcp slugify).
+	if len(out) > 60 {
+		out = strings.Trim(out[:60], "-")
 	}
 	return out
 }

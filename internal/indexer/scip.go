@@ -31,11 +31,11 @@ const (
 
 // scipTool describes an external SCIP indexer raph knows how to drive.
 type scipTool struct {
-	label    string                           // language label for logs
-	bin      string                           // executable looked up on PATH
-	exts     []string                         // file extensions that signal this language is present
-	grammars []string                         // gotreesitter grammar names this tool supersedes
-	build    func(root, out string) *exec.Cmd // command writing a SCIP index to out (cmd.Dir = root)
+	label    string                                                // language label for logs
+	bin      string                                                // executable looked up on PATH
+	exts     []string                                              // file extensions that signal this language is present
+	grammars []string                                              // gotreesitter grammar names this tool supersedes
+	build    func(ctx context.Context, root, out string) *exec.Cmd // command writing a SCIP index to out (cmd.Dir = root)
 }
 
 // scipTools is the registry. Adding a language = one entry; the tool stays
@@ -46,8 +46,8 @@ var scipTools = []scipTool{
 		bin:      "scip-typescript",
 		exts:     []string{".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"},
 		grammars: []string{"typescript", "tsx", "javascript", "jsx"},
-		build: func(root, out string) *exec.Cmd {
-			c := exec.Command("scip-typescript", "index", "--infer-tsconfig", "--output", out)
+		build: func(ctx context.Context, root, out string) *exec.Cmd {
+			c := exec.CommandContext(ctx, "scip-typescript", "index", "--infer-tsconfig", "--output", out)
 			c.Dir = root
 			return c
 		},
@@ -57,8 +57,8 @@ var scipTools = []scipTool{
 		bin:      "scip-python",
 		exts:     []string{".py"},
 		grammars: []string{"python"},
-		build: func(root, out string) *exec.Cmd {
-			c := exec.Command("scip-python", "index", ".", "--output", out, "--project-name", "raph-index")
+		build: func(ctx context.Context, root, out string) *exec.Cmd {
+			c := exec.CommandContext(ctx, "scip-python", "index", ".", "--output", out, "--project-name", "raph-index")
 			c.Dir = root
 			return c
 		},
@@ -68,8 +68,8 @@ var scipTools = []scipTool{
 		bin:      "rust-analyzer",
 		exts:     []string{".rs"},
 		grammars: []string{"rust"},
-		build: func(root, out string) *exec.Cmd {
-			c := exec.Command("rust-analyzer", "scip", ".", "--output", out)
+		build: func(ctx context.Context, root, out string) *exec.Cmd {
+			c := exec.CommandContext(ctx, "rust-analyzer", "scip", ".", "--output", out)
 			c.Dir = root
 			return c
 		},
@@ -79,8 +79,8 @@ var scipTools = []scipTool{
 		bin:      "scip-ruby",
 		exts:     []string{".rb"},
 		grammars: []string{"ruby"},
-		build: func(root, out string) *exec.Cmd {
-			c := exec.Command("scip-ruby", "--index-file", out, "--gem-metadata", "raph@0.0.1", ".")
+		build: func(ctx context.Context, root, out string) *exec.Cmd {
+			c := exec.CommandContext(ctx, "scip-ruby", "--index-file", out, "--gem-metadata", "raph@0.0.1", ".")
 			c.Dir = root
 			return c
 		},
@@ -90,8 +90,8 @@ var scipTools = []scipTool{
 		bin:      "scip-java",
 		exts:     []string{".java"},
 		grammars: []string{"java"},
-		build: func(root, out string) *exec.Cmd {
-			c := exec.Command("scip-java", "index", "--output", out)
+		build: func(ctx context.Context, root, out string) *exec.Cmd {
+			c := exec.CommandContext(ctx, "scip-java", "index", "--output", out)
 			c.Dir = root
 			return c
 		},
@@ -101,8 +101,8 @@ var scipTools = []scipTool{
 		bin:      "scip-clang",
 		exts:     []string{".c", ".h", ".cc", ".cpp", ".hpp", ".cxx"},
 		grammars: []string{"c", "cpp"},
-		build: func(root, out string) *exec.Cmd {
-			c := exec.Command("scip-clang", "--index-output-path", out, "--", ".")
+		build: func(ctx context.Context, root, out string) *exec.Cmd {
+			c := exec.CommandContext(ctx, "scip-clang", "--index-output-path", out, "--", ".")
 			c.Dir = root
 			return c
 		},
@@ -283,7 +283,7 @@ func (i *Indexer) runSCIP(ctx context.Context, tools []scipTool, nodeIdx map[str
 			continue
 		}
 		out := filepath.Join(tmp, t.label+".scip")
-		cmd := t.build(i.root, out)
+		cmd := t.build(ctx, i.root, out)
 		cmd.Stdout, cmd.Stderr = nil, nil
 		verbose.Printf("scip: running %s indexer", t.label)
 		if err := cmd.Run(); err != nil {

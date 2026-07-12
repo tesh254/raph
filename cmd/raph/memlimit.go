@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"runtime/debug"
@@ -43,8 +44,10 @@ func applyMemoryLimit() {
 	verbose.Printf("memory limit set to %d bytes (80%% of detected %d)", limit, total)
 }
 
-// parseByteSize accepts raw bytes or an IEC/SI suffix (KiB/MiB/GiB, KB/MB/GB,
-// K/M/G), case-insensitively ("2gb", "1500MiB", "2GB" all work).
+// parseByteSize accepts raw bytes or a suffix, case-insensitively ("2gb",
+// "1500MiB", "2GB" all work). IEC suffixes (KiB/MiB/GiB) and the bare K/M/G are
+// binary (1024-based); SI suffixes (KB/MB/GB) are decimal (1000-based). Returns
+// 0 on a parse error, non-positive value, or overflow.
 func parseByteSize(s string) int64 {
 	s = strings.ToUpper(strings.TrimSpace(s))
 	mult := int64(1)
@@ -53,7 +56,7 @@ func parseByteSize(s string) int64 {
 		m   int64
 	}{
 		{"GIB", 1 << 30}, {"MIB", 1 << 20}, {"KIB", 1 << 10},
-		{"GB", 1 << 30}, {"MB", 1 << 20}, {"KB", 1 << 10},
+		{"GB", 1_000_000_000}, {"MB", 1_000_000}, {"KB", 1_000},
 		{"G", 1 << 30}, {"M", 1 << 20}, {"K", 1 << 10}, {"B", 1},
 	} {
 		if v, ok := strings.CutSuffix(s, suf.tag); ok {
@@ -65,6 +68,9 @@ func parseByteSize(s string) int64 {
 	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 	if err != nil || n <= 0 {
 		return 0
+	}
+	if mult > 1 && n > math.MaxInt64/mult {
+		return 0 // overflow — a silently-wrapped tiny ceiling is worse than none
 	}
 	return n * mult
 }

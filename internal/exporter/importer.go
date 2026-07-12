@@ -30,6 +30,12 @@ func ParseEnvelope(data []byte) (Envelope, error) {
 	if env.Version > ExportVersion {
 		return Envelope{}, fmt.Errorf("export version %d is newer than this raph supports (%d); upgrade raph", env.Version, ExportVersion)
 	}
+	// Enforce the "brain" discriminator so a file from an incompatible export
+	// schema isn't silently persisted. An empty Kind is allowed for backward
+	// compatibility with legacy exports that predate the field.
+	if env.Kind != "" && env.Kind != "brain" {
+		return Envelope{}, fmt.Errorf("unsupported export kind %q (expected \"brain\")", env.Kind)
+	}
 	if len(env.Memory) == 0 && len(env.Handoffs) == 0 {
 		return Envelope{}, fmt.Errorf("export contains no memory, rules, or handoffs")
 	}

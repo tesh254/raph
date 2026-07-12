@@ -27,15 +27,40 @@ func allowPrivateHosts() bool {
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
+// extraBlockedCIDRs covers non-globally-routable ranges that net.IP's helpers
+// miss. Go's docs warn IsPrivate "does not describe a security property … and
+// should not be used for access control", so we add the ranges that matter for
+// SSRF: CGNAT (RFC 6598), benchmarking (RFC 2544), IETF protocol assignments
+// (RFC 6890), and deprecated IPv6 site-local (fec0::/10).
+var extraBlockedCIDRs = func() []*net.IPNet {
+	var nets []*net.IPNet
+	for _, c := range []string{
+		"100.64.0.0/10", "198.18.0.0/15", "192.0.0.0/24", "fec0::/10",
+	} {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}()
+
 // blockedIP reports whether ip belongs to a range that must never be fetched:
 // loopback, RFC1918/ULA private, link-local (which includes the cloud metadata
-// endpoint 169.254.169.254), unspecified, or multicast.
+// endpoint 169.254.169.254), unspecified, multicast, or one of extraBlockedCIDRs.
 func blockedIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	for _, n := range extraBlockedCIDRs {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // safeControl runs after DNS resolution on the *actual* IP being dialed, so it
