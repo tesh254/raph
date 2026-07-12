@@ -1,0 +1,17 @@
+{
+  "name": "raph",
+  "description": "Raph plugins for Claude Code.",
+  "owner": {
+    "name": "Erick Wachira"
+  },
+  "plugins": [
+    {
+      "name": "raph",
+      "source": "./plugins/raph",
+      "description": "Local-first graph-vector brain for coding agents over MCP: search, scoped memory, rules, local docs/handoffs, realtime sync.",
+      "version": "0.1.0",
+      "category": "developer-tools",
+      "keywords": ["raph", "mcp", "memory", "search"]
+    }
+  ]
+}

@@ -12,7 +12,9 @@ import (
 	"raph/internal/crawler"
 	"raph/internal/db"
 	"raph/internal/indexer"
+	"raph/internal/knowledge"
 	"raph/internal/memory"
+	"raph/internal/query"
 	"raph/internal/verbose"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -84,6 +86,63 @@ type GetMemoryHistoryArgs struct {
 	NodeID string `json:"node_id" jsonschema:"The memory node ID whose revision history should be returned"`
 }
 
+type StoreRuleArgs struct {
+	Scope    string   `json:"scope" jsonschema:"Rule scope: global (affects all work) or project (this codebase)"`
+	Content  string   `json:"content" jsonschema:"The rule the agent must follow"`
+	Title    string   `json:"title,omitempty" jsonschema:"Short rule title"`
+	Tags     []string `json:"tags,omitempty" jsonschema:"Optional tags"`
+	Key      string   `json:"key,omitempty" jsonschema:"Stable rule key; defaults to a slug of title/content"`
+	WriterID string   `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer"`
+}
+
+type ListRulesArgs struct {
+	Scope string `json:"scope" jsonschema:"Rule scope: global or project"`
+	Query string `json:"query,omitempty" jsonschema:"Optional text filter"`
+	Limit int    `json:"limit,omitempty" jsonschema:"Maximum rules to return"`
+}
+
+type AddDocumentArgs struct {
+	Scope    string   `json:"scope,omitempty" jsonschema:"Scope: project (this codebase) or global. Defaults to project"`
+	Title    string   `json:"title,omitempty" jsonschema:"Document title"`
+	Content  string   `json:"content" jsonschema:"Full document text"`
+	DocType  string   `json:"doc_type,omitempty" jsonschema:"architecture, handoff, reference, or note"`
+	Source   string   `json:"source,omitempty" jsonschema:"Origin such as user, web, or agent"`
+	Tags     []string `json:"tags,omitempty" jsonschema:"Optional tags"`
+	Links    []string `json:"links,omitempty" jsonschema:"Node ids to relate this document to"`
+	Key      string   `json:"key,omitempty" jsonschema:"Stable key; defaults to a slug of the title"`
+	WriterID string   `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer"`
+}
+
+type ListDocumentsArgs struct {
+	Scope   string `json:"scope,omitempty" jsonschema:"Scope: project or global"`
+	DocType string `json:"doc_type,omitempty" jsonschema:"Filter by doc type"`
+	Status  string `json:"status,omitempty" jsonschema:"Filter by status: fresh, stale, used"`
+	Query   string `json:"query,omitempty" jsonschema:"Optional text filter"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"Maximum documents"`
+}
+
+type ListDocumentsOutput struct {
+	Documents []db.Node `json:"documents"`
+}
+
+type ReadDocumentArgs struct {
+	ID       string `json:"id" jsonschema:"The document node id"`
+	MarkUsed *bool  `json:"mark_used,omitempty" jsonschema:"Mark a handoff as used on read (default true). Set false to peek"`
+	ReaderID string `json:"reader_id,omitempty" jsonschema:"Stable identifier for the reading agent"`
+}
+
+type LinkNodesArgs struct {
+	From string `json:"from" jsonschema:"Source node id"`
+	To   string `json:"to" jsonschema:"Target node id"`
+	Rel  string `json:"rel,omitempty" jsonschema:"Relation type (default RELATES_TO)"`
+}
+
+type LinkNodesOutput struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Rel  string `json:"rel"`
+}
+
 type CrawlURLArgs struct {
 	URL string `json:"url" jsonschema:"A single HTTP or HTTPS page to fetch, extract, and embed"`
 }
@@ -98,6 +157,15 @@ type CrawlWebsiteArgs struct {
 type IndexCodebaseArgs struct {
 	Path         string `json:"path,omitempty" jsonschema:"Codebase directory to index. Defaults to the MCP server working directory."`
 	NoEmbeddings bool   `json:"no_embeddings,omitempty" jsonschema:"Skip embedding generation while indexing"`
+}
+
+type SearchArgs struct {
+	Query  string   `json:"query" jsonschema:"The search query or pattern"`
+	Mode   string   `json:"mode,omitempty" jsonschema:"Search mode: auto (ranked keyword, default), literal (exact substring), regex, or vector (semantic)"`
+	Types  []string `json:"types,omitempty" jsonschema:"Filter to node types such as func, type, file, markdown_chunk, file_chunk, doc, doc_chunk"`
+	Path   string   `json:"path,omitempty" jsonschema:"Workspace path to scope the search. Defaults to the server working directory"`
+	Global bool     `json:"global,omitempty" jsonschema:"Search across all indexed workspaces instead of one"`
+	Limit  int      `json:"limit,omitempty" jsonschema:"Maximum number of matches"`
 }
 
 type SearchCodebaseArgs struct {
@@ -422,6 +490,122 @@ func (m *MCPServerWrapper) registerTools() {
 	})
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "store_rule",
+		Description: "Stores or updates a rule the agent must follow, scoped globally (all work) or to the current project (this codebase).",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args StoreRuleArgs) (*mcpsdk.CallToolResult, memory.StoreOutput, error) {
+		scopeType, scopeID, err := m.resolveRuleScope(args.Scope)
+		if err != nil {
+			return nil, memory.StoreOutput{}, err
+		}
+		key := strings.TrimSpace(args.Key)
+		if key == "" {
+			key = slugify(firstNonEmpty(args.Title, args.Content))
+		}
+		writer := strings.TrimSpace(args.WriterID)
+		if writer == "" {
+			writer = "agent"
+		}
+		out, err := memory.Put(ctx, m.store, m.config, memory.StoreInput{
+			ScopeType: scopeType, ScopeID: scopeID, KnowledgeType: "rule",
+			Title: args.Title, Content: args.Content, Source: "agent", WriterID: writer, Tags: args.Tags, MemoryKey: key,
+		})
+		if err != nil {
+			return nil, memory.StoreOutput{}, err
+		}
+		return textResult(renderJSON(out)), out, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "list_rules",
+		Description: "Lists active rules for a scope. Use scope=global for rules affecting all work and scope=project for rules specific to the current codebase.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args ListRulesArgs) (*mcpsdk.CallToolResult, ScopedMemorySearchOutput, error) {
+		scopeType, scopeID, err := m.resolveRuleScope(args.Scope)
+		if err != nil {
+			return nil, ScopedMemorySearchOutput{}, err
+		}
+		out, err := m.searchKnowledge(ctx, scopeType, scopeID, "rule", args.Query, args.Limit)
+		if err != nil {
+			return nil, ScopedMemorySearchOutput{}, err
+		}
+		return textResult(renderJSON(out)), out, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "add_document",
+		Description: "Attaches a local document to the graph. Set doc_type to architecture (durable design), handoff (work transfer), reference (a fact to confirm against), or note. Chunked and linked so related material is one hop away.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args AddDocumentArgs) (*mcpsdk.CallToolResult, knowledge.Document, error) {
+		workspace, err := m.resolveDocWorkspace(args.Scope)
+		if err != nil {
+			return nil, knowledge.Document{}, err
+		}
+		writer := strings.TrimSpace(args.WriterID)
+		if writer == "" {
+			writer = "agent"
+		}
+		doc, err := knowledge.Add(ctx, m.store, m.config, knowledge.AddInput{
+			Workspace: workspace, Key: args.Key, Title: args.Title, Content: args.Content,
+			DocType: args.DocType, Source: firstNonEmpty(args.Source, "agent"), WriterID: writer, Tags: args.Tags, Links: args.Links,
+		})
+		if err != nil {
+			return nil, knowledge.Document{}, err
+		}
+		return textResult(renderJSON(doc)), doc, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "list_documents",
+		Description: "Lists local documents in a scope, optionally filtered by doc_type (architecture, handoff, reference, note) or status (fresh, stale, used).",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args ListDocumentsArgs) (*mcpsdk.CallToolResult, ListDocumentsOutput, error) {
+		workspace, err := m.resolveDocWorkspace(args.Scope)
+		if err != nil {
+			return nil, ListDocumentsOutput{}, err
+		}
+		docs, err := knowledge.List(ctx, m.store, knowledge.ListFilter{
+			Workspace: workspace, DocType: args.DocType, Status: args.Status, Query: args.Query, Limit: args.Limit,
+		})
+		if err != nil {
+			return nil, ListDocumentsOutput{}, err
+		}
+		out := ListDocumentsOutput{Documents: docs}
+		return textResult(renderJSON(out)), out, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "read_document",
+		Description: "Reads a document with its chunks and related nodes. Reading a handoff marks it as used so the next agent knows the work is taken. Pass mark_used=false to peek without claiming.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args ReadDocumentArgs) (*mcpsdk.CallToolResult, knowledge.Document, error) {
+		markUsed := true
+		if args.MarkUsed != nil {
+			markUsed = *args.MarkUsed
+		}
+		reader := strings.TrimSpace(args.ReaderID)
+		if reader == "" {
+			reader = "agent"
+		}
+		doc, err := knowledge.Read(ctx, m.store, args.ID, markUsed, reader)
+		if err != nil {
+			return nil, knowledge.Document{}, err
+		}
+		m.recordAccess(ctx, args.ID, "read", "")
+		return textResult(renderJSON(doc)), doc, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "link_nodes",
+		Description: "Creates a relation edge between two graph nodes so related material can be reached via graph_neighbors instead of another search.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args LinkNodesArgs) (*mcpsdk.CallToolResult, LinkNodesOutput, error) {
+		if err := knowledge.Link(ctx, m.store, args.From, args.To, args.Rel); err != nil {
+			return nil, LinkNodesOutput{}, err
+		}
+		rel := strings.TrimSpace(args.Rel)
+		if rel == "" {
+			rel = knowledge.RelRelatesTo
+		}
+		out := LinkNodesOutput{From: args.From, To: args.To, Rel: rel}
+		return textResult(renderJSON(out)), out, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "crawl_url",
 		Description: "Fetches exactly one user-provided HTTP or HTTPS page, extracts readable content, creates chunks, and generates embeddings.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args CrawlURLArgs) (*mcpsdk.CallToolResult, CrawlURLOutput, error) {
@@ -482,7 +666,7 @@ func (m *MCPServerWrapper) registerTools() {
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "index_codebase",
-		Description: "Indexes a local codebase into the graph. Defaults to the MCP server working directory and replaces that workspace's existing indexed nodes.",
+		Description: "Indexes a local codebase into the graph. Defaults to the MCP server working directory and replaces that workspace's existing indexed nodes. The result's stats.scip_active lists languages resolved compiler-grade; stats.scip_suggestions lists languages that would gain go/types-level cross-file accuracy via an installable indexer — each entry has an agent_action command (e.g. `raph code-intel install python`). PROTOCOL: always ask the user for permission before running an install command; if they decline, tell them the command to run themselves and continue with the bundled resolver. Never install without explicit approval. After an approved install, re-run index_codebase to upgrade.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args IndexCodebaseArgs) (*mcpsdk.CallToolResult, IndexCodebaseOutput, error) {
 		path := strings.TrimSpace(args.Path)
 		if path == "" {
@@ -514,6 +698,33 @@ func (m *MCPServerWrapper) registerTools() {
 		verbose.Printf("index_codebase complete files=%d nodes=%d edges=%d embeddings=%d", stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
 		output := IndexCodebaseOutput{Path: absPath, WorkspaceID: idx.WorkspaceID(), Stats: stats}
 		return textResult(renderJSON(output)), output, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "search",
+		Description: "Search over the indexed graph (code, docs, knowledge) with familiar CLI ergonomics for agents that do not have this MCP server connected. Modes: auto (ranked keyword), literal (exact substring), regex (Go regexp), vector (semantic graph search). Filter by node type; scope to the current workspace or all.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchArgs) (*mcpsdk.CallToolResult, query.Result, error) {
+		workspace := ""
+		if !args.Global {
+			ws, err := m.resolveWorkspace(args.Path)
+			if err != nil {
+				return nil, query.Result{}, err
+			}
+			workspace = ws
+		}
+		mode := query.Mode(strings.TrimSpace(args.Mode))
+		result, err := query.Search(ctx, m.store, m.config, query.Options{
+			Query:     args.Query,
+			Workspace: workspace,
+			Types:     args.Types,
+			Limit:     args.Limit,
+			Mode:      mode,
+		})
+		if err != nil {
+			return nil, query.Result{}, err
+		}
+		m.recordAccess(ctx, "", "search", strings.TrimSpace(args.Query))
+		return textResult(renderJSON(result)), result, nil
 	})
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
@@ -573,6 +784,67 @@ func (m *MCPServerWrapper) searchWorkspace(ctx context.Context, workspace string
 		return "keyword", nil, err
 	}
 	return "keyword", nodes, nil
+}
+
+// resolveDocWorkspace maps a document scope to a workspace id: the current
+// project's workspace, or the shared global-knowledge bucket.
+func (m *MCPServerWrapper) resolveDocWorkspace(scope string) (string, error) {
+	switch strings.TrimSpace(scope) {
+	case "", "project":
+		return m.resolveWorkspace(".")
+	case "global":
+		return knowledge.GlobalWorkspace, nil
+	default:
+		return "", fmt.Errorf("unknown scope %q (use project or global)", scope)
+	}
+}
+
+// resolveRuleScope maps a rule scope keyword to a (scopeType, scopeID) pair.
+// global rules share a fixed bucket; project rules use the workspace identity.
+func (m *MCPServerWrapper) resolveRuleScope(scope string) (string, string, error) {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		scope = "project"
+	}
+	switch scope {
+	case "global":
+		return "global", "global", nil
+	case "project":
+		id, err := m.resolveScopeID("project", "")
+		if err != nil {
+			return "", "", err
+		}
+		return "project", id, nil
+	default:
+		return "", "", fmt.Errorf("unknown rule scope %q (use global or project)", scope)
+	}
+}
+
+// slugify produces a stable key from free text.
+func slugify(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash && b.Len() > 0 {
+				b.WriteRune('-')
+				lastDash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "entry"
+	}
+	if len(out) > 60 {
+		out = strings.Trim(out[:60], "-")
+	}
+	return out
 }
 
 func (m *MCPServerWrapper) resolveScopeID(scopeType string, provided string) (string, error) {
@@ -650,6 +922,34 @@ func (m *MCPServerWrapper) crossCorpusNeighbors(ctx context.Context, nodeID stri
 		output.Mode = "semantic"
 	}
 	return output, nil
+}
+
+// recordAccess logs an access event when the store supports it (the local
+// SQLite store does). Best-effort telemetry for the studio analytics view.
+func (m *MCPServerWrapper) recordAccess(ctx context.Context, nodeID, kind, query string) {
+	if rec, ok := m.store.(interface {
+		RecordAccess(context.Context, string, string, string) error
+	}); ok {
+		_ = rec.RecordAccess(ctx, nodeID, kind, query)
+	}
+}
+
+// resolveWorkspace maps a path (default: server working directory) to a graph
+// workspace id for scoped searches.
+func (m *MCPServerWrapper) resolveWorkspace(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = "."
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace path: %w", err)
+	}
+	idx, err := indexer.New(m.store, m.config, absPath, true)
+	if err != nil {
+		return "", err
+	}
+	return idx.WorkspaceID(), nil
 }
 
 func (m *MCPServerWrapper) searchCodebase(ctx context.Context, args SearchCodebaseArgs) (SearchCodebaseOutput, error) {

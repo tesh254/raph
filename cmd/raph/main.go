@@ -4,16 +4,27 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"raph/internal/agentsetup"
 	"raph/internal/config"
 	"raph/internal/crawler"
 	"raph/internal/db"
+	"raph/internal/exporter"
 	"raph/internal/indexer"
+	"raph/internal/knowledge"
 	serverpkg "raph/internal/mcp"
+	"raph/internal/memory"
+	"raph/internal/output"
+	"raph/internal/query"
 	"raph/internal/signing"
 	"raph/internal/studio"
 	"raph/internal/syncer"
@@ -25,6 +36,21 @@ import (
 )
 
 const autoUpdateEnvVar = "RAPH_AUTO_UPDATE"
+
+// outputFormatFlag holds the value of the root --format flag (text|json|auto).
+// Empty means auto-detect (JSON for agents/pipes, text for terminals).
+var outputFormatFlag string
+
+func resolveFormat() output.Format { return output.Resolve(outputFormatFlag) }
+
+// resolveWorkspaceID maps a filesystem path to its graph workspace id.
+func resolveWorkspaceID(store db.GraphStore, cfg *config.Config, path string) (string, error) {
+	idx, err := indexer.New(store, cfg, path, true)
+	if err != nil {
+		return "", err
+	}
+	return idx.WorkspaceID(), nil
+}
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
@@ -50,6 +76,7 @@ func newRootCmd() *cobra.Command {
 				_ = os.Setenv("RAPH_VERBOSE", "1")
 				verbose.Printf("command=%s args=%v", cmd.CommandPath(), args)
 			}
+			applyMemoryLimit() // soft heap ceiling; honors GOMEMLIMIT / RAPH_MEMORY_LIMIT
 			if cmd.Name() == "update" || version.Version == "dev" || os.Getenv(autoUpdateEnvVar) != "1" || !updater.ShouldAutoCheck() {
 				return
 			}
@@ -63,8 +90,16 @@ func newRootCmd() *cobra.Command {
 	}
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", true, "Print verbose operational logs (enabled by default)")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress verbose operational logs")
+	rootCmd.PersistentFlags().StringVar(&outputFormatFlag, "format", "", "Output format: text, json, or auto (default auto: json for agents/pipes)")
 
 	rootCmd.AddCommand(newInitCmd())
+	rootCmd.AddCommand(newSearchCmd())
+	rootCmd.AddCommand(newSCIPCmd())
+	rootCmd.AddCommand(newMemCmd())
+	rootCmd.AddCommand(newRulesCmd())
+	rootCmd.AddCommand(newDocCmd())
+	rootCmd.AddCommand(newExportCmd())
+	rootCmd.AddCommand(newImportCmd())
 	rootCmd.AddCommand(newCrawlCmd())
 	rootCmd.AddCommand(newStartCmd())
 	rootCmd.AddCommand(newStudioCmd())
@@ -128,7 +163,7 @@ func newSyncCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			if worker {
 				verbose.Printf("starting sync worker in foreground mode interval=%s", interval)
-				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 				defer cancel()
 				return syncer.RunWorker(ctx, interval)
 			}
@@ -289,6 +324,7 @@ func newInitCmd() *cobra.Command {
 			if !noEmbeddings && (cfg == nil || !cfg.HasEmbeddingProvider()) {
 				fmt.Fprintln(out, "No resolved embedding provider key found; graph was indexed without embeddings. Run `raph config init` and set OPENROUTER_API_KEY to enable semantic search.")
 			}
+			printSCIPGuidance(out, stats)
 			return nil
 		},
 	}
@@ -296,6 +332,958 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&scanPath, "path", ".", "Workspace path to index")
 	cmd.Flags().BoolVar(&noEmbeddings, "no-embeddings", false, "Skip remote embedding generation during indexing")
 	return cmd
+}
+
+// printSCIPGuidance surfaces resolution-tier info after an index: which
+// languages got compiler-grade resolution, and an actionable prompt for any
+// language that could be upgraded by installing its indexer. Phrased so a human
+// reads it as a suggestion and an agent can act on the install command itself.
+func printSCIPGuidance(out io.Writer, stats indexer.Stats) {
+	if len(stats.SCIPActive) > 0 {
+		fmt.Fprintf(out, "Compiler-grade resolution active: %s\n", strings.Join(stats.SCIPActive, ", "))
+	}
+	if len(stats.SCIPSuggestions) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "\nUpgrade available — these languages used the bundled import-aware resolver.")
+	fmt.Fprintln(out, "For go/types-level cross-file accuracy, install the matching indexer, then re-run `raph init`:")
+	for _, s := range stats.SCIPSuggestions {
+		fmt.Fprintf(out, "  %-12s raph code-intel install %s   (%s)\n", s.Language, s.Language, s.Install)
+	}
+	fmt.Fprintln(out, "Agents: ask the user before installing. If they decline, give them the command above to run themselves.")
+}
+
+func newSCIPCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "code-intel",
+		Aliases: []string{"scip"},
+		Short:   "Show code-intelligence resolvers (compiler-grade cross-file accuracy) and install them",
+		Long: "raph reaches go/types-grade cross-file reference accuracy for non-Go languages " +
+			"by running an installed code-intelligence indexer (compiler-backed, SCIP) during a " +
+			"full index. Languages without a tool fall back to the bundled import-aware resolver. " +
+			"This lists each registered resolver and whether it is on PATH. " +
+			"Use `raph code-intel install <language>` to install one (agents must ask the user first).",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			status := indexer.SCIPStatus()
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), status, func(w io.Writer) error {
+				var sb strings.Builder
+				sb.WriteString("Code-intelligence resolvers (compiler-grade tier)\n")
+				sb.WriteString("Go uses go/types natively. For others, install the tool below;\n")
+				sb.WriteString("raph runs it automatically on the next full index. Disable with RAPH_NO_SCIP=1.\n\n")
+				for _, s := range status {
+					mark := "not installed"
+					if s.Installed {
+						mark = "installed (" + s.Path + ")"
+					}
+					fmt.Fprintf(&sb, "  %-12s %-16s %s\n", s.Language, s.Binary, mark)
+					if !s.Installed {
+						fmt.Fprintf(&sb, "               raph code-intel install %s   (%s)\n", s.Language, s.Install)
+					}
+				}
+				_, err := io.WriteString(w, sb.String())
+				return err
+			})
+		},
+	}
+	cmd.AddCommand(newSCIPInstallCmd())
+	return cmd
+}
+
+func newSCIPInstallCmd() *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "install <language>",
+		Short: "Install the compiler-grade code-intelligence resolver for a language",
+		Long: "Installs the code-intelligence indexer for a language (e.g. `raph code-intel install python`), " +
+			"then re-run `raph init` to upgrade resolution. AGENTS: ask the user for permission before " +
+			"running this; if they decline, tell them to run it themselves. Use --dry-run to print " +
+			"the command without executing it.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			plan, ok := indexer.SCIPInstallPlanFor(args[0])
+			if !ok {
+				return fmt.Errorf("unknown language %q; registered resolvers: %s", args[0], strings.Join(indexer.SCIPLanguages(), ", "))
+			}
+			if plan.Installed {
+				fmt.Fprintf(out, "%s resolver already installed (%s). Run `raph init` to use it.\n", plan.Language, plan.Binary)
+				return nil
+			}
+			if len(plan.Argv) == 0 {
+				return fmt.Errorf("no automated installer for %s — install manually: %s", plan.Language, plan.Hint)
+			}
+			fmt.Fprintf(out, "Install command: %s\n", strings.Join(plan.Argv, " "))
+			if dryRun {
+				return nil
+			}
+			// Preflight: the install relies on a package manager / runtime being
+			// present (npm, pip, rustup, gem). Fail with a clear prerequisite
+			// message instead of a cryptic exec error.
+			if _, err := exec.LookPath(plan.Argv[0]); err != nil {
+				return fmt.Errorf("%q is required to install the %s resolver but was not found on PATH; install %s first, or run manually: %s",
+					plan.Argv[0], plan.Language, plan.Argv[0], plan.Hint)
+			}
+			run := exec.Command(plan.Argv[0], plan.Argv[1:]...)
+			run.Stdout = out
+			run.Stderr = cmd.ErrOrStderr()
+			run.Stdin = os.Stdin
+			if err := run.Run(); err != nil {
+				return fmt.Errorf("install failed (%w); run it manually: %s", err, plan.Hint)
+			}
+			fmt.Fprintf(out, "Installed %s resolver. Re-run `raph init` to upgrade to compiler-grade resolution.\n", plan.Language)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the install command without running it")
+	return cmd
+}
+
+func newSearchCmd() *cobra.Command {
+	var scanPath string
+	var global bool
+	var types []string
+	var limit int
+	var literal bool
+	var regex bool
+	var vector bool
+
+	cmd := &cobra.Command{
+		Use:   "search <query>",
+		Short: "Search the indexed graph with familiar CLI ergonomics",
+		Long: "Search indexed nodes without learning raph query syntax. Defaults to ranked " +
+			"keyword search; use --literal for exact substrings, --regex for Go regexp patterns, or " +
+			"--vector for semantic graph matches. Use --format json for the stable agent format.",
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			workspace := ""
+			if !global {
+				workspace, err = resolveWorkspaceID(store, cfg, scanPath)
+				if err != nil {
+					return err
+				}
+			}
+
+			mode := query.ModeAuto
+			switch {
+			case regex:
+				mode = query.ModeRegex
+			case vector:
+				mode = query.ModeVector
+			case literal:
+				mode = query.ModeLiteral
+			}
+
+			result, err := query.Search(cmd.Context(), store, cfg, query.Options{
+				Query:     strings.Join(args, " "),
+				Workspace: workspace,
+				Types:     types,
+				Limit:     limit,
+				Mode:      mode,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), result, func(w io.Writer) error {
+				var sb strings.Builder
+				result.RenderText(&sb)
+				_, writeErr := io.WriteString(w, sb.String())
+				return writeErr
+			})
+		},
+	}
+	cmd.Flags().StringVar(&scanPath, "path", ".", "Workspace path to scope the search")
+	cmd.Flags().BoolVar(&global, "global", false, "Search across all indexed workspaces")
+	cmd.Flags().StringSliceVar(&types, "type", nil, "Filter by node type (func, type, file, markdown_chunk, file_chunk, doc, doc_chunk)")
+	cmd.Flags().IntVar(&limit, "limit", 10, "Maximum number of matches")
+	cmd.Flags().BoolVar(&literal, "literal", false, "Exact substring match")
+	cmd.Flags().BoolVar(&regex, "regex", false, "Treat the query as a Go regular expression")
+	cmd.Flags().BoolVar(&vector, "vector", false, "Semantic graph search (requires a configured embedding provider)")
+	// The three modes are mutually exclusive; reject conflicting input instead of
+	// silently applying an undocumented precedence (which could quietly trigger
+	// embedding work the user didn't ask for).
+	cmd.MarkFlagsMutuallyExclusive("literal", "regex", "vector")
+	return cmd
+}
+
+// writerID identifies who is writing memory/rules from the CLI. Agents can set
+// RAPH_WRITER to attribute writes; otherwise a stable default is used.
+func writerID() string {
+	if w := strings.TrimSpace(os.Getenv("RAPH_WRITER")); w != "" {
+		return w
+	}
+	return "cli"
+}
+
+func slugify(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash && b.Len() > 0 {
+				b.WriteRune('-')
+				lastDash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "entry"
+	}
+	if len(out) > 60 {
+		out = strings.Trim(out[:60], "-")
+	}
+	return out
+}
+
+// resolveMemoryScope returns the (scopeType, scopeID) pair for a scope. project
+// scope derives its id from the workspace's project identity; global uses a
+// fixed bucket; shared requires an explicit id.
+func resolveMemoryScope(cfg *config.Config, scope, scopeID, path string) (string, string, error) {
+	scope = strings.TrimSpace(scope)
+	scopeID = strings.TrimSpace(scopeID)
+	switch scope {
+	case "project":
+		if scopeID != "" {
+			return scope, scopeID, nil
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", "", err
+		}
+		id, err := indexer.ResolveProjectIdentity(cfg, abs)
+		if err != nil {
+			return "", "", err
+		}
+		return scope, id, nil
+	case "global":
+		if scopeID == "" {
+			scopeID = "global"
+		}
+		return scope, scopeID, nil
+	case "shared":
+		if scopeID == "" {
+			return "", "", fmt.Errorf("--scope-id is required for shared scope")
+		}
+		return scope, scopeID, nil
+	default:
+		return "", "", fmt.Errorf("unknown scope %q (use project, shared, or global)", scope)
+	}
+}
+
+func renderMemoryRecords(w io.Writer, records []db.MemoryRecord) error {
+	if len(records) == 0 {
+		_, err := io.WriteString(w, "No matching records\n")
+		return err
+	}
+	var sb strings.Builder
+	for _, r := range records {
+		fmt.Fprintf(&sb, "%s  [%s/%s · %s]\n", r.Node.Name, r.ScopeType, r.KnowledgeType, r.LifecycleState)
+		fmt.Fprintf(&sb, "    id: %s  key: %s\n", r.Node.ID, r.MemoryKey)
+		if len(r.DisplayTags) > 0 {
+			fmt.Fprintf(&sb, "    tags: %s\n", strings.Join(r.DisplayTags, ", "))
+		}
+		if c := strings.TrimSpace(r.Node.Content); c != "" {
+			fmt.Fprintf(&sb, "    %s\n", query.NewExcerpt(c, 280))
+		}
+		sb.WriteString("\n")
+	}
+	_, err := io.WriteString(w, sb.String())
+	return err
+}
+
+func newMemCmd() *cobra.Command {
+	memCmd := &cobra.Command{
+		Use:   "mem",
+		Short: "Read and write scoped agent memory (project, shared, or global)",
+	}
+
+	var scope, scopeID, knowledgeType, title, key, path string
+	var tags []string
+	setCmd := &cobra.Command{
+		Use:   "set <content>",
+		Short: "Create or update a memory record (idempotent)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			scopeType, resolvedID, err := resolveMemoryScope(cfg, scope, scopeID, path)
+			if err != nil {
+				return err
+			}
+			content := strings.Join(args, " ")
+			memKey := key
+			if memKey == "" {
+				if title != "" {
+					memKey = slugify(title)
+				} else {
+					memKey = slugify(content)
+				}
+			}
+			out, err := memory.Put(cmd.Context(), store, cfg, memory.StoreInput{
+				ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: knowledgeType,
+				Title: title, Content: content, Source: "cli", WriterID: writerID(), Tags: tags, MemoryKey: memKey,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), out, func(w io.Writer) error {
+				fmt.Fprintf(w, "Saved %s memory %q (id %s, embedded=%t)\n", scopeType, out.Record.MemoryKey, out.Record.Node.ID, out.Embedded)
+				return nil
+			})
+		},
+	}
+	setCmd.Flags().StringVar(&scope, "scope", "project", "Scope: project, shared, or global")
+	setCmd.Flags().StringVar(&scopeID, "scope-id", "", "Explicit scope id (required for shared)")
+	setCmd.Flags().StringVar(&knowledgeType, "type", "decision", "Knowledge type: decision, workflow, preference, incident")
+	setCmd.Flags().StringVar(&title, "title", "", "Short title")
+	setCmd.Flags().StringVar(&key, "key", "", "Stable memory key (defaults to a slug of title/content)")
+	setCmd.Flags().StringSliceVar(&tags, "tag", nil, "Tags (repeatable)")
+	setCmd.Flags().StringVar(&path, "path", ".", "Workspace path for project scope resolution")
+
+	var sScope, sScopeID, sType, sQuery, sPath string
+	var sLimit int
+	searchCmd := &cobra.Command{
+		Use:   "search [query]",
+		Short: "Search memory records in a scope",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			scopeType, resolvedID, err := resolveMemoryScope(cfg, sScope, sScopeID, sPath)
+			if err != nil {
+				return err
+			}
+			q := sQuery
+			if q == "" && len(args) > 0 {
+				q = strings.Join(args, " ")
+			}
+			res, err := memory.Search(cmd.Context(), store, memory.SearchInput{
+				Query: q, ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: sType, Limit: sLimit,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), res, func(w io.Writer) error {
+				return renderMemoryRecords(w, res.Matches)
+			})
+		},
+	}
+	searchCmd.Flags().StringVar(&sScope, "scope", "project", "Scope: project, shared, or global")
+	searchCmd.Flags().StringVar(&sScopeID, "scope-id", "", "Explicit scope id (required for shared)")
+	searchCmd.Flags().StringVar(&sType, "type", "", "Filter by knowledge type")
+	searchCmd.Flags().StringVar(&sQuery, "query", "", "Search query (also accepted as positional arg)")
+	searchCmd.Flags().IntVar(&sLimit, "limit", 20, "Maximum records")
+	searchCmd.Flags().StringVar(&sPath, "path", ".", "Workspace path for project scope resolution")
+
+	var rmReason, rmReplacement string
+	rmCmd := &cobra.Command{
+		Use:   "rm <node_id>",
+		Short: "Deprecate a memory record",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			rec, err := memory.Deprecate(cmd.Context(), store, memory.DeprecateInput{
+				NodeID: args[0], ReplacementNodeID: rmReplacement, WriterID: writerID(), Reason: rmReason,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), rec, func(w io.Writer) error {
+				fmt.Fprintf(w, "Deprecated %s (state %s)\n", rec.Node.ID, rec.LifecycleState)
+				return nil
+			})
+		},
+	}
+	rmCmd.Flags().StringVar(&rmReason, "reason", "", "Why this memory is being deprecated")
+	rmCmd.Flags().StringVar(&rmReplacement, "replacement", "", "Node id that replaces this memory")
+
+	memCmd.AddCommand(setCmd, searchCmd, rmCmd)
+	return memCmd
+}
+
+func newRulesCmd() *cobra.Command {
+	rulesCmd := &cobra.Command{
+		Use:   "rules",
+		Short: "Manage agent rules scoped globally or to a codebase",
+	}
+
+	var scope, title, key, path string
+	var tags []string
+	addCmd := &cobra.Command{
+		Use:   "add <rule text>",
+		Short: "Add or update a rule (scope: global or project)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			scopeType, resolvedID, err := resolveMemoryScope(cfg, scope, "", path)
+			if err != nil {
+				return err
+			}
+			content := strings.Join(args, " ")
+			memKey := key
+			if memKey == "" {
+				if title != "" {
+					memKey = slugify(title)
+				} else {
+					memKey = slugify(content)
+				}
+			}
+			out, err := memory.Put(cmd.Context(), store, cfg, memory.StoreInput{
+				ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: "rule",
+				Title: title, Content: content, Source: "cli", WriterID: writerID(), Tags: tags, MemoryKey: memKey,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), out, func(w io.Writer) error {
+				fmt.Fprintf(w, "Added %s rule %q (id %s)\n", scopeType, out.Record.MemoryKey, out.Record.Node.ID)
+				return nil
+			})
+		},
+	}
+	addCmd.Flags().StringVar(&scope, "scope", "project", "Rule scope: project (this codebase) or global")
+	addCmd.Flags().StringVar(&title, "title", "", "Short rule title")
+	addCmd.Flags().StringVar(&key, "key", "", "Stable rule key (defaults to a slug)")
+	addCmd.Flags().StringSliceVar(&tags, "tag", nil, "Tags (repeatable)")
+	addCmd.Flags().StringVar(&path, "path", ".", "Workspace path for project scope resolution")
+
+	var lScope, lQuery, lPath string
+	var lLimit int
+	var lAll bool
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List rules for a scope",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			var all []db.MemoryRecord
+			scopes := []string{lScope}
+			if lAll {
+				scopes = []string{"global", "project"}
+			}
+			// --limit is an overall maximum. When listing multiple scopes, spend a
+			// shared budget across them so `--all --limit N` never returns > N.
+			remaining := lLimit
+			for _, sc := range scopes {
+				if remaining <= 0 {
+					break
+				}
+				scopeType, resolvedID, err := resolveMemoryScope(cfg, sc, "", lPath)
+				if err != nil {
+					return err
+				}
+				res, err := memory.Search(cmd.Context(), store, memory.SearchInput{
+					Query: lQuery, ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: "rule", Limit: remaining,
+				})
+				if err != nil {
+					return err
+				}
+				all = append(all, res.Matches...)
+				remaining -= len(res.Matches)
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), memory.SearchOutput{Matches: all}, func(w io.Writer) error {
+				return renderMemoryRecords(w, all)
+			})
+		},
+	}
+	listCmd.Flags().StringVar(&lScope, "scope", "project", "Rule scope: project or global")
+	listCmd.Flags().BoolVar(&lAll, "all", false, "List both global and project rules")
+	listCmd.Flags().StringVar(&lQuery, "query", "", "Filter rules by text")
+	listCmd.Flags().IntVar(&lLimit, "limit", 50, "Maximum rules")
+	listCmd.Flags().StringVar(&lPath, "path", ".", "Workspace path for project scope resolution")
+
+	rmCmd := &cobra.Command{
+		Use:   "rm <node_id>",
+		Short: "Remove (deprecate) a rule",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			rec, err := memory.Deprecate(cmd.Context(), store, memory.DeprecateInput{NodeID: args[0], WriterID: writerID(), Reason: "removed via cli"})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), rec, func(w io.Writer) error {
+				fmt.Fprintf(w, "Removed rule %s\n", rec.Node.ID)
+				return nil
+			})
+		},
+	}
+
+	rulesCmd.AddCommand(addCmd, listCmd, rmCmd)
+	return rulesCmd
+}
+
+// resolveDocWorkspace maps a doc scope to a workspace id (project workspace or
+// the shared global-knowledge bucket).
+func resolveDocWorkspace(store db.GraphStore, cfg *config.Config, scope, path string) (string, error) {
+	switch strings.TrimSpace(scope) {
+	case "", "project":
+		return resolveWorkspaceID(store, cfg, path)
+	case "global":
+		return knowledge.GlobalWorkspace, nil
+	default:
+		return "", fmt.Errorf("unknown scope %q (use project or global)", scope)
+	}
+}
+
+func renderDocList(w io.Writer, docs []db.Node) error {
+	if len(docs) == 0 {
+		_, err := io.WriteString(w, "No documents\n")
+		return err
+	}
+	var sb strings.Builder
+	for _, d := range docs {
+		fmt.Fprintf(&sb, "%s  [%s · %s]\n", d.Name, d.Prop("doc_type"), d.Prop("status"))
+		fmt.Fprintf(&sb, "    id: %s\n", d.ID)
+		if c := strings.TrimSpace(d.Content); c != "" {
+			fmt.Fprintf(&sb, "    %s\n", query.NewExcerpt(c, 200))
+		}
+		sb.WriteString("\n")
+	}
+	_, err := io.WriteString(w, sb.String())
+	return err
+}
+
+func newDocCmd() *cobra.Command {
+	docCmd := &cobra.Command{
+		Use:   "doc",
+		Short: "Manage local documents and handoffs attached to the graph",
+	}
+
+	var scope, path, file, title, docType, source, key string
+	var tags, links []string
+	var noEmbed bool
+	addCmd := &cobra.Command{
+		Use:   "add [content]",
+		Short: "Add a local document (from --file, stdin via '-', or inline text)",
+		Long:  "Attach a document to local knowledge. Use --type to mark it as architecture, handoff, reference, or note so agents know how it serves the work.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			content, err := readContent(cmd, file, args)
+			if err != nil {
+				return err
+			}
+			workspace, err := resolveDocWorkspace(store, cfg, scope, path)
+			if err != nil {
+				return err
+			}
+			doc, err := knowledge.Add(cmd.Context(), store, cfg, knowledge.AddInput{
+				Workspace: workspace, Key: key, Title: title, Content: content,
+				DocType: docType, Source: source, WriterID: writerID(), Tags: tags, Links: links, NoEmbed: noEmbed,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), doc, func(w io.Writer) error {
+				fmt.Fprintf(w, "Added %s document %q (id %s, %d chunks)\n", doc.Node.Prop("doc_type"), doc.Node.Name, doc.Node.ID, doc.ChunkCount)
+				return nil
+			})
+		},
+	}
+	addCmd.Flags().StringVar(&scope, "scope", "project", "Scope: project (this codebase) or global")
+	addCmd.Flags().StringVar(&path, "path", ".", "Workspace path for project scope")
+	addCmd.Flags().StringVar(&file, "file", "", "Read document content from a file")
+	addCmd.Flags().StringVar(&title, "title", "", "Document title")
+	addCmd.Flags().StringVar(&docType, "type", "note", "Document type: architecture, handoff, reference, note")
+	addCmd.Flags().StringVar(&source, "source", "local", "Source: local, user, web")
+	addCmd.Flags().StringVar(&key, "key", "", "Stable key (defaults to a slug of the title)")
+	addCmd.Flags().StringSliceVar(&tags, "tag", nil, "Tags (repeatable)")
+	addCmd.Flags().StringSliceVar(&links, "link", nil, "Node ids to relate this document to (repeatable)")
+	addCmd.Flags().BoolVar(&noEmbed, "no-embeddings", false, "Skip embedding generation")
+
+	var lScope, lPath, lType, lStatus, lQuery string
+	var lLimit int
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List documents in a scope",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			workspace, err := resolveDocWorkspace(store, cfg, lScope, lPath)
+			if err != nil {
+				return err
+			}
+			docs, err := knowledge.List(cmd.Context(), store, knowledge.ListFilter{
+				Workspace: workspace, DocType: lType, Status: lStatus, Query: lQuery, Limit: lLimit,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), docs, func(w io.Writer) error {
+				return renderDocList(w, docs)
+			})
+		},
+	}
+	listCmd.Flags().StringVar(&lScope, "scope", "project", "Scope: project or global")
+	listCmd.Flags().StringVar(&lPath, "path", ".", "Workspace path for project scope")
+	listCmd.Flags().StringVar(&lType, "type", "", "Filter by document type")
+	listCmd.Flags().StringVar(&lStatus, "status", "", "Filter by status (fresh, stale, used)")
+	listCmd.Flags().StringVar(&lQuery, "query", "", "Filter by text")
+	listCmd.Flags().IntVar(&lLimit, "limit", 50, "Maximum documents")
+
+	var noMark bool
+	readCmd := &cobra.Command{
+		Use:   "read <id>",
+		Short: "Read a document with its chunks and related nodes (marks handoffs as used)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			doc, err := knowledge.Read(cmd.Context(), store, args[0], !noMark, writerID())
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), doc, func(w io.Writer) error {
+				fmt.Fprintf(w, "%s  [%s · %s]\n\n%s\n", doc.Node.Name, doc.Node.Prop("doc_type"), doc.Node.Prop("status"), doc.Node.Content)
+				if len(doc.Related) > 0 {
+					fmt.Fprintf(w, "\nRelated:\n")
+					for _, r := range doc.Related {
+						fmt.Fprintf(w, "  - %s (%s) %s\n", r.Name, r.Type, r.ID)
+					}
+				}
+				return nil
+			})
+		},
+	}
+	readCmd.Flags().BoolVar(&noMark, "no-mark", false, "Do not mark a handoff document as used")
+
+	var rel string
+	linkCmd := &cobra.Command{
+		Use:   "link <from_id> <to_id>",
+		Short: "Create a relation edge between two nodes",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			if err := knowledge.Link(cmd.Context(), store, args[0], args[1], rel); err != nil {
+				return err
+			}
+			linkResult := struct {
+				From string `json:"from"`
+				To   string `json:"to"`
+				Rel  string `json:"rel"`
+			}{From: args[0], To: args[1], Rel: rel}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), linkResult, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Linked %s -> %s (%s)\n", linkResult.From, linkResult.To, linkResult.Rel)
+				return err
+			})
+		},
+	}
+	linkCmd.Flags().StringVar(&rel, "rel", knowledge.RelRelatesTo, "Relation type")
+
+	docCmd.AddCommand(addCmd, listCmd, readCmd, linkCmd)
+	return docCmd
+}
+
+// readContent resolves document content from --file, stdin ('-'), or args.
+func readContent(cmd *cobra.Command, file string, args []string) (string, error) {
+	if strings.TrimSpace(file) != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("read file: %w", err)
+		}
+		return string(data), nil
+	}
+	if len(args) == 1 && args[0] == "-" {
+		data, err := io.ReadAll(cmd.InOrStdin())
+		if err != nil {
+			return "", fmt.Errorf("read stdin: %w", err)
+		}
+		return string(data), nil
+	}
+	if len(args) > 0 {
+		return strings.Join(args, " "), nil
+	}
+	return "", fmt.Errorf("provide content via --file, '-' for stdin, or inline text")
+}
+
+func newExportCmd() *cobra.Command {
+	var docID, scope, path, format, out string
+	var bundle, gist, public bool
+	var repo, repoPath, s3Dest, r2Endpoint string
+
+	cmd := &cobra.Command{
+		Use:   "export",
+		Short: "Export a document or knowledge bundle to a file and optionally publish it",
+		Long: "Export local knowledge to a portable Markdown/JSON file, then optionally publish it " +
+			"to a GitHub gist, a repo, S3, or Cloudflare R2 so it transfers between machines.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			cfg, _ := config.LoadConfigIfPresent() // only used for project-scope resolution; optional
+
+			fmtVal := exporter.Format(format)
+			if fmtVal != exporter.FormatJSON {
+				fmtVal = exporter.FormatMarkdown
+			}
+
+			var artifact exporter.Artifact
+			switch {
+			case bundle:
+				scopeSel := scope
+				if !cmd.Flags().Changed("scope") {
+					scopeSel = "portable" // brain bundle defaults to portable scopes
+				}
+				scopeTypes, scErr := brainScopeTypes(scopeSel)
+				if scErr != nil {
+					return scErr
+				}
+				brainScope := exporter.BrainScope{ScopeTypes: scopeTypes}
+				// A project-only bundle must be pinned to the current repo, or it
+				// would sweep in every indexed repo's project-scoped memory and
+				// handoffs — a data leak when publishing to gist/repo/S3.
+				if len(scopeTypes) == 1 && scopeTypes[0] == "project" {
+					_, pid, e := resolveMemoryScope(cfg, "project", "", path)
+					if e != nil {
+						return fmt.Errorf("resolve project scope for export: %w", e)
+					}
+					brainScope.ProjectScopeID = pid
+					if ws, wErr := resolveWorkspaceID(store, cfg, path); wErr == nil {
+						brainScope.ProjectWorkspace = ws
+					}
+				}
+				artifact, err = exporter.Brain(cmd.Context(), store, brainScope, fmtVal)
+			case strings.TrimSpace(docID) != "":
+				artifact, err = exporter.Document(cmd.Context(), store, docID, fmtVal)
+			default:
+				return fmt.Errorf("provide --doc <id> or --bundle")
+			}
+			if err != nil {
+				return err
+			}
+
+			target, err := exporter.Write(artifact, out)
+			if err != nil {
+				return err
+			}
+
+			result := map[string]any{"file": target, "bytes": artifact.Bytes}
+			if gist {
+				url, gistErr := exporter.UploadGist(cmd.Context(), target, public, "raph knowledge export")
+				if gistErr != nil {
+					return gistErr
+				}
+				result["gist_url"] = url
+			}
+			if strings.TrimSpace(repo) != "" {
+				rp := repoPath
+				if rp == "" {
+					rp = filepath.Base(target)
+				}
+				if err := exporter.UploadRepoFile(cmd.Context(), repo, rp, target, ""); err != nil {
+					return err
+				}
+				result["repo"] = repo + "/" + rp
+			}
+			if strings.TrimSpace(s3Dest) != "" {
+				if err := exporter.UploadS3(cmd.Context(), target, s3Dest, r2Endpoint); err != nil {
+					return err
+				}
+				result["s3"] = s3Dest
+			}
+
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), result, func(w io.Writer) error {
+				fmt.Fprintf(w, "Exported %d bytes to %s\n", artifact.Bytes, target)
+				if v, ok := result["gist_url"]; ok {
+					fmt.Fprintf(w, "Gist: %v\n", v)
+				}
+				if v, ok := result["repo"]; ok {
+					fmt.Fprintf(w, "Repo: %v\n", v)
+				}
+				if v, ok := result["s3"]; ok {
+					fmt.Fprintf(w, "Uploaded to %v\n", v)
+				}
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&docID, "doc", "", "Document node id to export")
+	cmd.Flags().BoolVar(&bundle, "bundle", false, "Export all documents in the scope as one bundle")
+	cmd.Flags().StringVar(&scope, "scope", "project", "Scope for --bundle: project or global")
+	cmd.Flags().StringVar(&path, "path", ".", "Workspace path for project scope")
+	cmd.Flags().StringVar(&format, "out-format", "json", "Export content format: json (round-trippable via `raph import`) or md (human-readable only)")
+	cmd.Flags().StringVar(&out, "out", "", "Output file or directory (default: auto-named in cwd)")
+	cmd.Flags().BoolVar(&gist, "gist", false, "Publish the export as a GitHub gist")
+	cmd.Flags().BoolVar(&public, "public", false, "Make the gist public")
+	cmd.Flags().StringVar(&repo, "repo", "", "Publish to a GitHub repo (owner/name)")
+	cmd.Flags().StringVar(&repoPath, "repo-path", "", "Destination path within the repo")
+	cmd.Flags().StringVar(&s3Dest, "s3", "", "Upload to an S3/R2 destination (s3://bucket/key)")
+	cmd.Flags().StringVar(&r2Endpoint, "r2-endpoint", "", "Custom S3 endpoint URL (e.g. Cloudflare R2)")
+	return cmd
+}
+
+func newImportCmd() *cobra.Command {
+	var noEmbed bool
+
+	cmd := &cobra.Command{
+		Use:   "import <file|url|->",
+		Short: "Import a brain export (memory, rules, handoffs) into the local graph",
+		Long: "Load a raph brain export (from `raph export --bundle`) into the local graph. The source " +
+			"can be a local file, an http(s) URL (e.g. a raw JSON link), or `-` to read stdin. Memory and " +
+			"rules are restored under their original scope; handoffs are reconstructed (chunks and " +
+			"embeddings regenerate locally). Re-importing the same export updates records in place.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			data, err := fetchImportSource(cmd.Context(), args[0], cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
+			res, err := exporter.Import(cmd.Context(), store, cfg, data, noEmbed)
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), res, func(w io.Writer) error {
+				fmt.Fprintf(w, "Imported %d memory/rule record(s), %d handoff(s)", res.Memory, res.Handoffs)
+				if res.Skipped > 0 {
+					fmt.Fprintf(w, " (%d skipped)", res.Skipped)
+				}
+				fmt.Fprintln(w)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().BoolVar(&noEmbed, "no-embed", false, "Skip regenerating embeddings on import")
+	return cmd
+}
+
+// brainScopeTypes maps an export --scope selector to the memory scope types a
+// brain bundle should gather.
+func brainScopeTypes(scope string) ([]string, error) {
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "", "portable":
+		return []string{"global", "shared"}, nil
+	case "all":
+		return []string{"global", "shared", "project"}, nil
+	case "global":
+		return []string{"global"}, nil
+	case "shared":
+		return []string{"shared"}, nil
+	case "project":
+		return []string{"project"}, nil
+	default:
+		return nil, fmt.Errorf("unknown scope %q (use portable, all, global, shared, or project)", scope)
+	}
+}
+
+// fetchImportSource resolves an import argument to raw bytes: `-` reads stdin,
+// an existing path reads the file, and an http(s) URL is fetched directly.
+func fetchImportSource(ctx context.Context, source string, stdin io.Reader) ([]byte, error) {
+	source = strings.TrimSpace(source)
+	switch {
+	case source == "-":
+		return io.ReadAll(stdin)
+	case strings.HasPrefix(source, "http://"), strings.HasPrefix(source, "https://"):
+		if strings.HasPrefix(source, "http://") {
+			fmt.Fprintf(os.Stderr, "raph: warning: importing over plain http is susceptible to tampering; prefer https for %s\n", source)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+		if err != nil {
+			return nil, err
+		}
+		client := &http.Client{Timeout: 60 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("fetch %s: %w", source, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("fetch %s: status %s", source, resp.Status)
+		}
+		return io.ReadAll(io.LimitReader(resp.Body, 64<<20)) // 64MiB ceiling
+	default:
+		if _, statErr := os.Stat(source); statErr == nil {
+			return os.ReadFile(source)
+		}
+		return nil, fmt.Errorf("%q is not a readable file, http(s) URL, or `-` (stdin)", source)
+	}
 }
 
 func newCrawlCmd() *cobra.Command {
@@ -382,7 +1370,9 @@ func newStartCmd() *cobra.Command {
 			verbose.Printf("creating MCP server wrapper")
 			server := serverpkg.NewMCPServerWrapper(store, cfg)
 			verbose.Printf("starting MCP server over stdio")
-			return server.Run(context.Background())
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			return server.Run(ctx)
 		},
 	}
 }
@@ -420,7 +1410,9 @@ func newStudioCmd() *cobra.Command {
 			}
 			verbose.Printf("launching studio on host=%s port=%d", host, port)
 			fmt.Fprintf(out, "Starting raph Studio at http://%s:%d...\n", host, port)
-			return srv.Start()
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			return srv.Start(ctx)
 		},
 	}
 

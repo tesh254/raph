@@ -14,7 +14,9 @@ This repository now includes:
 - an MCP server in `internal/mcp`
 - a zero-dependency Studio UI in `internal/studio`
 - scoped durable memory with lifecycle metadata for agent preferences, facts, procedures, and project knowledge
-- codebase chunk indexing for non-Go files so README, docs, config, and other text assets are searchable alongside symbols
+- multi-language symbol extraction via a pure-Go tree-sitter runtime (Python, JS/JSX, TS/TSX, Rust, Elixir, Ruby, Java, C/C++, C#, PHP) producing function/type/global nodes and `USES` reference edges; Go uses `go/types` for type-accurate `USES`/`MUTATES` edges — so agents can see where globals are read and written instead of guessing
+- a two-tier cross-file resolution model. **Default (no install):** an import-aware fallback resolves references through import bindings (JS/TS/JSX/TSX relative imports, Python `from … import …`), so a symbol used in one file links to its declaration in another — pure Go, offline. **Opt-in ceiling (SCIP):** when a language's indexer is installed (`scip-typescript`, `scip-python`, `rust-analyzer`, `scip-ruby`, `scip-java`, `scip-clang`), raph runs it on a full index and links `USES`/`MUTATES` edges with go/types-level accuracy, superseding the fallback for that language. After indexing, `raph init` reports which languages got compiler-grade resolution and prints `raph code-intel install <language>` for any that could be upgraded. `raph code-intel install python` installs the resolver (re-run `raph init` after). The MCP `index_codebase` result carries the same as `scip_active` / `scip_suggestions` (each with an `agent_action` command) — **agents must ask the user for permission before installing, and if declined, hand the command to the user**; they never install unattended. Run `raph code-intel` for resolver status; disable the tier with `RAPH_NO_SCIP=1`
+- codebase chunk indexing for remaining non-code files so README, docs, config, and other text assets are searchable alongside symbols
 - GoReleaser releases for macOS, Linux, and Windows
 - verified POSIX and PowerShell installers
 - a dedicated Homebrew tap repository
@@ -161,7 +163,7 @@ raph --verbose start
 raph init            Scan a workspace and build graph relationships
 raph start           Start the MCP server over stdio
 raph studio          Launch the local graph explorer UI
-raph agents mcp setup Install or refresh project MCP config for supported coding agents
+raph agents mcp setup Install or refresh auto-detected project MCP config
 raph sync            Index and continuously synchronize a repository
 raph sync --status   Show the worker and registered repositories
 raph sync --remove   Unregister a repository and clean its graph data
@@ -173,6 +175,62 @@ raph config check    Validate the current config file
 raph update          Install the latest stable release
 raph version         Print version, commit, and build date
 ```
+
+### Agent commands
+
+These emit JSON automatically when called by an agent or through a pipe, and
+human-readable text in a terminal (override with `--format json|text`).
+
+```text
+raph code-intel      Show code-intelligence resolvers and their install state
+raph code-intel install <lang> Install a resolver (agents must ask the user first)
+raph search <query>  CLI-friendly graph search (--literal, --regex, --vector, --type, --global)
+raph mem set <text>  Create/update scoped memory (--scope project|shared|global)
+raph mem search <q>  Search memory in a scope
+raph rules add <r>   Add a rule (--scope global|project)
+raph rules list      List rules (--all for global + project)
+raph doc add <src>   Add a local document (--type architecture|handoff|reference|note)
+raph doc list        List documents (--type, --status)
+raph doc read <id>   Read a document; reading a handoff marks it used
+raph doc link <a> <b> Relate two nodes
+raph export --doc <id> Export a document/bundle; publish to gist/repo/S3/R2
+```
+
+`raph agents mcp setup --path . --dry-run` previews the opencode, Claude Code,
+Codex, Cursor, and Pi config files that would be created or refreshed. Run it
+without `--dry-run` to write project-scoped config for the supported agents on
+the machine.
+
+`raph search` gives agents a simple CLI fallback when the MCP server is not
+available. The flags follow familiar search ergonomics so agents can get useful
+graph results without learning a new query language: default mode is ranked
+keyword search; `--literal` performs exact substring search; `--regex` uses Go
+`regexp`; `--vector` runs semantic search over indexed graph nodes when
+embeddings are configured. Use `--format json` for the stable machine-readable
+interface.
+
+#### Code-intelligence resolver prerequisites
+
+`raph code-intel install` shells out to a package manager, so the matching runtime
+must already be on the machine. raph does **not** bundle these (they are large
+native/runtime programs in other languages; embedding them would bloat the
+binary past 1GB and require license review). Install the prerequisite once:
+
+| Language | Installs via | Requires |
+|----------|--------------|----------|
+| typescript / javascript | `npm i -g @sourcegraph/scip-typescript` | Node.js |
+| python | `pip install scip-python` (or npm) | Python+pip (or Node.js) |
+| rust | `rustup component add rust-analyzer` | rustup |
+| ruby | `gem install scip-ruby` | Ruby+gem |
+| java | coursier (`scip-java`) | JVM |
+| c / c++ | prebuilt release (`scip-clang`) | — (manual download) |
+
+If the prerequisite is missing, `raph code-intel install` reports exactly which tool
+to install first. Without any resolver a language still gets the bundled
+pure-Go import-aware cross-file resolver — only compiler-grade precision is lost.
+
+Documentation site: [tesh254/raph-docs](https://github.com/tesh254/raph-docs).
+Live dashboard: [tesh254/raph-studio](https://github.com/tesh254/raph-studio).
 
 ## Install from a release
 
@@ -315,7 +373,8 @@ GoReleaser builds these targets:
 - `windows/amd64`
 - `windows/arm64`
 
-Usage docs deploy from `docs/` to `https://raph.madebyknnls.com/`.
+Usage docs live in the separate [`tesh254/raph-docs`](https://github.com/tesh254/raph-docs)
+repository and deploy to `https://raph.madebyknnls.com/`.
 
 ## License
 

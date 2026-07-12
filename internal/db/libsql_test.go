@@ -172,3 +172,165 @@ func TestDeleteFileNodesRemovesGeneratedChildrenOnly(t *testing.T) {
 		t.Fatalf("unexpected graph after file cleanup: nodes=%+v edges=%+v", nodes, edges)
 	}
 }
+
+func newTestStore(t *testing.T) *LibSQLStore {
+	t.Helper()
+	rawDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &LibSQLStore{db: rawDB}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+func TestFTSKeywordSearchRanksAndPersistsProperties(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	nodes := []Node{
+		{ID: "a", Workspace: "ws", Domain: "code", Type: "func", Name: "ConnectDatabase", Content: "open a database connection pool", Properties: map[string]string{"doc_type": "architecture"}},
+		{ID: "b", Workspace: "ws", Domain: "code", Type: "func", Name: "ParseConfig", Content: "read configuration values from disk"},
+		{ID: "c", Workspace: "ws", Domain: "code", Type: "file", Name: "database.go", Content: "package db has database helpers and a connection wrapper"},
+	}
+	for _, n := range nodes {
+		if err := store.SaveNode(ctx, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := store.KeywordSearch(ctx, "database connection", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) < 2 {
+		t.Fatalf("expected >=2 matches for 'database connection', got %d: %+v", len(got), got)
+	}
+	// ParseConfig (no match) must not appear.
+	for _, n := range got {
+		if n.ID == "b" {
+			t.Fatalf("non-matching node leaked into results: %+v", got)
+		}
+	}
+
+	// Properties round-trip through SaveNode -> GetNodeByID.
+	a, err := store.GetNodeByID(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Prop("doc_type") != "architecture" {
+		t.Fatalf("properties not persisted: %+v", a.Properties)
+	}
+	if a.CreatedAt == "" || a.UpdatedAt == "" {
+		t.Fatalf("timestamps not set: created=%q updated=%q", a.CreatedAt, a.UpdatedAt)
+	}
+}
+
+func TestLexicalSearchLiteralSubstring(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.SaveNode(ctx, Node{ID: "x", Workspace: "ws", Domain: "code", Type: "func", Name: "handleRequest", Content: "func handleRequest(w http.ResponseWriter) {}"}); err != nil {
+		t.Fatal(err)
+	}
+	// Substring across an identifier — literal trigram match.
+	got, err := store.LexicalSearch(ctx, "ws", "ResponseWriter", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "x" {
+		t.Fatalf("literal lexical search failed: %+v", got)
+	}
+}
+
+func TestListNodesByPropertyAndSetProperties(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	for _, n := range []Node{
+		{ID: "h1", Workspace: "ws", Domain: "knowledge", Type: "doc", Name: "Handoff A", Content: "x", Properties: map[string]string{"doc_type": "handoff", "status": "fresh"}},
+		{ID: "d1", Workspace: "ws", Domain: "knowledge", Type: "doc", Name: "Arch", Content: "y", Properties: map[string]string{"doc_type": "architecture"}},
+	} {
+		if err := store.SaveNode(ctx, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := store.ListNodes(ctx, NodeFilter{Workspace: "ws", PropertyEquals: map[string]string{"doc_type": "handoff"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "h1" {
+		t.Fatalf("property filter failed: %+v", got)
+	}
+	if err := store.SetNodeProperties(ctx, "h1", map[string]string{"status": "used"}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := store.GetNodeByID(ctx, "h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Prop("status") != "used" || h.Prop("doc_type") != "handoff" {
+		t.Fatalf("set/merge properties failed: %+v", h.Properties)
+	}
+}
+
+func TestKeywordSearchUpdatesAfterContentChange(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	id := "n"
+	if err := store.SaveNode(ctx, Node{ID: id, Workspace: "ws", Domain: "code", Type: "file", Name: "f.go", Content: "alpha beta gamma"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveNode(ctx, Node{ID: id, Workspace: "ws", Domain: "code", Type: "file", Name: "f.go", Content: "delta epsilon zeta"}); err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.KeywordSearch(ctx, "alpha", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(old) != 0 {
+		t.Fatalf("stale FTS row served after update: %+v", old)
+	}
+	fresh, err := store.KeywordSearch(ctx, "epsilon", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh) != 1 {
+		t.Fatalf("updated FTS content not found: %+v", fresh)
+	}
+}
+
+func TestAccessAnalytics(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.SaveNode(ctx, Node{ID: "n1", Workspace: "ws", Domain: "code", Type: "func", Name: "Hot", Content: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := store.RecordAccess(ctx, "n1", "view", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.RecordAccess(ctx, "", "search", "database"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAccess(ctx, "", "search", "database"); err != nil {
+		t.Fatal(err)
+	}
+	a, err := store.Analytics(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.TotalEvents != 5 || a.Searches != 2 || a.UniqueNodes != 1 {
+		t.Fatalf("analytics totals wrong: %+v", a)
+	}
+	if len(a.TopNodes) != 1 || a.TopNodes[0].NodeID != "n1" || a.TopNodes[0].Count != 3 || a.TopNodes[0].Name != "Hot" {
+		t.Fatalf("top nodes wrong: %+v", a.TopNodes)
+	}
+	if len(a.TopSearches) != 1 || a.TopSearches[0].Query != "database" || a.TopSearches[0].Count != 2 {
+		t.Fatalf("top searches wrong: %+v", a.TopSearches)
+	}
+	if a.Last24h != 5 {
+		t.Fatalf("expected 5 events in last 24h, got %d", a.Last24h)
+	}
+}

@@ -131,8 +131,10 @@ func EnsureBaseLayout() (Paths, error) {
 	}
 
 	verbose.Printf("ensuring base layout base=%s data=%s", paths.BaseDir, paths.DataDir)
+	// 0700: ~/.raph holds the config (which may contain a literal API key) and
+	// the brain DB (private memory/rules) — keep it owner-only.
 	for _, dir := range []string{paths.BaseDir, paths.DataDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return Paths{}, fmt.Errorf("failed creating %s: %w", dir, err)
 		}
 	}
@@ -147,17 +149,18 @@ func WriteDefaultFiles(overwrite bool) (Paths, error) {
 	}
 
 	verbose.Printf("writing config files schema=%s config=%s overwrite=%t", paths.SchemaFile, paths.ConfigFile, overwrite)
-	if err := writeIfNeeded(paths.SchemaFile, DefaultSchemaJSON, overwrite); err != nil {
+	if err := writeIfNeeded(paths.SchemaFile, DefaultSchemaJSON, overwrite, 0o644); err != nil {
 		return Paths{}, err
 	}
-	if err := writeIfNeeded(paths.ConfigFile, DefaultConfigJSON, overwrite); err != nil {
+	// 0600: raph.json may hold a literal API key, so it must not be world-readable.
+	if err := writeIfNeeded(paths.ConfigFile, DefaultConfigJSON, overwrite, 0o600); err != nil {
 		return Paths{}, err
 	}
 
 	return paths, nil
 }
 
-func writeIfNeeded(path string, content string, overwrite bool) error {
+func writeIfNeeded(path string, content string, overwrite bool, perm os.FileMode) error {
 	if !overwrite {
 		if _, err := os.Stat(path); err == nil {
 			return nil
@@ -166,7 +169,7 @@ func writeIfNeeded(path string, content string, overwrite bool) error {
 		}
 	}
 
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), perm); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
@@ -190,6 +193,18 @@ func LoadConfig() (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(fileBytes, &cfg); err != nil {
 		return nil, fmt.Errorf("malformed JSON config: %w", err)
+	}
+
+	// If the config holds a literal API key (not a ${VAR} reference) yet is
+	// group/world-readable, tighten it to owner-only so the key doesn't leak on
+	// shared hosts.
+	if rawKey := strings.TrimSpace(cfg.Vector.Providers.OpenRouter.APIKey); rawKey != "" && !strings.Contains(rawKey, "$") {
+		if info, statErr := os.Stat(paths.ConfigFile); statErr == nil && info.Mode().Perm()&0o077 != 0 {
+			verbose.Printf("config %s holds a literal API key but is group/world-readable (%o); tightening to 0600", paths.ConfigFile, info.Mode().Perm())
+			if chmodErr := os.Chmod(paths.ConfigFile, 0o600); chmodErr != nil {
+				fmt.Fprintf(os.Stderr, "raph: warning: could not tighten permissions on %s (%v); it contains a literal API key\n", paths.ConfigFile, chmodErr)
+			}
+		}
 	}
 
 	cfg.resolveEnv()

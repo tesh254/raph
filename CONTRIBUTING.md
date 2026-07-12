@@ -96,4 +96,4 @@ git push origin v0.1.0
 ## Docs
 
 - Update `README.md` when commands, release behavior, or install flow changes
-- Update `docs/` when public usage docs or landing page content changes
+- Update the separate `tesh254/raph-docs` repository when public usage docs or landing page content changes

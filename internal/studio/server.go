@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -99,7 +101,9 @@ func (s *StudioServer) SetSeedURL(rawURL string) {
 	}
 }
 
-func (s *StudioServer) Start() error {
+// Start serves the studio UI until ctx is cancelled, then drains in-flight
+// requests with a bounded graceful shutdown.
+func (s *StudioServer) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/graph", s.handleGetGraph)
@@ -109,6 +113,9 @@ func (s *StudioServer) Start() error {
 	mux.HandleFunc("/api/search", s.handleSearch)
 	mux.HandleFunc("/api/neighbors", s.handleNeighbors)
 	mux.HandleFunc("/api/sqlite", s.handleSQLite)
+	mux.HandleFunc("/api/activity", s.handleActivity)
+	mux.HandleFunc("/api/stats", s.handleStats)
+	mux.HandleFunc("/api/analytics", s.handleAnalytics)
 	mux.HandleFunc("/api/actions/clear", s.handleClearDB)
 	mux.HandleFunc("/api/actions/init", s.handleInitDemo)
 
@@ -121,13 +128,30 @@ func (s *StudioServer) Start() error {
 	verbose.Printf("studio routes ready at %s", addr)
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           s.withSecurity(mux),
 		ReadHeaderTimeout: studioReadHeaderTimeout,
 		ReadTimeout:       studioReadTimeout,
 		WriteTimeout:      studioWriteTimeout,
 		IdleTimeout:       studioIdleTimeout,
 	}
-	return server.ListenAndServe()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		verbose.Printf("studio shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), studioWriteTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		return nil
+	}
 }
 
 func (s *StudioServer) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -145,13 +169,12 @@ func (s *StudioServer) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nodes, edges, err := s.store.GetAllGraphElements(r.Context())
+	// Lean read: content is capped in SQL and embeddings are never loaded — the
+	// graph view only needs a short preview per node.
+	nodes, edges, err := s.store.GraphElementsLean(r.Context(), 640)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-	for idx := range nodes {
-		nodes[idx].Content = previewContent(nodes[idx].Content, 640)
 	}
 	verbose.Printf("studio graph request served nodes=%d edges=%d", len(nodes), len(edges))
 	w.Header().Set("Content-Type", "application/json")
@@ -177,6 +200,7 @@ func (s *StudioServer) handleGetNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	_ = s.store.RecordAccess(r.Context(), id, "view", "")
 	verbose.Printf("studio node request id=%s", id)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(details)
@@ -249,6 +273,7 @@ func (s *StudioServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if req.Limit <= 0 {
 		req.Limit = 5
 	}
+	_ = s.store.RecordAccess(r.Context(), "", "search", query)
 
 	resp := SearchResponse{Mode: "keyword"}
 	verbose.Printf("studio search query=%q limit=%d", query, req.Limit)
@@ -302,6 +327,7 @@ func (s *StudioServer) handleNeighbors(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	_ = s.store.RecordAccess(r.Context(), req.NodeID, "neighbors", "")
 	verbose.Printf("studio neighbors node=%s nodes=%d edges=%d", req.NodeID, len(nodes), len(edges))
 
 	resp := NeighborResponse{Nodes: nodes, Edges: edges}
@@ -403,22 +429,222 @@ func (s *StudioServer) initDemoData(ctx context.Context) (InitDemoResponse, erro
 	}, nil
 }
 
+// withSecurity locks down the local studio server. The graph holds the user's
+// private memory, rules, handoffs and indexed source, and there is no auth, so
+// the browser threat model matters: any site the developer visits can reach a
+// loopback server. This middleware closes three holes that a reflected-origin,
+// permissive CORS policy left open:
+//
+//  1. DNS-rebinding — reject requests whose Host header isn't a loopback name
+//     (or the operator's explicitly-chosen --host).
+//  2. Cross-origin reads — only echo Access-Control-Allow-Origin for an
+//     allowlisted origin, so a foreign page can't read /api/sqlite etc.
+//  3. Cross-origin state changes (CSRF) — reject mutating requests carrying a
+//     non-allowlisted Origin, so a foreign page can't trigger ClearAll/delete.
+//
+// The hosted dashboard (a different origin) can be allowlisted explicitly via
+// RAPH_STUDIO_ALLOWED_ORIGINS (comma-separated) instead of reflecting everything.
+func (s *StudioServer) withSecurity(next http.Handler) http.Handler {
+	allowedHosts := s.allowedHosts()
+	extraOrigins := extraAllowedOrigins()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !hostAllowed(r.Host, allowedHosts) {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		originOK := origin != "" && s.originAllowed(origin, extraOrigins)
+		if originOK {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		}
+		if r.Method == http.MethodOptions {
+			if originOK {
+				w.WriteHeader(http.StatusNoContent)
+			} else {
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+			}
+			return
+		}
+
+		// A cross-origin page can issue a "simple" POST without a preflight, so
+		// CORS alone doesn't stop CSRF against the mutating endpoints. Reject any
+		// state-changing request that carries a foreign Origin.
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && origin != "" && !originOK {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// allowedHosts is the set of Host header values (host portion, no port) served.
+func (s *StudioServer) allowedHosts() map[string]struct{} {
+	hosts := map[string]struct{}{
+		"127.0.0.1": {},
+		"localhost": {},
+		"::1":       {},
+	}
+	if h := strings.ToLower(strings.TrimSpace(s.host)); h != "" {
+		hosts[h] = struct{}{}
+	}
+	return hosts
+}
+
+// hostedStudioOrigin is the deployed dashboard that legitimately reads a local
+// studio server cross-origin. Additional origins can be added via
+// RAPH_STUDIO_ALLOWED_ORIGINS.
+const hostedStudioOrigin = "https://raph-studio.pages.dev"
+
+// originAllowed reports whether a browser origin may read/mutate. It permits any
+// loopback origin regardless of port — those come from the developer's own
+// machine (the studio UI on :4545, or a dev build of the dashboard on some other
+// localhost port), and a drive-by attacker's page is never served from loopback.
+// The Host-header guard independently blocks DNS-rebinding. The hosted dashboard
+// and any RAPH_STUDIO_ALLOWED_ORIGINS entries are also permitted.
+func (s *StudioServer) originAllowed(origin string, extra map[string]struct{}) bool {
+	lower := strings.ToLower(origin)
+	if lower == hostedStudioOrigin {
+		return true
+	}
+	if _, ok := extra[lower]; ok {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if isLoopbackHost(u.Hostname()) {
+		return true
+	}
+	// An operator serving on an explicit non-loopback --host may reach it from a
+	// same-host origin.
+	if h := strings.ToLower(strings.TrimSpace(s.host)); h != "" && h != defaultStudioHost && strings.EqualFold(u.Hostname(), h) {
+		return true
+	}
+	return false
+}
+
+func isLoopbackHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// extraAllowedOrigins parses RAPH_STUDIO_ALLOWED_ORIGINS (comma-separated).
+func extraAllowedOrigins() map[string]struct{} {
+	origins := map[string]struct{}{}
+	for _, o := range strings.Split(os.Getenv("RAPH_STUDIO_ALLOWED_ORIGINS"), ",") {
+		if o = strings.ToLower(strings.TrimSpace(o)); o != "" {
+			origins[o] = struct{}{}
+		}
+	}
+	return origins
+}
+
+func hostAllowed(hostHeader string, allowed map[string]struct{}) bool {
+	h := hostHeader
+	if host, _, err := net.SplitHostPort(hostHeader); err == nil {
+		h = host
+	}
+	h = strings.ToLower(strings.TrimSpace(strings.Trim(h, "[]")))
+	if h == "" {
+		return false
+	}
+	_, ok := allowed[h]
+	return ok
+}
+
+// ActivityItem is a recently changed node, surfaced as a near-realtime feed of
+// what agents and the sync worker are doing.
+type ActivityItem struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Domain    string `json:"domain"`
+	Name      string `json:"name"`
+	URL       string `json:"url,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	DocType   string `json:"doc_type,omitempty"`
+	Status    string `json:"status,omitempty"`
+}
+
+func (s *StudioServer) handleActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 40
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 200 {
+			limit = parsed
+		}
+	}
+	nodes, err := s.store.ListNodes(r.Context(), db.NodeFilter{Limit: limit})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	items := make([]ActivityItem, 0, len(nodes))
+	for _, n := range nodes {
+		items = append(items, ActivityItem{
+			ID: n.ID, Type: n.Type, Domain: n.Domain, Name: n.Name, URL: n.URL,
+			UpdatedAt: n.UpdatedAt, DocType: n.Prop("doc_type"), Status: n.Prop("status"),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *StudioServer) handleAnalytics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 10
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 50 {
+			limit = parsed
+		}
+	}
+	analytics, err := s.store.Analytics(r.Context(), limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, analytics)
+}
+
+func (s *StudioServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Counts come from SQL aggregates, not a full node/edge scan, so polling this
+	// on a large graph stays cheap.
+	stats, err := s.store.GraphStats(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nodes":      stats.Nodes,
+		"edges":      stats.Edges,
+		"workspaces": stats.Workspaces,
+		"by_type":    stats.ByType,
+		"by_domain":  stats.ByDomain,
+	})
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func previewContent(content string, maxRunes int) string {
-	if maxRunes <= 0 || len(content) == 0 {
-		return ""
-	}
-	count := 0
-	for idx := range content {
-		if count == maxRunes {
-			return content[:idx] + "\n..."
-		}
-		count++
-	}
-	return content
 }

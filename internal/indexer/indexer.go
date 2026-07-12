@@ -30,9 +30,18 @@ const (
 
 type Stats struct {
 	FilesIndexed      int `json:"files_indexed"`
+	FilesSkipped      int `json:"files_skipped,omitempty"`
 	NodesSaved        int `json:"nodes_saved"`
 	EdgesSaved        int `json:"edges_saved"`
 	EmbeddingsCreated int `json:"embeddings_created"`
+
+	// Resolution tier reporting (full index only). SCIPActive lists languages
+	// resolved compiler-grade this run; SCIPSuggestions lists languages present
+	// whose compiler-grade indexer is not installed, with install commands — so
+	// `raph init` (and the MCP index tool) can prompt the user or let an agent
+	// install the tool itself and re-index.
+	SCIPActive      []string         `json:"scip_active,omitempty"`
+	SCIPSuggestions []SCIPSuggestion `json:"scip_suggestions,omitempty"`
 }
 
 type Indexer struct {
@@ -42,6 +51,11 @@ type Indexer struct {
 	workspaceID    string
 	projectID      string
 	skipEmbeddings bool
+
+	// SCIP tier state (set per full index run).
+	scipCovered map[string]bool     // gotreesitter grammar names a SCIP tool will resolve
+	seenExts    map[string]bool     // file extensions encountered this run
+	lineCache   map[string][]string // relPath -> source lines, for SCIP name extraction
 }
 
 func New(store db.GraphStore, cfg *config.Config, root string, skipEmbeddings bool) (*Indexer, error) {
@@ -70,6 +84,14 @@ func New(store db.GraphStore, cfg *config.Config, root string, skipEmbeddings bo
 func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	var stats Stats
 
+	// Detect compiler-backed SCIP indexers up front: for any language they
+	// cover, the tree-sitter usage pass is skipped so the authoritative SCIP
+	// edges are the only USES/MUTATES emitted for that language.
+	scipToolsAvailable, scipCovered := detectSCIPTools()
+	i.scipCovered = scipCovered
+	i.seenExts = map[string]bool{}
+	i.lineCache = map[string][]string{}
+
 	verbose.Printf("clearing existing workspace graph workspace=%s", i.workspaceID)
 	if err := i.store.DeleteWorkspace(ctx, i.workspaceID); err != nil {
 		return stats, fmt.Errorf("clear existing workspace graph: %w", err)
@@ -91,7 +113,15 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 			return nil
 		}
 		if err := i.indexFile(ctx, path, &stats); err != nil {
-			return fmt.Errorf("index %s: %w", path, err)
+			// Cancellation aborts the whole run; a single bad file (unreadable,
+			// transient embedding failure) must not — the workspace graph was
+			// already cleared, so aborting would leave it gutted. Skip and count.
+			if ctx.Err() != nil {
+				return fmt.Errorf("index %s: %w", path, err)
+			}
+			verbose.Printf("skipping file=%s: %v", path, err)
+			stats.FilesSkipped++
+			return nil
 		}
 		return nil
 	})
@@ -99,8 +129,38 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 		return stats, err
 	}
 
+	// Type-accurate Go reference linking (globals, calls, type usage). Runs on
+	// full index only; best-effort so a non-building tree never blocks indexing.
+	i.linkGoUsages(ctx, &stats)
+
+	// (relPath, name) -> node index, built once from the now-complete node set
+	// and shared by both reference-linking passes below (each previously rebuilt
+	// it from a full ListNodes scan).
+	nodeIdx := i.buildSymbolIndex(ctx)
+
+	// Compiler-grade reference linking for other languages, when an external
+	// SCIP indexer is installed. Cross-file accurate; best-effort.
+	i.runSCIP(ctx, scipToolsAvailable, nodeIdx, &stats)
+	i.lineCache = nil // only SCIP name extraction needs it; release the source cache
+
+	// Import-aware cross-file fallback for tree-sitter languages a SCIP tool did
+	// not cover — resolves references through imports without any external tool.
+	i.linkImportAwareUsages(ctx, nodeIdx, &stats)
+
+	// Report which languages got compiler-grade resolution and which could, so
+	// the CLI/MCP can nudge the user (or agent) to install the missing tool.
+	stats.SCIPActive, stats.SCIPSuggestions = i.scipReport(scipToolsAvailable)
+
 	verbose.Printf("walk complete files=%d nodes=%d edges=%d embeddings=%d", stats.FilesIndexed, stats.NodesSaved, stats.EdgesSaved, stats.EmbeddingsCreated)
 	return stats, nil
+}
+
+// fileEdgeStore is the optional capability the incremental sync uses to preserve
+// cross-file references across a single-file re-index. Stores that don't
+// implement it (e.g. test mocks) simply lose the preservation, not correctness.
+type fileEdgeStore interface {
+	FileNodeIDs(ctx context.Context, workspace, relativePath string) ([]string, error)
+	IncomingFileEdges(ctx context.Context, workspace, relativePath string) ([]db.Edge, error)
 }
 
 func (i *Indexer) SyncFile(ctx context.Context, path string) (Stats, error) {
@@ -114,6 +174,22 @@ func (i *Indexer) SyncFile(ctx context.Context, path string) (Stats, error) {
 		return stats, fmt.Errorf("file %s is outside workspace %s", absPath, i.root)
 	}
 	relPath = filepath.ToSlash(relPath)
+
+	// Snapshot the edges other files make INTO this one before we delete it.
+	// DeleteFileNodes cascades those edges away (edges FK ON DELETE CASCADE), but
+	// re-indexing recreates this file's symbol nodes with the SAME deterministic
+	// ids — so any incoming edge whose target symbol still exists can be restored.
+	// Without this, every save silently strips the reference graph pointing at the
+	// saved file until a full reindex.
+	fes, canPreserve := i.store.(fileEdgeStore)
+	var incoming []db.Edge
+	if canPreserve {
+		if incoming, err = fes.IncomingFileEdges(ctx, i.workspaceID, relPath); err != nil {
+			verbose.Printf("sync: snapshot incoming edges for %s failed: %v", relPath, err)
+			incoming = nil
+		}
+	}
+
 	if err := i.store.DeleteFileNodes(ctx, i.workspaceID, relPath); err != nil {
 		return stats, fmt.Errorf("clear existing file graph: %w", err)
 	}
@@ -127,6 +203,27 @@ func (i *Indexer) SyncFile(ctx context.Context, path string) (Stats, error) {
 	}
 	if err := i.indexFile(ctx, absPath, &stats); err != nil {
 		return stats, err
+	}
+
+	// Restore incoming edges whose target symbol survived the re-index. Symbols
+	// removed from the file won't be in the new id set, so their edges stay gone.
+	if canPreserve && len(incoming) > 0 {
+		newIDs, err := fes.FileNodeIDs(ctx, i.workspaceID, relPath)
+		if err != nil {
+			verbose.Printf("sync: reload node ids for %s failed: %v", relPath, err)
+		} else {
+			present := make(map[string]struct{}, len(newIDs))
+			for _, id := range newIDs {
+				present[id] = struct{}{}
+			}
+			survivors := incoming[:0]
+			for _, e := range incoming {
+				if _, ok := present[e.TargetID]; ok {
+					survivors = append(survivors, e)
+				}
+			}
+			stats.EdgesSaved += i.saveEdges(ctx, survivors)
+		}
 	}
 	return stats, nil
 }
@@ -199,6 +296,9 @@ func (i *Indexer) indexFile(ctx context.Context, path string, stats *Stats) erro
 		return err
 	}
 	relPath = filepath.ToSlash(relPath)
+	if i.seenExts != nil {
+		i.seenExts[strings.ToLower(filepath.Ext(relPath))] = true
+	}
 	verbose.Printf("indexing file=%s domain=%s size=%d", relPath, detectDomain(relPath), info.Size())
 
 	contentBytes, err := os.ReadFile(path)
@@ -243,7 +343,11 @@ func (i *Indexer) indexFile(ctx context.Context, path string, stats *Stats) erro
 			return err
 		}
 	default:
-		if err := i.indexFallbackChunks(ctx, relPath, fileNode.ID, content, stats); err != nil {
+		if isTreeSitterFile(relPath) {
+			if err := i.indexTreeSitterFile(ctx, relPath, fileNode.ID, content, stats); err != nil {
+				return err
+			}
+		} else if err := i.indexFallbackChunks(ctx, relPath, fileNode.ID, content, stats); err != nil {
 			return err
 		}
 	}
@@ -295,69 +399,99 @@ func (i *Indexer) indexGoFile(ctx context.Context, relPath string, parentID stri
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
 			name := d.Name.Name
+			key := name
+			if d.Recv != nil && len(d.Recv.List) > 0 {
+				// Qualify methods by receiver type so e.g. two String() methods
+				// on different types don't collide and agents can tell them apart.
+				recv := receiverTypeName(d.Recv.List[0].Type)
+				if recv != "" {
+					name = "(" + recv + ") " + name
+					key = recv + "." + d.Name.Name
+				}
+			}
 			snippet := snippetForNode(fset, content, d.Pos(), d.End())
-			node := db.Node{
-				ID:        i.nodeID("func", relPath+"::"+name),
-				Workspace: i.workspaceID,
-				Domain:    "code",
-				Type:      "func",
-				Name:      name,
-				Content:   truncateRunes(snippet, maxStoredContent),
-				URL:       relPath + "#" + name,
-				Path:      i.root,
-			}
-			embedding, err := i.embed(ctx, name+"\n\n"+snippet, stats)
-			if err != nil {
-				return fmt.Errorf("embed function %q: %w", name, err)
-			}
-			if len(embedding) > 0 {
-				node.Embedding = embedding
-			}
-			if err := i.store.SaveNode(ctx, node); err != nil {
+			if err := i.saveSymbol(ctx, "func", relPath, key, name, snippet, parentID, nil, stats); err != nil {
 				return err
 			}
-			if err := i.store.SaveEdge(ctx, db.Edge{SourceID: parentID, TargetID: node.ID, Type: "DECLARES"}); err != nil {
-				return err
-			}
-			stats.NodesSaved++
-			stats.EdgesSaved++
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
-				ts, ok := spec.(*ast.TypeSpec)
-				if !ok {
-					continue
+				switch s := spec.(type) {
+				case *ast.TypeSpec:
+					name := s.Name.Name
+					snippet := snippetForNode(fset, content, s.Pos(), s.End())
+					if err := i.saveSymbol(ctx, "type", relPath, name, name, snippet, parentID, nil, stats); err != nil {
+						return err
+					}
+				case *ast.ValueSpec:
+					// Package-level var/const — the globals agents most often
+					// hallucinate about. Index each name as its own node.
+					kind := "var"
+					if d.Tok == token.CONST {
+						kind = "const"
+					}
+					snippet := snippetForNode(fset, content, s.Pos(), s.End())
+					for _, ident := range s.Names {
+						if ident.Name == "_" {
+							continue
+						}
+						props := map[string]string{"global": "true", "decl": kind}
+						if err := i.saveSymbol(ctx, kind, relPath, ident.Name, ident.Name, snippet, parentID, props, stats); err != nil {
+							return err
+						}
+					}
 				}
-				name := ts.Name.Name
-				snippet := snippetForNode(fset, content, ts.Pos(), ts.End())
-				node := db.Node{
-					ID:        i.nodeID("type", relPath+"::"+name),
-					Workspace: i.workspaceID,
-					Domain:    "code",
-					Type:      "type",
-					Name:      name,
-					Content:   truncateRunes(snippet, maxStoredContent),
-					URL:       relPath + "#" + name,
-					Path:      i.root,
-				}
-				embedding, err := i.embed(ctx, name+"\n\n"+snippet, stats)
-				if err != nil {
-					return fmt.Errorf("embed type %q: %w", name, err)
-				}
-				if len(embedding) > 0 {
-					node.Embedding = embedding
-				}
-				if err := i.store.SaveNode(ctx, node); err != nil {
-					return err
-				}
-				if err := i.store.SaveEdge(ctx, db.Edge{SourceID: parentID, TargetID: node.ID, Type: "DECLARES"}); err != nil {
-					return err
-				}
-				stats.NodesSaved++
-				stats.EdgesSaved++
 			}
 		}
 	}
 	return nil
+}
+
+// saveSymbol persists a code symbol node (with optional embedding and
+// properties) and links it to its declaring file.
+func (i *Indexer) saveSymbol(ctx context.Context, kind, relPath, key, name, snippet, parentID string, props map[string]string, stats *Stats) error {
+	node := db.Node{
+		ID:         i.nodeID(kind, relPath+"::"+key),
+		Workspace:  i.workspaceID,
+		Domain:     "code",
+		Type:       kind,
+		Name:       name,
+		Content:    truncateRunes(snippet, maxStoredContent),
+		URL:        relPath + "#" + key,
+		Path:       i.root,
+		Properties: props,
+	}
+	embedding, err := i.embed(ctx, name+"\n\n"+snippet, stats)
+	if err != nil {
+		return fmt.Errorf("embed %s %q: %w", kind, name, err)
+	}
+	if len(embedding) > 0 {
+		node.Embedding = embedding
+	}
+	if err := i.store.SaveNode(ctx, node); err != nil {
+		return err
+	}
+	if err := i.store.SaveEdge(ctx, db.Edge{SourceID: parentID, TargetID: node.ID, Type: "DECLARES"}); err != nil {
+		return err
+	}
+	stats.NodesSaved++
+	stats.EdgesSaved++
+	return nil
+}
+
+// receiverTypeName extracts the base type name from a method receiver, e.g.
+// *Indexer -> "Indexer".
+func receiverTypeName(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.StarExpr:
+		return receiverTypeName(t.X)
+	case *ast.Ident:
+		return t.Name
+	case *ast.IndexExpr: // generic receiver: T[P]
+		return receiverTypeName(t.X)
+	case *ast.IndexListExpr:
+		return receiverTypeName(t.X)
+	}
+	return ""
 }
 
 func (i *Indexer) indexFallbackChunks(ctx context.Context, relPath string, parentID string, content string, stats *Stats) error {
@@ -410,6 +544,47 @@ func (i *Indexer) embed(ctx context.Context, text string, stats *Stats) ([]float
 	return embedding, nil
 }
 
+// edgeFlushChunk bounds how many edges a streaming pass accumulates before
+// flushing, so a large workspace doesn't hold every pending edge in memory.
+const edgeFlushChunk = 4096
+
+// edgeBatcher is the optional batch-write capability some stores expose. The
+// indexer uses it when present (one transaction for an edge-heavy pass) and
+// falls back to per-edge SaveEdge otherwise, so mock stores need no changes.
+type edgeBatcher interface {
+	SaveEdges(ctx context.Context, edges []db.Edge) error
+}
+
+// saveEdges persists a batch of edges and returns how many were written. It
+// prefers the store's batch path (single transaction); on its failure, or when
+// the store lacks one, it writes them one at a time counting successes.
+func (i *Indexer) saveEdges(ctx context.Context, edges []db.Edge) int {
+	if len(edges) == 0 {
+		return 0
+	}
+	if b, ok := i.store.(edgeBatcher); ok {
+		err := b.SaveEdges(ctx, edges)
+		if err == nil {
+			return len(edges)
+		}
+		// Batch failed (and rolled back atomically): fall through to per-edge.
+		verbose.Printf("edge batch of %d failed, retrying per-edge: %v", len(edges), err)
+	}
+	n := 0
+	var lastErr error
+	for _, e := range edges {
+		if err := i.store.SaveEdge(ctx, e); err == nil {
+			n++
+		} else {
+			lastErr = err
+		}
+	}
+	if n < len(edges) {
+		verbose.Printf("edge save incomplete: wrote %d/%d (last error: %v)", n, len(edges), lastErr)
+	}
+	return n
+}
+
 func (i *Indexer) nodeID(kind string, raw string) string {
 	h := sha1.Sum([]byte(i.workspaceID + "|" + kind + "|" + raw))
 	return kind + ":" + hex.EncodeToString(h[:])
@@ -447,6 +622,18 @@ func gitRoot(root string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
+// ShouldSkipDir reports whether a directory name should be excluded from
+// indexing and filesystem watching. Exported for the syncer's watcher.
+func ShouldSkipDir(name string) bool {
+	return shouldSkipDir(name)
+}
+
+// IndexablePath reports whether a file path is eligible for indexing. Exported
+// for the syncer's watcher to filter filesystem events.
+func IndexablePath(path string) bool {
+	return shouldIndexFile(path)
+}
+
 func shouldSkipDir(name string) bool {
 	switch name {
 	case ".git", ".svn", ".hg", "node_modules", "vendor", "dist", "build", ".next", ".turbo", ".raph":
@@ -457,18 +644,16 @@ func shouldSkipDir(name string) bool {
 }
 
 func shouldIndexFile(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
 	case ".go", ".md", ".markdown", ".txt", ".rst", ".json", ".yaml", ".yml":
 		return true
-	default:
-		return false
 	}
+	return isTreeSitterFile(path)
 }
 
 func detectDomain(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".go":
-		return "code"
 	case ".md", ".markdown", ".rst", ".txt":
 		return "documentation"
 	default:

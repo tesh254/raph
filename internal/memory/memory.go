@@ -110,6 +110,23 @@ func Store(ctx context.Context, store db.GraphStore, cfg *config.Config, input S
 	return StoreOutput{Record: record, Embedded: embedded}, nil
 }
 
+// Put creates a memory if absent, or updates it if one already exists for the
+// same scope/knowledge/key. It gives CLI and agents idempotent write semantics.
+func Put(ctx context.Context, store db.GraphStore, cfg *config.Config, input StoreInput) (StoreOutput, error) {
+	prepared, err := prepareInput(input.ScopeType, input.ScopeID, input.KnowledgeType, input.Title, input.Content, input.Source, input.WriterID, input.Tags, input.MemoryKey)
+	if err != nil {
+		return StoreOutput{}, err
+	}
+	_, err = store.GetMemoryRecordByKey(ctx, prepared.ScopeType, prepared.ScopeID, prepared.KnowledgeType, prepared.MemoryKey)
+	if err == nil {
+		return Update(ctx, store, cfg, UpdateInput(input))
+	}
+	if err != sql.ErrNoRows {
+		return StoreOutput{}, fmt.Errorf("load existing memory: %w", err)
+	}
+	return Store(ctx, store, cfg, input)
+}
+
 func Update(ctx context.Context, store db.GraphStore, cfg *config.Config, input UpdateInput) (StoreOutput, error) {
 	prepared, err := prepareInput(input.ScopeType, input.ScopeID, input.KnowledgeType, input.Title, input.Content, input.Source, input.WriterID, input.Tags, input.MemoryKey)
 	if err != nil {
@@ -124,22 +141,8 @@ func Update(ctx context.Context, store db.GraphStore, cfg *config.Config, input 
 		return StoreOutput{}, fmt.Errorf("load memory: %w", err)
 	}
 
-	if err := store.InsertMemoryRevision(ctx, db.MemoryRevision{
-		NodeID:           existing.Node.ID,
-		Revision:         existing.Revision,
-		Title:            existing.Node.Name,
-		Content:          existing.Node.Content,
-		Source:           existing.Source,
-		WriterID:         existing.WriterID,
-		LifecycleState:   existing.LifecycleState,
-		NormalizedTags:   existing.NormalizedTags,
-		DisplayTags:      existing.DisplayTags,
-		CreatedAt:        existing.UpdatedAt,
-		DeprecatedReason: existing.DeprecatedMessage,
-	}); err != nil {
-		return StoreOutput{}, fmt.Errorf("save memory revision: %w", err)
-	}
-
+	// Apply the new field values; the revision bump and history append are done
+	// atomically inside commitMemory from the current stored state.
 	existing.Node.Name = prepared.Title
 	existing.Node.Content = prepared.Content
 	existing.Source = prepared.Source
@@ -147,7 +150,6 @@ func Update(ctx context.Context, store db.GraphStore, cfg *config.Config, input 
 	existing.NormalizedTags = prepared.NormalizedTags
 	existing.DisplayTags = prepared.DisplayTags
 	existing.UpdatedAt = nowUTC()
-	existing.Revision++
 	existing.LifecycleState = lifecycleActive
 	existing.ReplacedByNodeID = ""
 	existing.DeprecatedMessage = ""
@@ -169,22 +171,6 @@ func Deprecate(ctx context.Context, store db.GraphStore, input DeprecateInput) (
 	if err != nil {
 		return db.MemoryRecord{}, err
 	}
-	if err := store.InsertMemoryRevision(ctx, db.MemoryRevision{
-		NodeID:           record.Node.ID,
-		Revision:         record.Revision,
-		Title:            record.Node.Name,
-		Content:          record.Node.Content,
-		Source:           record.Source,
-		WriterID:         record.WriterID,
-		LifecycleState:   record.LifecycleState,
-		NormalizedTags:   record.NormalizedTags,
-		DisplayTags:      record.DisplayTags,
-		CreatedAt:        record.UpdatedAt,
-		DeprecatedReason: record.DeprecatedMessage,
-	}); err != nil {
-		return db.MemoryRecord{}, fmt.Errorf("save memory revision: %w", err)
-	}
-
 	state := lifecycleDeprecated
 	replacement := strings.TrimSpace(input.ReplacementNodeID)
 	if replacement != "" {
@@ -194,8 +180,9 @@ func Deprecate(ctx context.Context, store db.GraphStore, input DeprecateInput) (
 	record.ReplacedByNodeID = replacement
 	record.DeprecatedMessage = strings.TrimSpace(input.Reason)
 	record.UpdatedAt = nowUTC()
-	record.Revision++
-	if err := store.UpsertMemoryRecord(ctx, record); err != nil {
+	// Lifecycle change only: the revision bump and history append happen atomically
+	// inside commitMemory; the content node is unchanged so it isn't re-saved.
+	if _, err := commitMemory(ctx, store, record, false); err != nil {
 		return db.MemoryRecord{}, fmt.Errorf("update lifecycle: %w", err)
 	}
 	return store.GetMemoryRecord(ctx, record.Node.ID)
@@ -285,6 +272,68 @@ func prepareInput(scopeType string, scopeID string, knowledgeType string, title 
 	}, nil
 }
 
+// memoryCommitter is the optional store capability that persists a memory write
+// in a single transaction, assigning the revision under the write lock. Stores
+// without it (e.g. test mocks) fall back to sequential, non-atomic writes.
+type memoryCommitter interface {
+	CommitMemoryRecord(ctx context.Context, record db.MemoryRecord, saveNode bool) (db.MemoryRecord, error)
+}
+
+// commitMemory persists a memory write, returning the record with its assigned
+// revision. The caller supplies the desired end state (fields + node identity);
+// the revision read-modify-write and revision-history append are decided here
+// from the CURRENT stored state, not from a value the caller read earlier — so
+// concurrent writers can't both land the same revision. With a transactional
+// store this happens atomically inside one write-locked transaction; the
+// fallback (test mocks) does the same steps sequentially.
+func commitMemory(ctx context.Context, store db.GraphStore, record db.MemoryRecord, saveNode bool) (db.MemoryRecord, error) {
+	if c, ok := store.(memoryCommitter); ok {
+		return c.CommitMemoryRecord(ctx, record, saveNode)
+	}
+	current, cerr := store.GetMemoryRecord(ctx, record.Node.ID)
+	switch {
+	case cerr == nil:
+		if err := store.InsertMemoryRevision(ctx, revisionSnapshot(current)); err != nil {
+			return db.MemoryRecord{}, fmt.Errorf("save memory revision: %w", err)
+		}
+		record.Revision = current.Revision + 1
+		record.CreatedAt = current.CreatedAt
+	case cerr == sql.ErrNoRows:
+		record.Revision = 1
+	default:
+		return db.MemoryRecord{}, fmt.Errorf("load current memory: %w", cerr)
+	}
+	if saveNode {
+		if err := store.SaveNode(ctx, record.Node); err != nil {
+			return db.MemoryRecord{}, fmt.Errorf("save memory node: %w", err)
+		}
+	}
+	if err := store.UpsertMemoryRecord(ctx, record); err != nil {
+		return db.MemoryRecord{}, fmt.Errorf("save memory metadata: %w", err)
+	}
+	return record, nil
+}
+
+// revisionSnapshot captures a record's current state as a history row.
+func revisionSnapshot(r db.MemoryRecord) db.MemoryRevision {
+	return db.MemoryRevision{
+		NodeID:           r.Node.ID,
+		Revision:         r.Revision,
+		Title:            r.Node.Name,
+		Content:          r.Node.Content,
+		Source:           r.Source,
+		WriterID:         r.WriterID,
+		LifecycleState:   r.LifecycleState,
+		NormalizedTags:   r.NormalizedTags,
+		DisplayTags:      r.DisplayTags,
+		CreatedAt:        r.UpdatedAt,
+		DeprecatedReason: r.DeprecatedMessage,
+	}
+}
+
+// upsertRecord embeds (outside any transaction — it's a network call) then
+// commits the node + record atomically, returning the record with its assigned
+// revision.
 func upsertRecord(ctx context.Context, store db.GraphStore, cfg *config.Config, record db.MemoryRecord) (db.MemoryRecord, bool, error) {
 	if cfg != nil && cfg.HasEmbeddingProvider() {
 		embedding, err := config.GenerateEmbedding(ctx, cfg, record.Node.Name+"\n\n"+record.Node.Content)
@@ -294,14 +343,13 @@ func upsertRecord(ctx context.Context, store db.GraphStore, cfg *config.Config, 
 		record.Node.Embedding = embedding
 		record.Node.EmbeddingLength = len(embedding)
 	}
-	if err := store.SaveNode(ctx, record.Node); err != nil {
-		return db.MemoryRecord{}, false, fmt.Errorf("save memory node: %w", err)
+	embeddingLength := record.Node.EmbeddingLength
+	committed, err := commitMemory(ctx, store, record, true)
+	if err != nil {
+		return db.MemoryRecord{}, false, err
 	}
-	if err := store.UpsertMemoryRecord(ctx, record); err != nil {
-		return db.MemoryRecord{}, false, fmt.Errorf("save memory metadata: %w", err)
-	}
-	record.Node.Embedding = nil
-	return record, record.Node.EmbeddingLength > 0, nil
+	committed.Node.Embedding = nil
+	return committed, embeddingLength > 0, nil
 }
 
 func normalizeTags(tags []string) ([]string, []string) {

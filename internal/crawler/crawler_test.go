@@ -35,6 +35,13 @@ func (*crawlStore) KeywordSearch(context.Context, string, int) ([]db.Node, error
 func (*crawlStore) KeywordSearchWorkspace(context.Context, string, string, int) ([]db.Node, error) {
 	return nil, nil
 }
+func (*crawlStore) LexicalSearch(context.Context, string, string, int) ([]db.Node, error) {
+	return nil, nil
+}
+func (*crawlStore) ListNodes(context.Context, db.NodeFilter) ([]db.Node, error) { return nil, nil }
+func (*crawlStore) SetNodeProperties(context.Context, string, map[string]string) error {
+	return nil
+}
 func (*crawlStore) GetNodeByID(context.Context, string) (db.Node, error) { return db.Node{}, nil }
 func (*crawlStore) GetNeighbors(context.Context, string) ([]db.Node, []db.Edge, error) {
 	return nil, nil, nil
@@ -68,6 +75,7 @@ func (*crawlStore) ClearAll(context.Context) error                              
 func (*crawlStore) Close() error                                                  { return nil }
 
 func TestSinglePageCrawlerDoesNotFollowLinksAndEmbedsChunks(t *testing.T) {
+	t.Setenv("RAPH_CRAWL_ALLOW_PRIVATE", "1") // httptest binds loopback
 	var linkedPageRequests int
 	pageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/linked" {
@@ -122,6 +130,7 @@ func TestSinglePageCrawlerDoesNotFollowLinksAndEmbedsChunks(t *testing.T) {
 
 func TestSinglePageCrawlerPersistsEmbeddingsForLookup(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("RAPH_CRAWL_ALLOW_PRIVATE", "1") // httptest binds loopback
 
 	pageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -181,6 +190,7 @@ func TestSinglePageCrawlerPersistsEmbeddingsForLookup(t *testing.T) {
 }
 
 func TestCrawlerWorksWithoutEmbeddingConfig(t *testing.T) {
+	t.Setenv("RAPH_CRAWL_ALLOW_PRIVATE", "1") // httptest binds loopback
 	pageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(`<html><head><title>Page</title></head><body><main><h1>Intro</h1><p>Keyword-only content.</p></main></body></html>`))

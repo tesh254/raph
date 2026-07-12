@@ -6,12 +6,16 @@ require (
 	aead.dev/minisign v0.2.0
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.1
 	github.com/PuerkitoBio/goquery v1.12.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gocolly/colly/v2 v2.3.0
 	github.com/minio/selfupdate v0.6.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
+	github.com/odvcencio/gotreesitter v0.20.3
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/mod v0.37.0
-	golang.org/x/sys v0.43.0
+	golang.org/x/sys v0.46.0
+	golang.org/x/tools v0.46.0
+	google.golang.org/protobuf v1.36.10
 	modernc.org/sqlite v1.51.0
 )
 
@@ -38,14 +42,15 @@ require (
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
+	github.com/stretchr/testify v1.8.4 // indirect
 	github.com/temoto/robotstxt v1.1.2 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	golang.org/x/crypto v0.50.0 // indirect
-	golang.org/x/net v0.53.0 // indirect
+	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/text v0.36.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

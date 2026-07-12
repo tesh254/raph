@@ -1,0 +1,13 @@
+{
+  "name": "raph",
+  "description": "Local-first graph-vector brain for coding agents: ripgrep-style code/doc search, scoped memory, rules, local documents and handoffs, and realtime codebase sync over MCP.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Erick Wachira"
+  },
+  "homepage": "https://github.com/tesh254/raph",
+  "repository": "https://github.com/tesh254/raph",
+  "license": "MIT",
+  "keywords": ["raph", "mcp", "memory", "search", "knowledge-graph", "rules"],
+  "skills": "./skills/"
+}

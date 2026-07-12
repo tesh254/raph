@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"raph/internal/db"
@@ -15,6 +16,7 @@ import (
 
 func TestStudioInitAndClearActions(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("RAPH_CRAWL_ALLOW_PRIVATE", "1") // init crawls a loopback httptest server
 
 	store, err := db.InitStorage()
 	if err != nil {
@@ -217,5 +219,144 @@ func TestStudioSQLiteEndpointCapsRequestedLimit(t *testing.T) {
 		if table.Name == "nodes" && len(table.Rows) != 1000 {
 			t.Fatalf("expected nodes table capped to 1000 rows, got %d", len(table.Rows))
 		}
+	}
+}
+
+func TestStudioActivityAndStats(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, n := range []db.Node{
+		{ID: "f1", Workspace: "ws", Domain: "code", Type: "func", Name: "A", Content: "a"},
+		{ID: "d1", Workspace: "ws", Domain: "knowledge", Type: "doc", Name: "Doc", Content: "d", Properties: map[string]string{"doc_type": "handoff", "status": "fresh"}},
+	} {
+		if err := store.SaveNode(ctx, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := NewStudioServer(store, "", 0)
+
+	actRec := httptest.NewRecorder()
+	srv.handleActivity(actRec, httptest.NewRequest(http.MethodGet, "/api/activity", nil))
+	if actRec.Code != http.StatusOK {
+		t.Fatalf("activity status %d", actRec.Code)
+	}
+	var act struct {
+		Items []ActivityItem `json:"items"`
+	}
+	if err := json.Unmarshal(actRec.Body.Bytes(), &act); err != nil {
+		t.Fatal(err)
+	}
+	if len(act.Items) != 2 {
+		t.Fatalf("expected 2 activity items, got %d", len(act.Items))
+	}
+
+	statsRec := httptest.NewRecorder()
+	srv.handleStats(statsRec, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
+	if statsRec.Code != http.StatusOK {
+		t.Fatalf("stats status %d", statsRec.Code)
+	}
+	if !strings.Contains(statsRec.Body.String(), "\"nodes\": 2") && !strings.Contains(statsRec.Body.String(), "\"nodes\":2") {
+		t.Fatalf("stats missing node count: %s", statsRec.Body.String())
+	}
+}
+
+func TestStudioCORSPreflight(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	srv := NewStudioServer(store, "127.0.0.1", 4545)
+	handler := srv.withSecurity(http.NewServeMux())
+
+	// Allowlisted hosted dashboard: preflight succeeds and echoes the origin.
+	req := httptest.NewRequest(http.MethodOptions, "/api/graph", nil)
+	req.Host = "127.0.0.1:4545"
+	req.Header.Set("Origin", hostedStudioOrigin)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight status %d", rec.Code)
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != hostedStudioOrigin {
+		t.Fatalf("missing CORS origin header: %v", rec.Header())
+	}
+}
+
+func TestStudioAllowsLoopbackDevOrigin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	srv := NewStudioServer(store, "127.0.0.1", 4545)
+	handler := srv.withSecurity(http.NewServeMux())
+
+	// A dev build of the dashboard runs on a different loopback port (e.g. :3000)
+	// and must be allowed to read the local server.
+	req := httptest.NewRequest(http.MethodGet, "/api/graph", nil)
+	req.Host = "127.0.0.1:4545"
+	req.Header.Set("Origin", "http://localhost:3000")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
+		t.Fatalf("loopback dev origin not allowed: %v", rec.Header())
+	}
+}
+
+func TestStudioRejectsForeignOrigin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	srv := NewStudioServer(store, "127.0.0.1", 4545)
+	handler := srv.withSecurity(http.NewServeMux())
+
+	// A foreign origin must not have the response exposed to it (no ACAO) and a
+	// mutating request from it must be refused outright.
+	get := httptest.NewRequest(http.MethodGet, "/api/sqlite", nil)
+	get.Host = "127.0.0.1:4545"
+	get.Header.Set("Origin", "https://evil.example")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, get)
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("leaked ACAO to foreign origin: %v", rec.Header())
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "/api/actions/clear", nil)
+	post.Host = "127.0.0.1:4545"
+	post.Header.Set("Origin", "https://evil.example")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, post)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for cross-origin mutation, got %d", rec.Code)
+	}
+}
+
+func TestStudioRejectsRebindingHost(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	srv := NewStudioServer(store, "127.0.0.1", 4545)
+	handler := srv.withSecurity(http.NewServeMux())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sqlite", nil)
+	req.Host = "attacker.example"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for foreign Host header, got %d", rec.Code)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"raph/internal/config"
 	"raph/internal/verbose"
@@ -17,16 +18,27 @@ import (
 )
 
 type Node struct {
-	ID              string    `json:"id"`
-	Workspace       string    `json:"-"`
-	Domain          string    `json:"domain"`
-	Type            string    `json:"type"`
-	Name            string    `json:"name"`
-	Content         string    `json:"content"`
-	URL             string    `json:"url,omitempty"`
-	Path            string    `json:"path,omitempty"`
-	Embedding       []float32 `json:"-"`
-	EmbeddingLength int       `json:"embedding_length,omitempty"`
+	ID              string            `json:"id"`
+	Workspace       string            `json:"-"`
+	Domain          string            `json:"domain"`
+	Type            string            `json:"type"`
+	Name            string            `json:"name"`
+	Content         string            `json:"content"`
+	URL             string            `json:"url,omitempty"`
+	Path            string            `json:"path,omitempty"`
+	Properties      map[string]string `json:"properties,omitempty"`
+	CreatedAt       string            `json:"created_at,omitempty"`
+	UpdatedAt       string            `json:"updated_at,omitempty"`
+	Embedding       []float32         `json:"-"`
+	EmbeddingLength int               `json:"embedding_length,omitempty"`
+}
+
+// Prop returns a node property value (empty if unset).
+func (n Node) Prop(key string) string {
+	if n.Properties == nil {
+		return ""
+	}
+	return n.Properties[key]
 }
 
 type Edge struct {
@@ -107,6 +119,9 @@ type GraphStore interface {
 	VectorSearchWorkspace(ctx context.Context, workspace string, embedding []float32, limit int) ([]Node, error)
 	KeywordSearch(ctx context.Context, query string, limit int) ([]Node, error)
 	KeywordSearchWorkspace(ctx context.Context, workspace string, query string, limit int) ([]Node, error)
+	LexicalSearch(ctx context.Context, workspace string, query string, limit int) ([]Node, error)
+	ListNodes(ctx context.Context, filter NodeFilter) ([]Node, error)
+	SetNodeProperties(ctx context.Context, id string, props map[string]string) error
 	GetNodeByID(ctx context.Context, id string) (Node, error)
 	GetNeighbors(ctx context.Context, nodeID string) ([]Node, []Edge, error)
 	GetAllGraphElements(ctx context.Context) ([]Node, []Edge, error)
@@ -144,7 +159,19 @@ func InitStorage() (*LibSQLStore, error) {
 
 	dbFile := filepath.Join(paths.DataDir, "brain.db")
 	verbose.Printf("opening database file=%s", dbFile)
-	db, err := sql.Open("sqlite", dbFile)
+	// Encode the per-connection PRAGMAs in the DSN so EVERY connection the pool
+	// hands out has them — not just the one that happened to run migrate(). If
+	// database/sql discards and reopens a connection, a DSN-less open would come
+	// back with busy_timeout=0 (instant SQLITE_BUSY under concurrency) and
+	// foreign_keys=OFF (cascade deletes silently stop firing).
+	//
+	// _txlock=immediate makes every transaction acquire the write lock at BEGIN.
+	// That's what lets the memory revision read-modify-write be race-free across
+	// processes: a second writer blocks at BEGIN (up to busy_timeout) and then
+	// reads the first writer's committed revision, instead of both reading the
+	// same revision and one clobbering the other (or hitting a busy-snapshot).
+	dsn := dbFile + "?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open embedded database: %w", err)
 	}
@@ -251,6 +278,29 @@ func (s *LibSQLStore) migrate() error {
 			FOREIGN KEY (corpus_id) REFERENCES web_corpora(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_web_crawl_versions_corpus ON web_crawl_versions (corpus_id, created_at DESC);`,
+		// Access events power the studio analytics view: what nodes agents and
+		// users read, and what they searched for.
+		`CREATE TABLE IF NOT EXISTS access_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			node_id TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL,
+			query TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_access_events_node ON access_events (node_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_access_events_created ON access_events (created_at DESC);`,
+		// Trigram FTS5 index over searchable node text. Serves both ranked keyword
+		// (bm25) and literal substring (rg-like) lookups without scanning every row.
+		`CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+			node_id UNINDEXED,
+			workspace UNINDEXED,
+			domain UNINDEXED,
+			type UNINDEXED,
+			name,
+			content,
+			path UNINDEXED,
+			tokenize = 'trigram'
+		);`,
 	}
 
 	for _, q := range queries {
@@ -258,19 +308,23 @@ func (s *LibSQLStore) migrate() error {
 			return fmt.Errorf("migration execution failure: %w", err)
 		}
 	}
-	if err := s.ensureNodePathColumn(); err != nil {
+	if err := s.ensureNodeColumns(); err != nil {
+		return err
+	}
+	if err := s.backfillNodesFTS(); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *LibSQLStore) ensureNodePathColumn() error {
+// ensureNodeColumns adds columns introduced after the original schema. SQLite
+// ALTER TABLE ADD COLUMN is cheap and idempotent here because we inspect first.
+func (s *LibSQLStore) ensureNodeColumns() error {
+	existing := map[string]bool{}
 	rows, err := s.db.Query(`PRAGMA table_info(nodes)`)
 	if err != nil {
 		return fmt.Errorf("inspect nodes schema: %w", err)
 	}
-
-	found := false
 	for rows.Next() {
 		var cid int
 		var name string
@@ -279,12 +333,10 @@ func (s *LibSQLStore) ensureNodePathColumn() error {
 		var defaultValue any
 		var primaryKey int
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
 			return fmt.Errorf("scan nodes schema: %w", err)
 		}
-		if name == "path" {
-			found = true
-			break
-		}
+		existing[name] = true
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -293,11 +345,43 @@ func (s *LibSQLStore) ensureNodePathColumn() error {
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close nodes schema rows: %w", err)
 	}
-	if found {
-		return nil
+
+	additions := []struct {
+		name string
+		ddl  string
+	}{
+		{"path", `ALTER TABLE nodes ADD COLUMN path TEXT NOT NULL DEFAULT ''`},
+		{"properties_json", `ALTER TABLE nodes ADD COLUMN properties_json TEXT NOT NULL DEFAULT '{}'`},
+		{"created_at", `ALTER TABLE nodes ADD COLUMN created_at TEXT NOT NULL DEFAULT ''`},
+		{"updated_at", `ALTER TABLE nodes ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`},
 	}
-	if _, err := s.db.Exec(`ALTER TABLE nodes ADD COLUMN path TEXT NOT NULL DEFAULT ''`); err != nil {
-		return fmt.Errorf("add nodes path column: %w", err)
+	for _, add := range additions {
+		if existing[add.name] {
+			continue
+		}
+		if _, err := s.db.Exec(add.ddl); err != nil {
+			// A second raph process migrating the same fresh DB concurrently may
+			// have added the column between our PRAGMA read and this ALTER; that's
+			// benign, not a startup failure.
+			if strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+				continue
+			}
+			return fmt.Errorf("add nodes column %s: %w", add.name, err)
+		}
+	}
+	return nil
+}
+
+// backfillNodesFTS seeds the FTS index from existing rows the first time the
+// virtual table is created on a pre-existing database. The WHERE NOT EXISTS
+// guard makes it a single atomic statement, so two processes migrating the same
+// DB concurrently can't both insert and double the index (busy_timeout, set via
+// the DSN, serializes their writes).
+func (s *LibSQLStore) backfillNodesFTS() error {
+	if _, err := s.db.Exec(`INSERT INTO nodes_fts (node_id, workspace, domain, type, name, content, path)
+		SELECT id, workspace, domain, type, name, content, COALESCE(path, '') FROM nodes
+		WHERE NOT EXISTS (SELECT 1 FROM nodes_fts)`); err != nil {
+		return fmt.Errorf("backfill nodes_fts: %w", err)
 	}
 	return nil
 }
@@ -407,14 +491,42 @@ func stringifySQLiteValue(value any) string {
 	}
 }
 
+// execer is satisfied by both *sql.DB and *sql.Tx, so a write body can run
+// either standalone (autocommit) or inside a caller's transaction.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 func (s *LibSQLStore) SaveNode(ctx context.Context, node Node) error {
+	// The node row and its FTS index must move together — a crash between them
+	// would leave a node invisible to search (or a stale FTS row) that the
+	// count(*)==0 backfill can never repair. One transaction keeps them in sync.
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		return saveNodeExec(ctx, tx, node)
+	})
+}
+
+// saveNodeExec upserts a node row and its FTS index using the given executor.
+func saveNodeExec(ctx context.Context, e execer, node Node) error {
 	embeddingJSON, err := json.Marshal(node.Embedding)
 	if err != nil {
 		return fmt.Errorf("marshal embedding: %w", err)
 	}
+	propertiesJSON, err := marshalProperties(node.Properties)
+	if err != nil {
+		return fmt.Errorf("marshal properties: %w", err)
+	}
+	now := node.UpdatedAt
+	if strings.TrimSpace(now) == "" {
+		now = nowTimestamp()
+	}
+	createdAt := node.CreatedAt
+	if strings.TrimSpace(createdAt) == "" {
+		createdAt = now
+	}
 
-	query := `INSERT INTO nodes (id, workspace, domain, type, name, content, url, path, embedding_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	query := `INSERT INTO nodes (id, workspace, domain, type, name, content, url, path, properties_json, created_at, updated_at, embedding_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			workspace = excluded.workspace,
 			domain = excluded.domain,
@@ -423,16 +535,88 @@ func (s *LibSQLStore) SaveNode(ctx context.Context, node Node) error {
 			content = excluded.content,
 			url = excluded.url,
 			path = excluded.path,
+			properties_json = excluded.properties_json,
+			created_at = CASE WHEN nodes.created_at = '' THEN excluded.created_at ELSE nodes.created_at END,
+			updated_at = excluded.updated_at,
 			embedding_json = excluded.embedding_json;`
 
-	_, err = s.db.ExecContext(ctx, query, node.ID, node.Workspace, node.Domain, node.Type, node.Name, node.Content, node.URL, node.Path, string(embeddingJSON))
-	return err
+	if _, err := e.ExecContext(ctx, query, node.ID, node.Workspace, node.Domain, node.Type, node.Name, node.Content, node.URL, node.Path, propertiesJSON, createdAt, now, string(embeddingJSON)); err != nil {
+		return err
+	}
+	return syncNodeFTSTx(ctx, e, node)
+}
+
+// syncNodeFTSTx keeps the trigram FTS index in lockstep with a node row, using
+// the caller's executor.
+func syncNodeFTSTx(ctx context.Context, e execer, node Node) error {
+	if _, err := e.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, node.ID); err != nil {
+		return fmt.Errorf("clear fts row: %w", err)
+	}
+	_, err := e.ExecContext(ctx, `INSERT INTO nodes_fts (node_id, workspace, domain, type, name, content, path)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		node.ID, node.Workspace, node.Domain, node.Type, node.Name, node.Content, node.Path)
+	if err != nil {
+		return fmt.Errorf("index fts row: %w", err)
+	}
+	return nil
 }
 
 func (s *LibSQLStore) SaveEdge(ctx context.Context, edge Edge) error {
 	query := `INSERT INTO edges (source_id, target_id, type) VALUES (?, ?, ?) ON CONFLICT DO NOTHING;`
 	_, err := s.db.ExecContext(ctx, query, edge.SourceID, edge.TargetID, edge.Type)
 	return err
+}
+
+// SaveEdges persists many edges in a single transaction. Because the store runs
+// on one connection in WAL mode, the per-edge autocommit fsync dominates the
+// cost of edge-heavy index passes; batching collapses thousands of commits into
+// one. It is intentionally NOT part of the GraphStore interface — callers detect
+// it via an optional-capability type assertion and fall back to SaveEdge.
+func (s *LibSQLStore) SaveEdges(ctx context.Context, edges []Edge) error {
+	if len(edges) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO edges (source_id, target_id, type) VALUES (?, ?, ?) ON CONFLICT DO NOTHING;`)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for _, edge := range edges {
+		if _, err := stmt.ExecContext(ctx, edge.SourceID, edge.TargetID, edge.Type); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// withTx runs fn inside a single transaction, rolling back on any error (or
+// panic) and committing otherwise. It exists so multi-statement writes are
+// atomic: an interrupt or mid-sequence failure can't leave the graph with a
+// node but no FTS row, orphaned edges, or a half-applied delete.
+func (s *LibSQLStore) withTx(ctx context.Context, fn func(tx *sql.Tx) error) (err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if err = fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *LibSQLStore) VectorSearch(ctx context.Context, queryVector []float32, limit int) ([]Node, error) {
@@ -451,13 +635,16 @@ func (s *LibSQLStore) vectorSearch(ctx context.Context, workspace string, queryV
 		return nil, nil
 	}
 
-	query := `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), embedding_json FROM nodes`
+	// Only scan rows that actually carry an embedding — skipping the (often
+	// numerous) embedding-less code nodes at the SQL layer avoids loading their
+	// content and attempting to decode an empty vector for every query.
+	query := `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), embedding_json FROM nodes WHERE embedding_json IS NOT NULL AND embedding_json <> '' AND embedding_json <> '[]'`
 	var rows *sql.Rows
 	var err error
 	if workspace == "" {
 		rows, err = s.db.QueryContext(ctx, query)
 	} else {
-		rows, err = s.db.QueryContext(ctx, query+` WHERE workspace = ?`, workspace)
+		rows, err = s.db.QueryContext(ctx, query+` AND workspace = ?`, workspace)
 	}
 	if err != nil {
 		return nil, err
@@ -489,7 +676,11 @@ func (s *LibSQLStore) vectorSearch(ctx context.Context, workspace string, queryV
 		if math.IsNaN(score) || score <= 0 {
 			continue
 		}
+		n.Embedding = nil // scored — drop the vector so it doesn't sit in memory
 		ranked = append(ranked, rankedNode{node: n, score: score})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	sort.Slice(ranked, func(i, j int) bool {
@@ -519,92 +710,269 @@ func (s *LibSQLStore) KeywordSearchWorkspace(ctx context.Context, workspace stri
 	return s.keywordSearch(ctx, strings.TrimSpace(workspace), query, limit)
 }
 
+const nodeColumns = `id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), COALESCE(properties_json, '{}'), COALESCE(created_at, ''), COALESCE(updated_at, ''), COALESCE(embedding_json, '[]')`
+
+// scanNode reads a full node row (including properties and timestamps) selected
+// with the nodeColumns column list.
+func scanNode(rows interface{ Scan(...any) error }) (Node, error) {
+	var n Node
+	var propertiesJSON string
+	var embeddingJSON string
+	if err := rows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &propertiesJSON, &n.CreatedAt, &n.UpdatedAt, &embeddingJSON); err != nil {
+		return Node{}, err
+	}
+	n.Properties = unmarshalProperties(propertiesJSON)
+	n.EmbeddingLength = embeddingLength(embeddingJSON)
+	return n, nil
+}
+
 func (s *LibSQLStore) keywordSearch(ctx context.Context, workspace string, query string, limit int) ([]Node, error) {
 	if limit <= 0 {
 		limit = 5
 	}
-	query = strings.TrimSpace(strings.ToLower(query))
+	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, nil
 	}
 
-	sqlQuery := `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), COALESCE(embedding_json, '[]') FROM nodes`
-	var rows *sql.Rows
-	var err error
-	if workspace == "" {
-		rows, err = s.db.QueryContext(ctx, sqlQuery)
-	} else {
-		rows, err = s.db.QueryContext(ctx, sqlQuery+` WHERE workspace = ?`, workspace)
+	// Primary path: trigram FTS with bm25 ranking. AND of query terms.
+	if match := buildFTSMatch(query); match != "" {
+		nodes, err := s.ftsSearch(ctx, workspace, match, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(nodes) > 0 {
+			return nodes, nil
+		}
 	}
+	// Fallback for very short queries (trigram needs >=3 chars) or empty FTS.
+	return s.likeSearch(ctx, workspace, query, limit)
+}
+
+// LexicalSearch performs a literal substring match (rg-style) over indexed node
+// text using the trigram index, ranked by bm25.
+func (s *LibSQLStore) LexicalSearch(ctx context.Context, workspace string, query string, limit int) ([]Node, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	if len([]rune(query)) >= 3 {
+		nodes, err := s.ftsSearch(ctx, strings.TrimSpace(workspace), `"`+escapeFTS(query)+`"`, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(nodes) > 0 {
+			return nodes, nil
+		}
+	}
+	return s.likeSearch(ctx, strings.TrimSpace(workspace), query, limit)
+}
+
+func (s *LibSQLStore) ftsSearch(ctx context.Context, workspace string, match string, limit int) ([]Node, error) {
+	query := `SELECT n.id, n.workspace, n.domain, n.type, n.name, n.content, COALESCE(n.url, ''), COALESCE(n.path, ''), COALESCE(n.properties_json, '{}'), COALESCE(n.created_at, ''), COALESCE(n.updated_at, ''), COALESCE(n.embedding_json, '[]'), bm25(nodes_fts) AS score
+		FROM nodes_fts JOIN nodes n ON n.id = nodes_fts.node_id
+		WHERE nodes_fts MATCH ?`
+	args := []any{match}
+	if workspace != "" {
+		query += ` AND nodes_fts.workspace = ?`
+		args = append(args, workspace)
+	}
+	query += ` ORDER BY score ASC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	terms := strings.Fields(query)
-	type rankedNode struct {
-		node  Node
-		score int
-	}
-	var ranked []rankedNode
-
+	var results []Node
 	for rows.Next() {
 		var n Node
+		var propertiesJSON string
 		var embeddingJSON string
-		if err := rows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &embeddingJSON); err != nil {
+		var score float64
+		if err := rows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &propertiesJSON, &n.CreatedAt, &n.UpdatedAt, &embeddingJSON, &score); err != nil {
 			return nil, err
 		}
+		n.Properties = unmarshalProperties(propertiesJSON)
 		n.EmbeddingLength = embeddingLength(embeddingJSON)
+		results = append(results, n)
+	}
+	return results, rows.Err()
+}
 
-		name := strings.ToLower(n.Name)
-		content := strings.ToLower(n.Content)
-		score := 0
-		if strings.Contains(name, query) {
-			score += 10
+// likeSearch is the substring fallback used when the trigram index cannot serve
+// a query (e.g. patterns shorter than three characters).
+func (s *LibSQLStore) likeSearch(ctx context.Context, workspace string, query string, limit int) ([]Node, error) {
+	like := "%" + strings.ToLower(query) + "%"
+	sqlQuery := `SELECT ` + nodeColumns + ` FROM nodes WHERE (LOWER(name) LIKE ? OR LOWER(content) LIKE ?)`
+	args := []any{like, like}
+	if workspace != "" {
+		sqlQuery += ` AND workspace = ?`
+		args = append(args, workspace)
+	}
+	sqlQuery += ` ORDER BY updated_at DESC, id ASC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []Node
+	for rows.Next() {
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, err
 		}
-		if strings.Contains(content, query) {
-			score += 5
+		results = append(results, n)
+	}
+	return results, rows.Err()
+}
+
+// buildFTSMatch turns a free-text query into a trigram FTS5 MATCH expression by
+// AND-ing each term of length >= 3. Returns "" when no term qualifies.
+func buildFTSMatch(query string) string {
+	terms := strings.Fields(query)
+	parts := make([]string, 0, len(terms))
+	for _, term := range terms {
+		if len([]rune(term)) < 3 {
+			continue
 		}
-		for _, term := range terms {
-			if strings.Contains(name, term) {
-				score += 3
+		parts = append(parts, `"`+escapeFTS(term)+`"`)
+	}
+	return strings.Join(parts, " ")
+}
+
+func escapeFTS(value string) string {
+	return strings.ReplaceAll(value, `"`, `""`)
+}
+
+// NodeFilter selects nodes structurally (without text search) for listings such
+// as docs, rules, and handoffs.
+type NodeFilter struct {
+	Workspace      string
+	Domain         string
+	Types          []string
+	PropertyEquals map[string]string
+	Query          string
+	Limit          int
+	// Lean selects only id/type/name/url and leaves content, properties, and
+	// embeddings empty. Use it for large listings (e.g. the indexer's symbol
+	// index) that never touch the heavy columns, to avoid pulling every node's
+	// content and embedding JSON into memory.
+	Lean bool
+}
+
+func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	selectCols := nodeColumns
+	if filter.Lean {
+		selectCols = `id, type, name, COALESCE(url, '')`
+	}
+	sqlQuery := `SELECT ` + selectCols + ` FROM nodes`
+	var where []string
+	var args []any
+	if ws := strings.TrimSpace(filter.Workspace); ws != "" {
+		where = append(where, `workspace = ?`)
+		args = append(args, ws)
+	}
+	if d := strings.TrimSpace(filter.Domain); d != "" {
+		where = append(where, `domain = ?`)
+		args = append(args, d)
+	}
+	if len(filter.Types) > 0 {
+		placeholders := make([]string, 0, len(filter.Types))
+		for _, t := range filter.Types {
+			t = strings.TrimSpace(t)
+			if t == "" {
+				continue
 			}
-			if strings.Contains(content, term) {
-				score += 1
-			}
+			placeholders = append(placeholders, "?")
+			args = append(args, t)
 		}
-		if score > 0 {
-			ranked = append(ranked, rankedNode{node: n, score: score})
+		if len(placeholders) > 0 {
+			where = append(where, `type IN (`+strings.Join(placeholders, ", ")+`)`)
 		}
 	}
+	for key, value := range filter.PropertyEquals {
+		where = append(where, `json_extract(properties_json, '$.'||?) = ?`)
+		args = append(args, key, value)
+	}
+	if q := strings.TrimSpace(strings.ToLower(filter.Query)); q != "" {
+		where = append(where, `(LOWER(name) LIKE ? OR LOWER(content) LIKE ?)`)
+		like := "%" + q + "%"
+		args = append(args, like, like)
+	}
+	if len(where) > 0 {
+		sqlQuery += ` WHERE ` + strings.Join(where, ` AND `)
+	}
+	sqlQuery += ` ORDER BY updated_at DESC, id ASC LIMIT ?`
+	args = append(args, limit)
 
-	sort.Slice(ranked, func(i, j int) bool {
-		if ranked[i].score == ranked[j].score {
-			return ranked[i].node.ID < ranked[j].node.ID
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []Node
+	for rows.Next() {
+		if filter.Lean {
+			var n Node
+			if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.URL); err != nil {
+				return nil, err
+			}
+			results = append(results, n)
+			continue
 		}
-		return ranked[i].score > ranked[j].score
+		n, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, n)
+	}
+	return results, rows.Err()
+}
+
+// SetNodeProperties merges properties into an existing node and bumps its
+// updated_at timestamp. Existing keys not present in props are preserved.
+func (s *LibSQLStore) SetNodeProperties(ctx context.Context, id string, props map[string]string) error {
+	// Read-modify-write must be serialized under the write lock, or two concurrent
+	// property merges on the same node (e.g. a handoff claim vs another writer)
+	// can read the same JSON and clobber each other's keys.
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		var current string
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(properties_json, '{}') FROM nodes WHERE id = ?`, id).Scan(&current); err != nil {
+			return err
+		}
+		merged := unmarshalProperties(current)
+		if merged == nil {
+			merged = map[string]string{}
+		}
+		for k, v := range props {
+			merged[k] = v
+		}
+		encoded, err := marshalProperties(merged)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE nodes SET properties_json = ?, updated_at = ? WHERE id = ?`, encoded, nowTimestamp(), id)
+		return err
 	})
-
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
-	}
-
-	results := make([]Node, 0, len(ranked))
-	for _, item := range ranked {
-		results = append(results, item.node)
-	}
-	return results, nil
 }
 
 func (s *LibSQLStore) GetNodeByID(ctx context.Context, id string) (Node, error) {
-	var n Node
-	var embeddingJSON string
-	err := s.db.QueryRowContext(ctx, `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), COALESCE(embedding_json, '[]') FROM nodes WHERE id = ?`, id).
-		Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &embeddingJSON)
+	n, err := scanNode(s.db.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM nodes WHERE id = ?`, id))
 	if err != nil {
 		return Node{}, err
 	}
-	n.EmbeddingLength = embeddingLength(embeddingJSON)
 	return n, nil
 }
 
@@ -708,11 +1076,22 @@ func (s *LibSQLStore) GetNeighbors(ctx context.Context, nodeID string) ([]Node, 
 			edges = append(edges, e)
 		}
 	}
-	return nodes, edges, nil
+	return nodes, edges, rows.Err()
 }
 
-func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, error) {
-	nodeRows, err := s.db.QueryContext(ctx, `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), COALESCE(embedding_json, '[]') FROM nodes ORDER BY domain, type, name`)
+// GraphElementsLean returns the whole graph without loading embeddings, and
+// with node content capped to contentLimit bytes in SQL (0 = no content). It
+// exists so the studio graph/stats views don't pull every node's full content
+// and parse every embedding JSON just to render a summary. Not on the
+// GraphStore interface — callers detect it via a type assertion and fall back
+// to GetAllGraphElements.
+func (s *LibSQLStore) GraphElementsLean(ctx context.Context, contentLimit int) ([]Node, []Edge, error) {
+	if contentLimit < 0 {
+		contentLimit = 0
+	}
+	nodeRows, err := s.db.QueryContext(ctx,
+		`SELECT id, workspace, domain, type, name, substr(content, 1, ?), COALESCE(url, ''), COALESCE(path, '') FROM nodes ORDER BY domain, type, name`,
+		contentLimit)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -721,12 +1100,13 @@ func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, 
 	var nodes []Node
 	for nodeRows.Next() {
 		var n Node
-		var embeddingJSON string
-		if err := nodeRows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &embeddingJSON); err != nil {
+		if err := nodeRows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path); err != nil {
 			return nil, nil, err
 		}
-		n.EmbeddingLength = embeddingLength(embeddingJSON)
 		nodes = append(nodes, n)
+	}
+	if err := nodeRows.Err(); err != nil {
+		return nil, nil, err
 	}
 
 	edgeRows, err := s.db.QueryContext(ctx, `SELECT source_id, target_id, type FROM edges ORDER BY source_id, target_id, type`)
@@ -743,10 +1123,113 @@ func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, 
 		}
 		edges = append(edges, e)
 	}
-	return nodes, edges, nil
+	return nodes, edges, edgeRows.Err()
+}
+
+// GraphStats holds aggregate graph counts for the studio stats view.
+type GraphStats struct {
+	Nodes      int            `json:"nodes"`
+	Edges      int            `json:"edges"`
+	Workspaces int            `json:"workspaces"`
+	ByType     map[string]int `json:"by_type"`
+	ByDomain   map[string]int `json:"by_domain"`
+}
+
+// GraphStats computes counts with SQL aggregates instead of materializing every
+// node/edge in memory, so a dashboard polling /api/stats on a large graph stays
+// cheap. The four queries run in one transaction so they observe a single
+// database snapshot — otherwise a concurrent write could make the counts
+// internally inconsistent within a response (e.g. sum(ByType) != sum(ByDomain)).
+func (s *LibSQLStore) GraphStats(ctx context.Context) (GraphStats, error) {
+	stats := GraphStats{ByType: map[string]int{}, ByDomain: map[string]int{}}
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		typeRows, err := tx.QueryContext(ctx, `SELECT type, COUNT(*) FROM nodes GROUP BY type`)
+		if err != nil {
+			return err
+		}
+		defer typeRows.Close()
+		for typeRows.Next() {
+			var t string
+			var n int
+			if err := typeRows.Scan(&t, &n); err != nil {
+				return err
+			}
+			stats.ByType[t] = n
+			stats.Nodes += n
+		}
+		if err := typeRows.Err(); err != nil {
+			return err
+		}
+
+		domainRows, err := tx.QueryContext(ctx, `SELECT domain, COUNT(*) FROM nodes GROUP BY domain`)
+		if err != nil {
+			return err
+		}
+		defer domainRows.Close()
+		for domainRows.Next() {
+			var d string
+			var n int
+			if err := domainRows.Scan(&d, &n); err != nil {
+				return err
+			}
+			stats.ByDomain[d] = n
+		}
+		if err := domainRows.Err(); err != nil {
+			return err
+		}
+
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM edges`).Scan(&stats.Edges); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `SELECT COUNT(DISTINCT workspace) FROM nodes WHERE TRIM(workspace) <> ''`).Scan(&stats.Workspaces)
+	})
+	if err != nil {
+		return GraphStats{}, err
+	}
+	return stats, nil
+}
+
+func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, error) {
+	nodeRows, err := s.db.QueryContext(ctx, `SELECT `+nodeColumns+` FROM nodes ORDER BY domain, type, name`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer nodeRows.Close()
+
+	var nodes []Node
+	for nodeRows.Next() {
+		n, err := scanNode(nodeRows)
+		if err != nil {
+			return nil, nil, err
+		}
+		nodes = append(nodes, n)
+	}
+	if err := nodeRows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	edgeRows, err := s.db.QueryContext(ctx, `SELECT source_id, target_id, type FROM edges ORDER BY source_id, target_id, type`)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer edgeRows.Close()
+
+	var edges []Edge
+	for edgeRows.Next() {
+		var e Edge
+		if err := edgeRows.Scan(&e.SourceID, &e.TargetID, &e.Type); err != nil {
+			return nil, nil, err
+		}
+		edges = append(edges, e)
+	}
+	return nodes, edges, edgeRows.Err()
 }
 
 func (s *LibSQLStore) UpsertMemoryRecord(ctx context.Context, record MemoryRecord) error {
+	return upsertMemoryRecordExec(ctx, s.db, record)
+}
+
+func upsertMemoryRecordExec(ctx context.Context, e execer, record MemoryRecord) error {
 	normalizedTagsJSON, err := json.Marshal(record.NormalizedTags)
 	if err != nil {
 		return fmt.Errorf("marshal normalized tags: %w", err)
@@ -775,7 +1258,7 @@ func (s *LibSQLStore) UpsertMemoryRecord(ctx context.Context, record MemoryRecor
 		revision = excluded.revision,
 		replaced_by_node_id = excluded.replaced_by_node_id,
 		deprecated_message = excluded.deprecated_message`
-	_, err = s.db.ExecContext(ctx, query,
+	_, err = e.ExecContext(ctx, query,
 		record.Node.ID,
 		record.ScopeType,
 		record.ScopeID,
@@ -803,7 +1286,18 @@ func (s *LibSQLStore) GetMemoryRecordByKey(ctx context.Context, scopeType string
 	return s.getMemoryRecord(ctx, `mr.scope_type = ? AND mr.scope_id = ? AND mr.knowledge_type = ? AND mr.memory_key = ?`, scopeType, scopeID, knowledgeType, memoryKey)
 }
 
+// rowQueryer is satisfied by both *sql.DB and *sql.Tx, so a single-row read can
+// run standalone or inside a caller's transaction (needed for the in-transaction
+// revision read-modify-write).
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 func (s *LibSQLStore) getMemoryRecord(ctx context.Context, where string, args ...any) (MemoryRecord, error) {
+	return getMemoryRecordQ(ctx, s.db, where, args...)
+}
+
+func getMemoryRecordQ(ctx context.Context, q rowQueryer, where string, args ...any) (MemoryRecord, error) {
 	query := `SELECT
 		n.id, n.workspace, n.domain, n.type, n.name, n.content, COALESCE(n.url, ''), COALESCE(n.path, ''), COALESCE(n.embedding_json, '[]'),
 		mr.memory_key, mr.scope_type, mr.scope_id, mr.lifecycle_state, mr.knowledge_type, mr.source, mr.writer_id,
@@ -817,7 +1311,7 @@ func (s *LibSQLStore) getMemoryRecord(ctx context.Context, where string, args ..
 	var normalizedTagsJSON string
 	var displayTagsJSON string
 	var embeddingJSON string
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(
+	err := q.QueryRowContext(ctx, query, args...).Scan(
 		&record.Node.ID, &record.Node.Workspace, &record.Node.Domain, &record.Node.Type, &record.Node.Name, &record.Node.Content,
 		&record.Node.URL, &record.Node.Path, &embeddingJSON,
 		&record.MemoryKey, &record.ScopeType, &record.ScopeID, &record.LifecycleState, &record.KnowledgeType, &record.Source, &record.WriterID,
@@ -834,6 +1328,10 @@ func (s *LibSQLStore) getMemoryRecord(ctx context.Context, where string, args ..
 }
 
 func (s *LibSQLStore) InsertMemoryRevision(ctx context.Context, revision MemoryRevision) error {
+	return insertMemoryRevisionExec(ctx, s.db, revision)
+}
+
+func insertMemoryRevisionExec(ctx context.Context, e execer, revision MemoryRevision) error {
 	normalizedTagsJSON, err := json.Marshal(revision.NormalizedTags)
 	if err != nil {
 		return fmt.Errorf("marshal revision normalized tags: %w", err)
@@ -842,7 +1340,7 @@ func (s *LibSQLStore) InsertMemoryRevision(ctx context.Context, revision MemoryR
 	if err != nil {
 		return fmt.Errorf("marshal revision display tags: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO memory_revisions (
+	_, err = e.ExecContext(ctx, `INSERT INTO memory_revisions (
 		node_id, revision, title, content, source, writer_id, lifecycle_state,
 		normalized_tags_json, display_tags_json, created_at, deprecated_reason
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -851,6 +1349,66 @@ func (s *LibSQLStore) InsertMemoryRevision(ctx context.Context, revision MemoryR
 		revision.CreatedAt, revision.DeprecatedReason,
 	)
 	return err
+}
+
+// memoryRevisionFromRecord snapshots a record's current state as a history row.
+func memoryRevisionFromRecord(r MemoryRecord) MemoryRevision {
+	return MemoryRevision{
+		NodeID:           r.Node.ID,
+		Revision:         r.Revision,
+		Title:            r.Node.Name,
+		Content:          r.Node.Content,
+		Source:           r.Source,
+		WriterID:         r.WriterID,
+		LifecycleState:   r.LifecycleState,
+		NormalizedTags:   r.NormalizedTags,
+		DisplayTags:      r.DisplayTags,
+		CreatedAt:        r.UpdatedAt,
+		DeprecatedReason: r.DeprecatedMessage,
+	}
+}
+
+// CommitMemoryRecord persists a memory write atomically and race-free. Inside a
+// single (IMMEDIATE) transaction it reads the current record under the write
+// lock, appends that authoritative prior state to the revision history, sets the
+// new revision to current+1 (or 1 on first write), optionally re-saves the
+// content node (+FTS), and upserts the record. Doing the revision
+// read-modify-write inside the transaction is what closes the cross-process race
+// where two writers both read revision N and one clobbers the other. It returns
+// the finalized record (with the assigned revision and preserved created_at).
+//
+// The embedding must already be set on record.Node; embedding is a network call
+// and must not run inside the write transaction. Exposed as an optional
+// capability (memory.commitMemory falls back to sequential writes without it).
+func (s *LibSQLStore) CommitMemoryRecord(ctx context.Context, record MemoryRecord, saveNode bool) (MemoryRecord, error) {
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		current, cerr := getMemoryRecordQ(ctx, tx, `mr.node_id = ?`, record.Node.ID)
+		switch {
+		case cerr == nil:
+			if err := insertMemoryRevisionExec(ctx, tx, memoryRevisionFromRecord(current)); err != nil {
+				return fmt.Errorf("save memory revision: %w", err)
+			}
+			record.Revision = current.Revision + 1
+			record.CreatedAt = current.CreatedAt // never let an update rewrite the original
+		case cerr == sql.ErrNoRows:
+			record.Revision = 1
+		default:
+			return fmt.Errorf("load current memory: %w", cerr)
+		}
+		if saveNode {
+			if err := saveNodeExec(ctx, tx, record.Node); err != nil {
+				return fmt.Errorf("save memory node: %w", err)
+			}
+		}
+		if err := upsertMemoryRecordExec(ctx, tx, record); err != nil {
+			return fmt.Errorf("save memory metadata: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return MemoryRecord{}, err
+	}
+	return record, nil
 }
 
 func (s *LibSQLStore) ListMemoryRevisions(ctx context.Context, nodeID string) ([]MemoryRevision, error) {
@@ -962,9 +1520,13 @@ func (s *LibSQLStore) SearchMemoryRecords(ctx context.Context, filter MemorySear
 }
 
 func (s *LibSQLStore) SetMemoryLifecycle(ctx context.Context, nodeID string, lifecycleState string, replacedByNodeID string, deprecatedMessage string) error {
+	// Use nowTimestamp() (RFC3339) to match every other writer. SQLite's
+	// CURRENT_TIMESTAMP renders "2006-01-02 15:04:05" (space-separated), which
+	// sorts before the "T"-separated RFC3339 values in the string-ordered
+	// `ORDER BY updated_at DESC` used by SearchMemoryRecords, corrupting recency.
 	_, err := s.db.ExecContext(ctx, `UPDATE memory_records
-		SET lifecycle_state = ?, replaced_by_node_id = ?, deprecated_message = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE node_id = ?`, lifecycleState, replacedByNodeID, deprecatedMessage, nodeID)
+		SET lifecycle_state = ?, replaced_by_node_id = ?, deprecated_message = ?, updated_at = ?
+		WHERE node_id = ?`, lifecycleState, replacedByNodeID, deprecatedMessage, nowTimestamp(), nodeID)
 	return err
 }
 
@@ -998,75 +1560,118 @@ func (s *LibSQLStore) SaveWebCrawlVersion(ctx context.Context, version WebCrawlV
 }
 
 func (s *LibSQLStore) DeleteNodeByID(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
-	if err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE source_id = ? OR target_id = ?`, id, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, id); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, id)
 		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM edges WHERE source_id = ? OR target_id = ?`, id, id)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, id)
-	return err
+	})
 }
 
 func (s *LibSQLStore) DeleteFileNodes(ctx context.Context, workspace string, relativePath string) error {
 	relativePath = filepath.ToSlash(relativePath)
-	_, err := s.db.ExecContext(ctx, `DELETE FROM edges
-		WHERE source_id IN (
-			SELECT id FROM nodes WHERE workspace = ?1
-			AND (url = ?2 OR (substr(url, 1, length(?2)) = ?2 AND substr(url, length(?2) + 1, 1) = '#'))
-		)
-		OR target_id IN (
-			SELECT id FROM nodes WHERE workspace = ?1
-			AND (url = ?2 OR (substr(url, 1, length(?2)) = ?2 AND substr(url, length(?2) + 1, 1) = '#'))
-		)`, workspace, relativePath)
-	if err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts
+			WHERE node_id IN (SELECT id FROM nodes WHERE `+fileNodeMatch+`)`, workspace, relativePath); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM edges
+			WHERE source_id IN (SELECT id FROM nodes WHERE `+fileNodeMatch+`)
+			OR target_id IN (SELECT id FROM nodes WHERE `+fileNodeMatch+`)`, workspace, relativePath); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE `+fileNodeMatch, workspace, relativePath)
 		return err
+	})
+}
+
+// fileNodeMatch is the WHERE fragment (params: workspace ?1, relPath ?2) that
+// selects every node belonging to one file — the file node plus its chunk/symbol
+// children, whose urls are the path itself or "<path>#…".
+const fileNodeMatch = `workspace = ?1 AND (url = ?2 OR (substr(url, 1, length(?2)) = ?2 AND substr(url, length(?2) + 1, 1) = '#'))`
+
+// FileNodeIDs returns the ids of every node belonging to a file. Used by the
+// incremental sync to tell which symbols survived a re-index so incoming edges
+// to them can be restored.
+func (s *LibSQLStore) FileNodeIDs(ctx context.Context, workspace, relativePath string) ([]string, error) {
+	relativePath = filepath.ToSlash(relativePath)
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM nodes WHERE `+fileNodeMatch, workspace, relativePath)
+	if err != nil {
+		return nil, err
 	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM nodes WHERE workspace = ?1
-		AND (url = ?2 OR (substr(url, 1, length(?2)) = ?2 AND substr(url, length(?2) + 1, 1) = '#'))`,
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// IncomingFileEdges returns edges that point INTO a file's nodes from a node
+// outside the file. The incremental sync snapshots these before deleting a file
+// (the edges CASCADE away), then restores the ones whose target symbol still
+// exists after re-index — so a save doesn't wipe cross-file references that other
+// files make to this one.
+func (s *LibSQLStore) IncomingFileEdges(ctx context.Context, workspace, relativePath string) ([]Edge, error) {
+	relativePath = filepath.ToSlash(relativePath)
+	rows, err := s.db.QueryContext(ctx, `SELECT source_id, target_id, type FROM edges
+		WHERE target_id IN (SELECT id FROM nodes WHERE `+fileNodeMatch+`)
+		AND source_id NOT IN (SELECT id FROM nodes WHERE `+fileNodeMatch+`)`,
 		workspace, relativePath)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var edges []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.SourceID, &e.TargetID, &e.Type); err != nil {
+			return nil, err
+		}
+		edges = append(edges, e)
+	}
+	return edges, rows.Err()
 }
 
 func (s *LibSQLStore) DeleteWorkspace(ctx context.Context, workspace string) error {
-	_, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
-	if err != nil {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE workspace = ?) OR target_id IN (SELECT id FROM nodes WHERE workspace = ?)`, workspace, workspace); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE workspace = ?`, workspace); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE workspace = ?`, workspace)
 		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE workspace = ?) OR target_id IN (SELECT id FROM nodes WHERE workspace = ?)`, workspace, workspace)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM nodes WHERE workspace = ?`, workspace)
-	return err
+	})
 }
 
 func (s *LibSQLStore) ClearAll(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM edges`)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM nodes`)
-	if err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM memory_revisions`); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM memory_records`); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM web_crawl_versions`); err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM web_corpora`)
-	return err
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		for _, stmt := range []string{
+			`DELETE FROM edges`,
+			`DELETE FROM nodes`,
+			`DELETE FROM nodes_fts`,
+			`DELETE FROM access_events`,
+			`DELETE FROM memory_revisions`,
+			`DELETE FROM memory_records`,
+			`DELETE FROM web_crawl_versions`,
+			`DELETE FROM web_corpora`,
+		} {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func embeddingLength(jsonStr string) int {
@@ -1086,6 +1691,170 @@ func jsonStringSlice(value string) []string {
 	}
 	var out []string
 	if err := json.Unmarshal([]byte(value), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func nowTimestamp() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
+// AccessNode is a node ranked by how often it has been accessed.
+type AccessNode struct {
+	NodeID string `json:"node_id"`
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	URL    string `json:"url,omitempty"`
+	Count  int    `json:"count"`
+}
+
+type AccessKind struct {
+	Kind  string `json:"kind"`
+	Count int    `json:"count"`
+}
+
+type AccessSearch struct {
+	Query string `json:"query"`
+	Count int    `json:"count"`
+}
+
+type RecentAccess struct {
+	NodeID    string `json:"node_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Type      string `json:"type,omitempty"`
+	Kind      string `json:"kind"`
+	Query     string `json:"query,omitempty"`
+	CreatedAt string `json:"created_at"`
+}
+
+// Analytics summarizes access activity for the studio dashboard.
+type Analytics struct {
+	TotalEvents int            `json:"total_events"`
+	Last24h     int            `json:"last_24h"`
+	UniqueNodes int            `json:"unique_nodes"`
+	Searches    int            `json:"searches"`
+	TopNodes    []AccessNode   `json:"top_nodes"`
+	ByKind      []AccessKind   `json:"by_kind"`
+	TopSearches []AccessSearch `json:"top_searches"`
+	Recent      []RecentAccess `json:"recent"`
+}
+
+// RecordAccess logs an access event (a node view/read or a search). Failures
+// are non-fatal to callers — analytics is best-effort telemetry.
+func (s *LibSQLStore) RecordAccess(ctx context.Context, nodeID string, kind string, query string) error {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO access_events (node_id, kind, query, created_at) VALUES (?, ?, ?, ?)`,
+		strings.TrimSpace(nodeID), kind, strings.TrimSpace(query), nowTimestamp())
+	return err
+}
+
+func (s *LibSQLStore) Analytics(ctx context.Context, limit int) (Analytics, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	var a Analytics
+
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*), count(DISTINCT CASE WHEN node_id <> '' THEN node_id END) FROM access_events`).
+		Scan(&a.TotalEvents, &a.UniqueNodes); err != nil {
+		return Analytics{}, err
+	}
+	cutoff := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM access_events WHERE created_at >= ?`, cutoff).Scan(&a.Last24h); err != nil {
+		return Analytics{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM access_events WHERE kind = 'search'`).Scan(&a.Searches); err != nil {
+		return Analytics{}, err
+	}
+
+	topRows, err := s.db.QueryContext(ctx, `SELECT e.node_id, COALESCE(n.name, ''), COALESCE(n.type, ''), COALESCE(n.url, ''), count(*) AS c
+		FROM access_events e LEFT JOIN nodes n ON n.id = e.node_id
+		WHERE e.node_id <> '' GROUP BY e.node_id ORDER BY c DESC, e.node_id LIMIT ?`, limit)
+	if err != nil {
+		return Analytics{}, err
+	}
+	for topRows.Next() {
+		var an AccessNode
+		if err := topRows.Scan(&an.NodeID, &an.Name, &an.Type, &an.URL, &an.Count); err != nil {
+			_ = topRows.Close()
+			return Analytics{}, err
+		}
+		a.TopNodes = append(a.TopNodes, an)
+	}
+	_ = topRows.Close()
+
+	kindRows, err := s.db.QueryContext(ctx, `SELECT kind, count(*) c FROM access_events GROUP BY kind ORDER BY c DESC`)
+	if err != nil {
+		return Analytics{}, err
+	}
+	for kindRows.Next() {
+		var k AccessKind
+		if err := kindRows.Scan(&k.Kind, &k.Count); err != nil {
+			_ = kindRows.Close()
+			return Analytics{}, err
+		}
+		a.ByKind = append(a.ByKind, k)
+	}
+	_ = kindRows.Close()
+
+	searchRows, err := s.db.QueryContext(ctx, `SELECT query, count(*) c FROM access_events WHERE kind = 'search' AND query <> '' GROUP BY query ORDER BY c DESC, query LIMIT ?`, limit)
+	if err != nil {
+		return Analytics{}, err
+	}
+	for searchRows.Next() {
+		var sr AccessSearch
+		if err := searchRows.Scan(&sr.Query, &sr.Count); err != nil {
+			_ = searchRows.Close()
+			return Analytics{}, err
+		}
+		a.TopSearches = append(a.TopSearches, sr)
+	}
+	_ = searchRows.Close()
+
+	recentRows, err := s.db.QueryContext(ctx, `SELECT e.node_id, COALESCE(n.name, ''), COALESCE(n.type, ''), e.kind, e.query, e.created_at
+		FROM access_events e LEFT JOIN nodes n ON n.id = e.node_id
+		ORDER BY e.id DESC LIMIT ?`, limit*2)
+	if err != nil {
+		return Analytics{}, err
+	}
+	for recentRows.Next() {
+		var ra RecentAccess
+		if err := recentRows.Scan(&ra.NodeID, &ra.Name, &ra.Type, &ra.Kind, &ra.Query, &ra.CreatedAt); err != nil {
+			_ = recentRows.Close()
+			return Analytics{}, err
+		}
+		a.Recent = append(a.Recent, ra)
+	}
+	_ = recentRows.Close()
+
+	return a, nil
+}
+
+func marshalProperties(props map[string]string) (string, error) {
+	if len(props) == 0 {
+		return "{}", nil
+	}
+	data, err := json.Marshal(props)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func unmarshalProperties(value string) map[string]string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "{}" {
+		return nil
+	}
+	out := map[string]string{}
+	if err := json.Unmarshal([]byte(value), &out); err != nil {
+		return nil
+	}
+	if len(out) == 0 {
 		return nil
 	}
 	return out
