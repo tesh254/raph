@@ -91,8 +91,9 @@ jobs:
       - name: Verify release integrity with gh
         run: |
           set -euo pipefail
-          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          # Verify each asset's artifact attestation (created above via actions/attest).
+          # Not `gh release verify`: that checks for a release-scoped attestation
+          # this pipeline does not produce.
           while IFS= read -r asset; do
-            gh release verify-asset "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
             gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY"
           done < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name 'checksums.txt' -o -name 'checksums.txt.minisig' \) | sort)
