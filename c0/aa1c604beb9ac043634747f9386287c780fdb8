@@ -1,0 +1,19 @@
+.github/workflows/release.yml
+  s_d071be8e5cb50b::t_3a2371363ccc65 94-96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "c0aa1c604beb9ac043634747f9386287c780fdb8",
+  "prompts": {},
+  "sessions": {
+    "s_d071be8e5cb50b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c01fabe8-80a1-4765-97b7-90dc339f424d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
