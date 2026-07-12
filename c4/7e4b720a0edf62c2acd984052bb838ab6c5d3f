@@ -1,0 +1,19 @@
+internal/db/libsql.go
+  s_d071be8e5cb50b::t_4543a176878961 1140-1142,1145-1161,1164-1178,1181-1186
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "c47e4b720a0edf62c2acd984052bb838ab6c5d3f",
+  "prompts": {},
+  "sessions": {
+    "s_d071be8e5cb50b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c01fabe8-80a1-4765-97b7-90dc339f424d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
