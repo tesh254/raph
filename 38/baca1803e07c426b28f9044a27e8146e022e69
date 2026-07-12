@@ -1,0 +1,66 @@
+plugins/raph/skills/raph/SKILL.md
+  s_d071be8e5cb50b::t_febab97acfdd94 92
+  s_d071be8e5cb50b::t_8269f83d373fac 16-20
+internal/crawler/ssrf.go
+  s_d071be8e5cb50b::t_fb4d17c4b6ea73 30-46,49,54-63
+internal/syncer/syncer.go
+  s_d071be8e5cb50b::t_b9ed920ca42c37 299-302,305,309,315,327,334,338
+  s_d071be8e5cb50b::t_9e2619a0dedce4 264,270-275
+internal/knowledge/knowledge.go
+  s_d071be8e5cb50b::t_178ed15fbad392 105-114
+internal/syncer/syncer_test.go
+  s_d071be8e5cb50b::t_e7708a96bc7660 51,80
+internal/indexer/importaware.go
+  s_d071be8e5cb50b::t_d9cb6ed6db6f78 239-240,253-269,274,277-288
+  s_d071be8e5cb50b::t_98367dc40f78a2 65-68
+internal/db/libsql.go
+  s_d071be8e5cb50b::t_9ca8425716f078 947-966,968
+  s_d071be8e5cb50b::t_33c9bd36819a48 1129-1187
+internal/exporter/exporter_test.go
+  s_d071be8e5cb50b::t_f3ab586a2818b4 88
+internal/indexer/scip.go
+  s_d071be8e5cb50b::t_8afc55a92433a8 38
+  s_d071be8e5cb50b::t_10e957f536c540 286
+  s_d071be8e5cb50b::t_5949dafbfd2853 49-50,60-61,71-72,82-83,93-94,104-105
+  s_d071be8e5cb50b::t_96a7cdf32098fa 34-37
+internal/exporter/exporter.go
+  s_d071be8e5cb50b::t_12e6c46d54b98b 327-331
+  s_d071be8e5cb50b::t_59043659b12e6e 108-119,122-123,127-133,147,152-157
+cmd/raph/memlimit.go
+  s_d071be8e5cb50b::t_86b61a1573521b 5
+  s_d071be8e5cb50b::t_3255d04569cd4f 47-50,59,72-73
+  s_d071be8e5cb50b::t_5942ae38bd63e8 74
+internal/syncer/watcher.go
+  s_d071be8e5cb50b::t_e494f96c09a3a8 172-174,176-179
+cmd/raph/main.go
+  s_d071be8e5cb50b::t_8c517e1fd062fc 812-814,816-818,824,830
+  s_d071be8e5cb50b::t_75390476148154 1091-1092
+  s_d071be8e5cb50b::t_f18ca23833e9cc 511-514
+  s_d071be8e5cb50b::t_1a2f6dd7ea76df 1109-1123
+  s_d071be8e5cb50b::t_72b0ffe100ea50 1035-1043
+internal/exporter/importer.go
+  s_d071be8e5cb50b::t_0ee2cf41c366fc 33-38
+internal/query/query.go
+  s_d071be8e5cb50b::t_b7fafb80733c1a 16
+  s_d071be8e5cb50b::t_172825b6ed21c9 121-125
+  s_d071be8e5cb50b::t_c7447fda599d76 136,141-144
+  s_d071be8e5cb50b::t_74de7d0159d44b 145
+internal/studio/server.go
+  s_d071be8e5cb50b::t_154905de03f813 630-632,638-642
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.12",
+  "base_commit_sha": "38baca1803e07c426b28f9044a27e8146e022e69",
+  "prompts": {},
+  "sessions": {
+    "s_d071be8e5cb50b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c01fabe8-80a1-4765-97b7-90dc339f424d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
