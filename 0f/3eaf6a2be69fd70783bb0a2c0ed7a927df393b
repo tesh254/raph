@@ -1,0 +1,30 @@
+internal/db/libsql_test.go
+  s_b616119b05f3cd::t_5973b5ad68cebb 393-425
+internal/agentsetup/setup_test.go
+  s_b616119b05f3cd::t_27d3810b1bca8a 7,105-294
+internal/db/lazy_test.go
+  s_b616119b05f3cd::t_095618e74e4dcf 203,213
+  s_b616119b05f3cd::t_b084bb336e9114 8-9,94-202,204-212,214-265
+internal/mcp/lazy_integration_test.go
+  s_b616119b05f3cd::t_1f62954501b65c 1-108
+cmd/raph/e2e_test.go
+  s_b616119b05f3cd::t_a641c762abdc57 1-2
+  s_b616119b05f3cd::t_7afbbee7aae6a2 3-228,230,232-301
+  s_b616119b05f3cd::t_18ad46f587dd4f 229,231
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "0f3eaf6a2be69fd70783bb0a2c0ed7a927df393b",
+  "prompts": {},
+  "sessions": {
+    "s_b616119b05f3cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "88cc8262-7d36-4d42-9a1c-6e2b6c7b31d9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
