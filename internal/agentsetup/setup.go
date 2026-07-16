@@ -63,6 +63,11 @@ func Setup(opts Options) (Result, error) {
 					"type":    "local",
 					"command": []string{"raph", "start"},
 					"enabled": true,
+					// opencode gives local servers 5000ms (its default) to
+					// finish the MCP handshake and tool discovery; a cold
+					// raph start can exceed that when brain.db is contended,
+					// so give it room.
+					"timeout": 30000,
 				}, dryRun)
 			},
 		},
@@ -166,6 +171,16 @@ func upsertJSONServer(path string, schemaKey string, schemaValue string, contain
 		return false, fmt.Errorf("create config directory: %w", err)
 	}
 
+	// Round-trip the desired value through JSON so the DeepEqual below compares
+	// like with like: values parsed from disk are map[string]any/[]any/float64,
+	// while literals here carry Go types ([]string, int). Without this the
+	// comparison never matches and every run reports "updated".
+	normalized, err := normalizeJSONValue(serverValue)
+	if err != nil {
+		return false, fmt.Errorf("normalize %s server entry: %w", serverName, err)
+	}
+	serverValue, _ = normalized.(map[string]any)
+
 	root := map[string]any{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &root); err != nil {
@@ -211,6 +226,18 @@ func upsertJSONServer(path string, schemaKey string, schemaValue string, contain
 		return false, fmt.Errorf("write %s: %w", path, err)
 	}
 	return true, nil
+}
+
+func normalizeJSONValue(value any) (any, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var out any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func upsertCodexServer(path string, dryRun bool) (bool, error) {
