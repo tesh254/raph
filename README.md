@@ -57,11 +57,21 @@ export OPENROUTER_API_KEY="your-key"
 raph init --path .
 ```
 
-Then install project MCP entries for supported coding agents:
+Then install MCP entries for supported coding agents:
 
 ```sh
 raph agents mcp setup --path .
 ```
+
+In an interactive terminal this prompts for the install scope — global
+(user-level agent configs, the default) or local (project files under
+`--path`). Pass `--scope global` or `--scope local` to skip the prompt;
+non-interactive runs default to global.
+
+For opencode this also installs the raph plugin (`raph.ts`) into the
+scope-matching plugins directory — `~/.config/opencode/plugins/` for global,
+`.opencode/plugins/` for local — where opencode auto-loads it; the plugin
+surfaces memory-first guidance and raph workflow hints to the agent.
 
 To skip embeddings during indexing:
 
@@ -163,7 +173,7 @@ raph --verbose start
 raph init            Scan a workspace and build graph relationships
 raph start           Start the MCP server over stdio
 raph studio          Launch the local graph explorer UI
-raph agents mcp setup Install or refresh auto-detected project MCP config
+raph agents mcp setup Install or refresh MCP config (global or project scope)
 raph sync            Index and continuously synchronize a repository
 raph sync --status   Show the worker and registered repositories
 raph sync --remove   Unregister a repository and clean its graph data
@@ -198,8 +208,12 @@ raph export --doc <id> Export a document/bundle; publish to gist/repo/S3/R2
 
 `raph agents mcp setup --path . --dry-run` previews the opencode, Claude Code,
 Codex, Cursor, and Pi config files that would be created or refreshed. Run it
-without `--dry-run` to write project-scoped config for the supported agents on
-the machine.
+without `--dry-run` to write the config for the supported agents on the
+machine. By default entries go to each agent's global (user-level) config —
+`~/.config/opencode/opencode.json`, `~/.claude.json`, `~/.codex/config.toml`,
+`~/.cursor/mcp.json`, `~/.pi/mcp.json` — so every project picks them up; use
+`--scope local` for project files instead, and an interactive terminal is
+prompted for the choice when no `--scope` is given.
 
 `raph search` gives agents a simple CLI fallback when the MCP server is not
 available. The flags follow familiar search ergonomics so agents can get useful

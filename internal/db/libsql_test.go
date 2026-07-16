@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"path/filepath"
 	"testing"
 )
@@ -332,5 +334,130 @@ func TestAccessAnalytics(t *testing.T) {
 	}
 	if a.Last24h != 5 {
 		t.Fatalf("expected 5 events in last 24h, got %d", a.Last24h)
+	}
+}
+
+func TestMigrateIfNeededSkipsWhenSchemaVersionCurrent(t *testing.T) {
+	rawDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &LibSQLStore{db: rawDB}
+	defer store.Close()
+
+	if err := store.migrateIfNeeded(); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("expected schema stamped at %d, got %d", schemaVersion, version)
+	}
+
+	// Drop a migration-managed table: if the second pass really skips, the
+	// table stays gone; if it re-runs, CREATE TABLE IF NOT EXISTS restores it.
+	if _, err := rawDB.Exec(`DROP TABLE access_events`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateIfNeeded(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	err = rawDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'access_events'`).Scan(&count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("expected migration pass to be skipped for a current schema version, but DDL ran again")
+	}
+}
+
+func TestMigrateIfNeededRunsWhenSchemaVersionBehind(t *testing.T) {
+	rawDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &LibSQLStore{db: rawDB}
+	defer store.Close()
+
+	// A fresh database reports user_version 0, i.e. behind schemaVersion.
+	if err := store.migrateIfNeeded(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveNode(context.Background(), Node{
+		ID: "node", Workspace: "ws", Domain: "code", Type: "file", Name: "node.go",
+	}); err != nil {
+		t.Fatalf("expected migrated schema to accept writes: %v", err)
+	}
+}
+
+func TestMigrateIfNeededSkipsWhenSchemaVersionAhead(t *testing.T) {
+	rawDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &LibSQLStore{db: rawDB}
+	defer store.Close()
+
+	// A database stamped by a newer raph must not be re-migrated by an older
+	// binary: its schema is already a superset of what this binary creates.
+	if _, err := rawDB.Exec(`PRAGMA user_version = 99`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateIfNeeded(); err != nil {
+		t.Fatal(err)
+	}
+
+	var tables int
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatalf("expected no DDL against a schema stamped ahead, found %d tables", tables)
+	}
+	var version int
+	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 99 {
+		t.Fatalf("expected stamped version preserved, got %d", version)
+	}
+}
+
+// TestSchemaVersionBumpedWhenMigrationsChange pins a hash of every migration
+// statement to the current schemaVersion. If you edit migrationStatements or
+// nodeColumnAdditions without bumping schemaVersion, existing databases would
+// silently skip the new DDL forever — this test turns that mistake into a
+// build failure with instructions.
+func TestSchemaVersionBumpedWhenMigrationsChange(t *testing.T) {
+	h := sha256.New()
+	for _, q := range migrationStatements {
+		h.Write([]byte(q))
+		h.Write([]byte{0})
+	}
+	for _, add := range nodeColumnAdditions {
+		h.Write([]byte(add.name))
+		h.Write([]byte{0})
+		h.Write([]byte(add.ddl))
+		h.Write([]byte{0})
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+
+	// One pinned hash per schemaVersion, ever. When migrations change:
+	// 1. bump schemaVersion in libsql.go
+	// 2. add the new version with the hash this test prints on failure
+	pinned := map[int]string{
+		1: "279659415c0a7a8b8b6fc79a9a7332dba1c42d490369f2984f9145ce0cc919f3",
+	}
+
+	want, ok := pinned[schemaVersion]
+	if !ok {
+		t.Fatalf("schemaVersion %d has no pinned migration hash; add {%d: %q} to this test", schemaVersion, schemaVersion, got)
+	}
+	if got != want {
+		t.Fatalf("migration statements changed but schemaVersion is still %d.\n"+
+			"Bump schemaVersion in libsql.go, then pin the new version's hash here: %q", schemaVersion, got)
 	}
 }

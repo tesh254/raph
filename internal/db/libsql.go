@@ -151,6 +151,15 @@ type TableDump struct {
 	Rows    []map[string]string `json:"rows"`
 }
 
+// schemaVersion is stamped into the database via PRAGMA user_version after a
+// successful migration pass. Bump it whenever migrate(), ensureNodeColumns(),
+// or backfillNodesFTS() gain new DDL so existing databases re-run the pass
+// exactly once. Databases already at (or past) this version skip the pass
+// entirely, which keeps startup read-only: WAL readers never wait on a
+// concurrent writer, so an MCP client's startup timeout can't trip while the
+// sync worker holds the write lock mid-index.
+const schemaVersion = 1
+
 func InitStorage() (*LibSQLStore, error) {
 	paths, err := config.EnsureBaseLayout()
 	if err != nil {
@@ -178,13 +187,35 @@ func InitStorage() (*LibSQLStore, error) {
 
 	db.SetMaxOpenConns(1)
 	store := &LibSQLStore{db: db}
-	verbose.Printf("running database migrations...")
-	if err := store.migrate(); err != nil {
+	if err := store.migrateIfNeeded(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	verbose.Printf("database migrations complete")
 	return store, nil
+}
+
+// migrateIfNeeded runs the migration pass only when the stored schema version
+// is behind schemaVersion. A database stamped at or past the current version
+// skips every DDL statement, so startup issues no writes at all.
+func (s *LibSQLStore) migrateIfNeeded() error {
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version >= schemaVersion {
+		verbose.Printf("schema current version=%d, skipping migrations", version)
+		return nil
+	}
+
+	verbose.Printf("running database migrations version=%d target=%d...", version, schemaVersion)
+	if err := s.migrate(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return fmt.Errorf("stamp schema version: %w", err)
+	}
+	verbose.Printf("database migrations complete")
+	return nil
 }
 
 func (s *LibSQLStore) Close() error {
@@ -194,12 +225,15 @@ func (s *LibSQLStore) Close() error {
 	return s.db.Close()
 }
 
-func (s *LibSQLStore) migrate() error {
-	queries := []string{
-		`PRAGMA foreign_keys = ON;`,
-		`PRAGMA journal_mode = WAL;`,
-		`PRAGMA busy_timeout = 5000;`,
-		`CREATE TABLE IF NOT EXISTS nodes (
+// migrationStatements is the full boot-time schema pass. Any change here (or
+// to nodeColumnAdditions) must bump schemaVersion, or existing databases will
+// skip the new DDL forever; TestSchemaVersionBumpedWhenMigrationsChange
+// enforces that mechanically.
+var migrationStatements = []string{
+	`PRAGMA foreign_keys = ON;`,
+	`PRAGMA journal_mode = WAL;`,
+	`PRAGMA busy_timeout = 5000;`,
+	`CREATE TABLE IF NOT EXISTS nodes (
 			id TEXT PRIMARY KEY,
 			workspace TEXT NOT NULL,
 			domain TEXT NOT NULL,
@@ -210,7 +244,7 @@ func (s *LibSQLStore) migrate() error {
 			path TEXT NOT NULL DEFAULT '',
 			embedding_json TEXT NOT NULL DEFAULT '[]'
 		);`,
-		`CREATE TABLE IF NOT EXISTS edges (
+	`CREATE TABLE IF NOT EXISTS edges (
 			source_id TEXT NOT NULL,
 			target_id TEXT NOT NULL,
 			type TEXT NOT NULL,
@@ -218,11 +252,11 @@ func (s *LibSQLStore) migrate() error {
 			FOREIGN KEY (source_id) REFERENCES nodes(id) ON DELETE CASCADE,
 			FOREIGN KEY (target_id) REFERENCES nodes(id) ON DELETE CASCADE
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_nodes_workspace ON nodes (workspace);`,
-		`CREATE INDEX IF NOT EXISTS idx_nodes_domain_type ON nodes (domain, type);`,
-		`CREATE INDEX IF NOT EXISTS idx_edges_source_id ON edges (source_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_edges_target_id ON edges (target_id);`,
-		`CREATE TABLE IF NOT EXISTS memory_records (
+	`CREATE INDEX IF NOT EXISTS idx_nodes_workspace ON nodes (workspace);`,
+	`CREATE INDEX IF NOT EXISTS idx_nodes_domain_type ON nodes (domain, type);`,
+	`CREATE INDEX IF NOT EXISTS idx_edges_source_id ON edges (source_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_edges_target_id ON edges (target_id);`,
+	`CREATE TABLE IF NOT EXISTS memory_records (
 			node_id TEXT PRIMARY KEY,
 			scope_type TEXT NOT NULL,
 			scope_id TEXT NOT NULL,
@@ -240,11 +274,11 @@ func (s *LibSQLStore) migrate() error {
 			deprecated_message TEXT NOT NULL DEFAULT '',
 			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
 		);`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_records_natural_key
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_records_natural_key
 			ON memory_records (scope_type, scope_id, knowledge_type, memory_key);`,
-		`CREATE INDEX IF NOT EXISTS idx_memory_records_scope
+	`CREATE INDEX IF NOT EXISTS idx_memory_records_scope
 			ON memory_records (scope_type, scope_id, lifecycle_state, knowledge_type);`,
-		`CREATE TABLE IF NOT EXISTS memory_revisions (
+	`CREATE TABLE IF NOT EXISTS memory_revisions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			node_id TEXT NOT NULL,
 			revision INTEGER NOT NULL,
@@ -259,8 +293,8 @@ func (s *LibSQLStore) migrate() error {
 			deprecated_reason TEXT NOT NULL DEFAULT '',
 			FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_memory_revisions_node_id ON memory_revisions (node_id, revision DESC);`,
-		`CREATE TABLE IF NOT EXISTS web_corpora (
+	`CREATE INDEX IF NOT EXISTS idx_memory_revisions_node_id ON memory_revisions (node_id, revision DESC);`,
+	`CREATE TABLE IF NOT EXISTS web_corpora (
 			id TEXT PRIMARY KEY,
 			scope_type TEXT NOT NULL,
 			scope_id TEXT NOT NULL,
@@ -269,29 +303,29 @@ func (s *LibSQLStore) migrate() error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_web_corpora_scope ON web_corpora (scope_type, scope_id);`,
-		`CREATE TABLE IF NOT EXISTS web_crawl_versions (
+	`CREATE INDEX IF NOT EXISTS idx_web_corpora_scope ON web_corpora (scope_type, scope_id);`,
+	`CREATE TABLE IF NOT EXISTS web_crawl_versions (
 			id TEXT PRIMARY KEY,
 			corpus_id TEXT NOT NULL,
 			seed_url TEXT NOT NULL,
 			created_at TEXT NOT NULL,
 			FOREIGN KEY (corpus_id) REFERENCES web_corpora(id) ON DELETE CASCADE
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_web_crawl_versions_corpus ON web_crawl_versions (corpus_id, created_at DESC);`,
-		// Access events power the studio analytics view: what nodes agents and
-		// users read, and what they searched for.
-		`CREATE TABLE IF NOT EXISTS access_events (
+	`CREATE INDEX IF NOT EXISTS idx_web_crawl_versions_corpus ON web_crawl_versions (corpus_id, created_at DESC);`,
+	// Access events power the studio analytics view: what nodes agents and
+	// users read, and what they searched for.
+	`CREATE TABLE IF NOT EXISTS access_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			node_id TEXT NOT NULL DEFAULT '',
 			kind TEXT NOT NULL,
 			query TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_access_events_node ON access_events (node_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_access_events_created ON access_events (created_at DESC);`,
-		// Trigram FTS5 index over searchable node text. Serves both ranked keyword
-		// (bm25) and literal substring (rg-like) lookups without scanning every row.
-		`CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+	`CREATE INDEX IF NOT EXISTS idx_access_events_node ON access_events (node_id);`,
+	`CREATE INDEX IF NOT EXISTS idx_access_events_created ON access_events (created_at DESC);`,
+	// Trigram FTS5 index over searchable node text. Serves both ranked keyword
+	// (bm25) and literal substring (rg-like) lookups without scanning every row.
+	`CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
 			node_id UNINDEXED,
 			workspace UNINDEXED,
 			domain UNINDEXED,
@@ -301,9 +335,10 @@ func (s *LibSQLStore) migrate() error {
 			path UNINDEXED,
 			tokenize = 'trigram'
 		);`,
-	}
+}
 
-	for _, q := range queries {
+func (s *LibSQLStore) migrate() error {
+	for _, q := range migrationStatements {
 		if _, err := s.db.Exec(q); err != nil {
 			return fmt.Errorf("migration execution failure: %w", err)
 		}
@@ -315,6 +350,18 @@ func (s *LibSQLStore) migrate() error {
 		return err
 	}
 	return nil
+}
+
+// nodeColumnAdditions are columns introduced after the original schema. Like
+// migrationStatements, any change here must bump schemaVersion.
+var nodeColumnAdditions = []struct {
+	name string
+	ddl  string
+}{
+	{"path", `ALTER TABLE nodes ADD COLUMN path TEXT NOT NULL DEFAULT ''`},
+	{"properties_json", `ALTER TABLE nodes ADD COLUMN properties_json TEXT NOT NULL DEFAULT '{}'`},
+	{"created_at", `ALTER TABLE nodes ADD COLUMN created_at TEXT NOT NULL DEFAULT ''`},
+	{"updated_at", `ALTER TABLE nodes ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`},
 }
 
 // ensureNodeColumns adds columns introduced after the original schema. SQLite
@@ -346,16 +393,7 @@ func (s *LibSQLStore) ensureNodeColumns() error {
 		return fmt.Errorf("close nodes schema rows: %w", err)
 	}
 
-	additions := []struct {
-		name string
-		ddl  string
-	}{
-		{"path", `ALTER TABLE nodes ADD COLUMN path TEXT NOT NULL DEFAULT ''`},
-		{"properties_json", `ALTER TABLE nodes ADD COLUMN properties_json TEXT NOT NULL DEFAULT '{}'`},
-		{"created_at", `ALTER TABLE nodes ADD COLUMN created_at TEXT NOT NULL DEFAULT ''`},
-		{"updated_at", `ALTER TABLE nodes ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`},
-	}
-	for _, add := range additions {
+	for _, add := range nodeColumnAdditions {
 		if existing[add.name] {
 			continue
 		}

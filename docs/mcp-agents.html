@@ -32,10 +32,11 @@
     <section class="section split">
       <div class="panel">
         <div class="kicker">Setup command</div>
-        <h2>Generate project-scoped MCP config.</h2>
+        <h2>Generate global or project-scoped MCP config.</h2>
         <pre><code>raph agents mcp setup --path .
+raph agents mcp setup --path . --scope local
 raph agents mcp setup --path . --dry-run</code></pre>
-        <p class="section-intro">The setup command checks whether each supported agent is installed, writes project-scoped config for the ones it finds, and can still stage config for missing targets so the repo stays ready.</p>
+        <p class="section-intro">The setup command checks whether each supported agent is installed and writes the raph MCP entry for every supported target. By default entries go to each agent's global (user-level) config so all projects pick them up; <code>--scope local</code> writes project files under <code>--path</code> instead. An interactive terminal is prompted for the scope when <code>--scope</code> is omitted.</p>
       </div>
       <div class="stack">
         <article class="card">
@@ -128,6 +129,7 @@ args: ["start"]</code></pre>
             <h3>OpenCode</h3>
             <p class="muted">Project file: <code>opencode.json</code></p>
             <p class="muted">Global file: <code>~/.config/opencode/opencode.json</code></p>
+            <p class="muted">Plugin: <code>plugins/raph.ts</code> next to the config, auto-loaded by opencode</p>
           </article>
           <article class="card">
             <div class="label">Priority 2</div>
@@ -151,7 +153,7 @@ args: ["start"]</code></pre>
             <div class="label">Experimental</div>
             <h3>Pi</h3>
             <p class="muted">Project file: <code>.pi/mcp.json</code></p>
-            <p class="muted">Known user path: <code>~/.pi/agent/mcp.json</code></p>
+            <p class="muted">Global file: <code>~/.pi/mcp.json</code></p>
           </article>
         </div>
       </div>

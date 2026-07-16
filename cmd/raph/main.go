@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ import (
 	"raph/internal/version"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 const autoUpdateEnvVar = "RAPH_AUTO_UPDATE"
@@ -1360,11 +1362,20 @@ func newStartCmd() *cobra.Command {
 				verbose.Printf("sync worker started for MCP session")
 			}
 
-			verbose.Printf("initializing local storage")
-			store, err := db.InitStorage()
-			if err != nil {
-				return err
-			}
+			// Storage opens lazily on the first tool call. Opening brain.db
+			// eagerly can wait multiple seconds on the write lock while the
+			// sync worker is mid-index, and MCP clients (opencode gives local
+			// servers 5s by default) mark the server failed if the initialize
+			// handshake doesn't complete in time.
+			verbose.Printf("deferring local storage open until first tool call")
+			store := db.NewLazyStore(func() (db.GraphStore, error) {
+				verbose.Printf("initializing local storage")
+				s, err := db.InitStorage()
+				if err != nil {
+					return nil, err
+				}
+				return s, nil
+			})
 			defer store.Close()
 
 			verbose.Printf("creating MCP server wrapper")
@@ -1522,26 +1533,37 @@ func newAgentsCmd() *cobra.Command {
 
 	var path string
 	var dryRun bool
+	var scopeFlag string
 	mcpCmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "Manage MCP setup across supported coding agents",
 	}
 	setupCmd := &cobra.Command{
 		Use:   "setup",
-		Short: "Install or refresh project MCP config for supported coding agents",
+		Short: "Install or refresh MCP config for supported coding agents",
+		Long: "Install or refresh the raph MCP entry for supported coding agents.\n\n" +
+			"By default entries go to each agent's global (user-level) config so every\n" +
+			"project picks them up. Use --scope local to write project files under --path\n" +
+			"instead. Without --scope, an interactive terminal is prompted for the choice.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Setting up MCP config for supported agents (dryRun=%t)...\n", dryRun)
-			result, err := agentsetup.Setup(agentsetup.Options{Root: path, DryRun: dryRun})
+			scope, err := resolveSetupScope(cmd, scopeFlag, path)
 			if err != nil {
 				return err
 			}
-			verbose.Printf("setup complete root=%s agents=%d", result.Root, len(result.Outcomes))
+			fmt.Fprintf(out, "Setting up %s MCP config for supported agents (dryRun=%t)...\n", scope, dryRun)
+			result, err := agentsetup.Setup(agentsetup.Options{Root: path, DryRun: dryRun, Scope: scope})
+			if err != nil {
+				return err
+			}
+			verbose.Printf("setup complete root=%s scope=%s agents=%d", result.Root, result.Scope, len(result.Outcomes))
 
 			if dryRun {
-				fmt.Fprintf(cmd.OutOrStdout(), "Preview only for %s\n", result.Root)
-			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Preview only (%s scope)\n", result.Scope)
+			} else if result.Scope == agentsetup.ScopeLocal {
 				fmt.Fprintf(cmd.OutOrStdout(), "Updated project MCP config under %s\n", result.Root)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Updated global (user-level) MCP config\n")
 			}
 
 			for _, outcome := range result.Outcomes {
@@ -1554,6 +1576,9 @@ func newAgentsCmd() *cobra.Command {
 					change = "updated"
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "%s: %s (%s) -> %s\n", outcome.Name, status, change, outcome.ConfigPath)
+				if outcome.PluginPath != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  plugin -> %s\n", outcome.PluginPath)
+				}
 				if outcome.Message != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", outcome.Message)
 				}
@@ -1561,12 +1586,43 @@ func newAgentsCmd() *cobra.Command {
 			return nil
 		},
 	}
-	setupCmd.Flags().StringVar(&path, "path", ".", "Project root to update")
+	setupCmd.Flags().StringVar(&path, "path", ".", "Project root to update (used by --scope local)")
 	setupCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview changes without writing files")
+	setupCmd.Flags().StringVar(&scopeFlag, "scope", "", "Where to install MCP entries: global (user-level config, default) or local (project files)")
 
 	mcpCmd.AddCommand(setupCmd)
 	agentsCmd.AddCommand(mcpCmd)
 	return agentsCmd
+}
+
+// resolveSetupScope decides where agents mcp setup writes. An explicit
+// --scope wins; otherwise an interactive terminal is asked, defaulting to
+// global, and non-interactive runs (pipes, scripts, agents) use global.
+func resolveSetupScope(cmd *cobra.Command, scopeFlag string, path string) (string, error) {
+	if strings.TrimSpace(scopeFlag) != "" {
+		return agentsetup.ParseScope(scopeFlag)
+	}
+	if !stdinIsTerminal() {
+		return agentsetup.ScopeGlobal, nil
+	}
+
+	out := cmd.OutOrStdout()
+	fmt.Fprintln(out, "Where should the raph MCP entries be installed?")
+	fmt.Fprintln(out, "  [G] global — user-level agent configs, applies to every project (default)")
+	fmt.Fprintf(out, "  [l] local  — project files under %s\n", path)
+	fmt.Fprint(out, "Scope [G/l]: ")
+
+	reader := bufio.NewReader(cmd.InOrStdin())
+	line, err := reader.ReadString('\n')
+	if err != nil && line == "" {
+		// No answer available (e.g. closed stdin); fall back to the default.
+		return agentsetup.ScopeGlobal, nil
+	}
+	return agentsetup.ParseScope(line)
+}
+
+func stdinIsTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 func newReleaseCmd() *cobra.Command {

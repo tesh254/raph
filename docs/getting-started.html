@@ -108,9 +108,9 @@ curl -fsSL https://raw.githubusercontent.com/tesh254/raph/main/install.sh | sh</
             <p class="muted">Use this if you want a faster local pass or do not want remote embedding calls during indexing.</p>
           </article>
           <article class="card">
-            <h3>Install project MCP entries</h3>
+            <h3>Install MCP entries</h3>
             <pre><code>raph agents mcp setup --path .</code></pre>
-            <p class="muted">This writes project-scoped MCP config for whichever supported agents are detected.</p>
+            <p class="muted">This writes the raph MCP entry for supported agents — globally (user-level config, the default) or per project with <code>--scope local</code>. Interactive terminals are prompted for the scope.</p>
           </article>
           <article class="card">
             <h3>Start the MCP server</h3>

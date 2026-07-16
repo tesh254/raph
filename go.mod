@@ -13,7 +13,8 @@ require (
 	github.com/odvcencio/gotreesitter v0.20.3
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/mod v0.37.0
-	golang.org/x/sys v0.46.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	golang.org/x/tools v0.46.0
 	google.golang.org/protobuf v1.36.10
 	modernc.org/sqlite v1.51.0
