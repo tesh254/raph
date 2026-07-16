@@ -1360,11 +1360,20 @@ func newStartCmd() *cobra.Command {
 				verbose.Printf("sync worker started for MCP session")
 			}
 
-			verbose.Printf("initializing local storage")
-			store, err := db.InitStorage()
-			if err != nil {
-				return err
-			}
+			// Storage opens lazily on the first tool call. Opening brain.db
+			// eagerly can wait multiple seconds on the write lock while the
+			// sync worker is mid-index, and MCP clients (opencode gives local
+			// servers 5s by default) mark the server failed if the initialize
+			// handshake doesn't complete in time.
+			verbose.Printf("deferring local storage open until first tool call")
+			store := db.NewLazyStore(func() (db.GraphStore, error) {
+				verbose.Printf("initializing local storage")
+				s, err := db.InitStorage()
+				if err != nil {
+					return nil, err
+				}
+				return s, nil
+			})
 			defer store.Close()
 
 			verbose.Printf("creating MCP server wrapper")
