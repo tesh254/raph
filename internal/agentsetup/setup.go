@@ -220,10 +220,6 @@ func Setup(opts Options) (Result, error) {
 }
 
 func upsertJSONServer(path string, schemaKey string, schemaValue string, containerKey string, serverName string, serverValue map[string]any, dryRun bool) (bool, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return false, fmt.Errorf("create config directory: %w", err)
-	}
-
 	// Round-trip the desired value through JSON so the DeepEqual below compares
 	// like with like: values parsed from disk are map[string]any/[]any/float64,
 	// while literals here carry Go types ([]string, int). Without this the
@@ -275,6 +271,11 @@ func upsertJSONServer(path string, schemaKey string, schemaValue string, contain
 		return false, fmt.Errorf("encode %s: %w", path, err)
 	}
 	data = append(data, '\n')
+	// Create the directory only once a write is certain, so dry runs and
+	// no-op runs leave the filesystem untouched.
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, fmt.Errorf("create config directory: %w", err)
+	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		return false, fmt.Errorf("write %s: %w", path, err)
 	}
@@ -306,10 +307,6 @@ func normalizeJSONValue(value any) (any, error) {
 }
 
 func upsertCodexServer(path string, dryRun bool) (bool, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return false, fmt.Errorf("create config directory: %w", err)
-	}
-
 	section := strings.Join([]string{
 		"[mcp_servers.raph]",
 		`command = "raph"`,
@@ -334,6 +331,9 @@ func upsertCodexServer(path string, dryRun bool) (bool, error) {
 		next = []byte(section)
 	} else {
 		next = append(append(append([]byte(strings.TrimRight(string(data), "\n")), '\n'), []byte(section)...), '\n')
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, fmt.Errorf("create config directory: %w", err)
 	}
 	if err := os.WriteFile(path, next, 0o644); err != nil {
 		return false, fmt.Errorf("write %s: %w", path, err)

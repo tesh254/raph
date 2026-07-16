@@ -4,6 +4,7 @@ package main_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -76,7 +77,8 @@ func startServer(t *testing.T, home string) *mcpProcess {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd.Stderr = nil
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +97,11 @@ func startServer(t *testing.T, home string) *mcpProcess {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
 		killSyncWorker(home)
+		// Surface server-side diagnostics only when something went wrong;
+		// stderr is safe to read here because Wait has returned.
+		if t.Failed() && stderr.Len() > 0 {
+			t.Logf("raph start stderr:\n%s", stderr.String())
+		}
 	})
 
 	return &mcpProcess{t: t, cmd: cmd, stdin: json.NewEncoder(stdin), lines: lines}

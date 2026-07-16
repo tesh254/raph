@@ -282,14 +282,26 @@ func TestSetupDryRunWritesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var files []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			files = append(files, entry.Name())
-		}
+	if len(entries) != 0 {
+		t.Fatalf("expected dry run to leave the filesystem untouched, found %v", entries)
 	}
-	if len(files) != 0 {
-		t.Fatalf("expected dry run to write no config files, found %v", files)
+}
+
+func TestSetupGlobalDryRunLeavesHomeUntouched(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	if _, err := Setup(Options{Root: t.TempDir(), DryRun: true, Scope: ScopeGlobal}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected global dry run to create no directories under home, found %v", entries)
 	}
 }
 
