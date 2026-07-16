@@ -334,3 +334,59 @@ func TestAccessAnalytics(t *testing.T) {
 		t.Fatalf("expected 5 events in last 24h, got %d", a.Last24h)
 	}
 }
+
+func TestMigrateIfNeededSkipsWhenSchemaVersionCurrent(t *testing.T) {
+	rawDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &LibSQLStore{db: rawDB}
+	defer store.Close()
+
+	if err := store.migrateIfNeeded(); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("expected schema stamped at %d, got %d", schemaVersion, version)
+	}
+
+	// Drop a migration-managed table: if the second pass really skips, the
+	// table stays gone; if it re-runs, CREATE TABLE IF NOT EXISTS restores it.
+	if _, err := rawDB.Exec(`DROP TABLE access_events`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateIfNeeded(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	err = rawDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'access_events'`).Scan(&count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("expected migration pass to be skipped for a current schema version, but DDL ran again")
+	}
+}
+
+func TestMigrateIfNeededRunsWhenSchemaVersionBehind(t *testing.T) {
+	rawDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &LibSQLStore{db: rawDB}
+	defer store.Close()
+
+	// A fresh database reports user_version 0, i.e. behind schemaVersion.
+	if err := store.migrateIfNeeded(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveNode(context.Background(), Node{
+		ID: "node", Workspace: "ws", Domain: "code", Type: "file", Name: "node.go",
+	}); err != nil {
+		t.Fatalf("expected migrated schema to accept writes: %v", err)
+	}
+}

@@ -151,6 +151,15 @@ type TableDump struct {
 	Rows    []map[string]string `json:"rows"`
 }
 
+// schemaVersion is stamped into the database via PRAGMA user_version after a
+// successful migration pass. Bump it whenever migrate(), ensureNodeColumns(),
+// or backfillNodesFTS() gain new DDL so existing databases re-run the pass
+// exactly once. Databases already at (or past) this version skip the pass
+// entirely, which keeps startup read-only: WAL readers never wait on a
+// concurrent writer, so an MCP client's startup timeout can't trip while the
+// sync worker holds the write lock mid-index.
+const schemaVersion = 1
+
 func InitStorage() (*LibSQLStore, error) {
 	paths, err := config.EnsureBaseLayout()
 	if err != nil {
@@ -178,13 +187,35 @@ func InitStorage() (*LibSQLStore, error) {
 
 	db.SetMaxOpenConns(1)
 	store := &LibSQLStore{db: db}
-	verbose.Printf("running database migrations...")
-	if err := store.migrate(); err != nil {
+	if err := store.migrateIfNeeded(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	verbose.Printf("database migrations complete")
 	return store, nil
+}
+
+// migrateIfNeeded runs the migration pass only when the stored schema version
+// is behind schemaVersion. A database stamped at or past the current version
+// skips every DDL statement, so startup issues no writes at all.
+func (s *LibSQLStore) migrateIfNeeded() error {
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
+	}
+	if version >= schemaVersion {
+		verbose.Printf("schema current version=%d, skipping migrations", version)
+		return nil
+	}
+
+	verbose.Printf("running database migrations version=%d target=%d...", version, schemaVersion)
+	if err := s.migrate(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return fmt.Errorf("stamp schema version: %w", err)
+	}
+	verbose.Printf("database migrations complete")
+	return nil
 }
 
 func (s *LibSQLStore) Close() error {
