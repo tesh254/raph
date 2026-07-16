@@ -1,0 +1,35 @@
+docs/mcp-agents.html
+  s_b616119b05f3cd::t_1bb20a5a59819c 132
+README.md
+  s_b616119b05f3cd::t_7d3aee6c1c769f 71-75
+internal/agentsetup/setup_test.go
+  s_b616119b05f3cd::t_dc5b928197d600 424-502
+internal/agentsetup/setup.go
+  s_b616119b05f3cd::t_23eb18cc0675e7 106-108,110-116,118,120,122
+  s_b616119b05f3cd::t_91ca68759b8f21 217-233,252,261-296
+  s_b616119b05f3cd::t_2df190a726a2c7 4-5,18-23
+  s_b616119b05f3cd::t_59e225a2b89524 58
+  s_b616119b05f3cd::t_c9b20ca2d66255 75-79
+  s_b616119b05f3cd::t_65928b79ce19da 24
+  s_b616119b05f3cd::t_7817f98d2a6ef4 297
+internal/agentsetup/opencode_plugin.ts
+  s_b616119b05f3cd::t_1b63490cf6d87d 1-72
+cmd/raph/main.go
+  s_b616119b05f3cd::t_46eab9d54e6d93 1579-1581
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "827a8ac198abeab250d4f252f8b8b5b2db084e50",
+  "prompts": {},
+  "sessions": {
+    "s_b616119b05f3cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "88cc8262-7d36-4d42-9a1c-6e2b6c7b31d9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
