@@ -1576,6 +1576,9 @@ func newAgentsCmd() *cobra.Command {
 					change = "updated"
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "%s: %s (%s) -> %s\n", outcome.Name, status, change, outcome.ConfigPath)
+				if outcome.PluginPath != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  plugin -> %s\n", outcome.PluginPath)
+				}
 				if outcome.Message != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", outcome.Message)
 				}

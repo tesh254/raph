@@ -421,3 +421,82 @@ func TestSetupRejectsUnknownScope(t *testing.T) {
 		t.Fatal("expected unknown scope to be rejected")
 	}
 }
+
+func TestSetupInstallsOpencodePluginLocalScope(t *testing.T) {
+	root := t.TempDir()
+
+	result, err := Setup(Options{Root: root, Scope: ScopeLocal})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pluginPath := filepath.Join(root, ".opencode", "plugins", "raph.ts")
+	for _, outcome := range result.Outcomes {
+		if outcome.Name == "opencode" && outcome.PluginPath != pluginPath {
+			t.Fatalf("expected opencode plugin path %s, got %s", pluginPath, outcome.PluginPath)
+		}
+	}
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("expected opencode plugin written: %v", err)
+	}
+	if !strings.Contains(string(data), "RaphPlugin") {
+		t.Fatalf("expected embedded plugin source, got %q", string(data[:min(len(data), 120)]))
+	}
+
+	// Second run must be a no-op; a locally modified plugin gets restored.
+	again, err := Setup(Options{Root: root, Scope: ScopeLocal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, outcome := range again.Outcomes {
+		if outcome.Changed {
+			t.Fatalf("expected second run to be a no-op for %s", outcome.Name)
+		}
+	}
+	if err := os.WriteFile(pluginPath, []byte("// drifted"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Setup(Options{Root: root, Scope: ScopeLocal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, outcome := range restored.Outcomes {
+		if outcome.Name == "opencode" && !outcome.Changed {
+			t.Fatal("expected drifted plugin to be restored")
+		}
+	}
+	data, err = os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "RaphPlugin") {
+		t.Fatal("expected drifted plugin content restored to canonical source")
+	}
+}
+
+func TestSetupInstallsOpencodePluginGlobalScope(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	if _, err := Setup(Options{Root: t.TempDir(), Scope: ScopeGlobal}); err != nil {
+		t.Fatal(err)
+	}
+	pluginPath := filepath.Join(home, ".config", "opencode", "plugins", "raph.ts")
+	if _, err := os.Stat(pluginPath); err != nil {
+		t.Fatalf("expected global opencode plugin at %s: %v", pluginPath, err)
+	}
+}
+
+func TestSetupDryRunDoesNotWritePlugin(t *testing.T) {
+	root := t.TempDir()
+
+	if _, err := Setup(Options{Root: root, DryRun: true, Scope: ScopeLocal}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".opencode")); !os.IsNotExist(err) {
+		t.Fatalf("expected dry run to write no plugin directory, stat err = %v", err)
+	}
+}

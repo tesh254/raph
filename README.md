@@ -68,6 +68,11 @@ In an interactive terminal this prompts for the install scope — global
 `--path`). Pass `--scope global` or `--scope local` to skip the prompt;
 non-interactive runs default to global.
 
+For opencode this also installs the raph plugin (`raph.ts`) into the
+scope-matching plugins directory — `~/.config/opencode/plugins/` for global,
+`.opencode/plugins/` for local — where opencode auto-loads it; the plugin
+surfaces memory-first guidance and raph workflow hints to the agent.
+
 To skip embeddings during indexing:
 
 ```sh

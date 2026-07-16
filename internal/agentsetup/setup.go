@@ -1,6 +1,8 @@
 package agentsetup
 
 import (
+	"bytes"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,13 @@ import (
 
 	"raph/internal/verbose"
 )
+
+// opencodePluginSource is the raph opencode plugin, installed alongside the
+// MCP entry. opencode auto-loads .ts files from .opencode/plugins/ (project)
+// and ~/.config/opencode/plugins/ (global), so no config entry is needed.
+//
+//go:embed opencode_plugin.ts
+var opencodePluginSource []byte
 
 const (
 	// ScopeGlobal installs the raph MCP entry into each agent's user-level
@@ -46,6 +55,7 @@ type Outcome struct {
 	Binary     string
 	Installed  bool
 	ConfigPath string
+	PluginPath string
 	Changed    bool
 	Message    string
 }
@@ -62,6 +72,11 @@ type agentSpec struct {
 	LocalConfigPath  func(root string) string
 	GlobalConfigPath func() (string, error)
 	Write            func(path string, dryRun bool) (bool, error)
+	// Plugin paths are optional; agents that support a raph plugin get the
+	// embedded source installed next to their MCP entry.
+	PluginLocalPath  func(root string) string
+	PluginGlobalPath func() (string, error)
+	PluginSource     []byte
 }
 
 func Setup(opts Options) (Result, error) {
@@ -88,17 +103,23 @@ func Setup(opts Options) (Result, error) {
 				return filepath.Join(root, "opencode.json")
 			},
 			GlobalConfigPath: func() (string, error) {
-				// opencode reads its user-level config from the XDG config
-				// directory on every platform, not the OS-native one.
-				if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
-					return filepath.Join(xdg, "opencode", "opencode.json"), nil
-				}
-				home, err := os.UserHomeDir()
+				dir, err := opencodeGlobalDir()
 				if err != nil {
-					return "", fmt.Errorf("resolve home directory: %w", err)
+					return "", err
 				}
-				return filepath.Join(home, ".config", "opencode", "opencode.json"), nil
+				return filepath.Join(dir, "opencode.json"), nil
 			},
+			PluginLocalPath: func(root string) string {
+				return filepath.Join(root, ".opencode", "plugins", "raph.ts")
+			},
+			PluginGlobalPath: func() (string, error) {
+				dir, err := opencodeGlobalDir()
+				if err != nil {
+					return "", err
+				}
+				return filepath.Join(dir, "plugins", "raph.ts"), nil
+			},
+			PluginSource: opencodePluginSource,
 			Write: func(path string, dryRun bool) (bool, error) {
 				return upsertJSONServer(path, "$schema", "https://opencode.ai/config.json", "mcp", "raph", map[string]any{
 					"type":    "local",
@@ -193,6 +214,23 @@ func Setup(opts Options) (Result, error) {
 			return Result{}, fmt.Errorf("%s config: %w", spec.Name, writeErr)
 		}
 
+		pluginPath := ""
+		if spec.PluginLocalPath != nil {
+			pluginPath = spec.PluginLocalPath(absRoot)
+			if scope == ScopeGlobal {
+				pluginPath, err = spec.PluginGlobalPath()
+				if err != nil {
+					return Result{}, fmt.Errorf("%s global plugin path: %w", spec.Name, err)
+				}
+			}
+			verbose.Printf("agent=%s pluginPath=%s", spec.Name, pluginPath)
+			pluginChanged, pluginErr := writeFileIfChanged(pluginPath, spec.PluginSource, opts.DryRun)
+			if pluginErr != nil {
+				return Result{}, fmt.Errorf("%s plugin: %w", spec.Name, pluginErr)
+			}
+			changed = changed || pluginChanged
+		}
+
 		message := "updated"
 		if opts.DryRun {
 			message = "previewed"
@@ -211,12 +249,50 @@ func Setup(opts Options) (Result, error) {
 			Binary:     binaryPath,
 			Installed:  installed,
 			ConfigPath: configPath,
+			PluginPath: pluginPath,
 			Changed:    changed,
 			Message:    message,
 		})
 	}
 
 	return result, nil
+}
+
+// opencodeGlobalDir returns opencode's user-level config directory. opencode
+// reads from the XDG config directory on every platform, not the OS-native
+// one.
+func opencodeGlobalDir() (string, error) {
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		return filepath.Join(xdg, "opencode"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".config", "opencode"), nil
+}
+
+// writeFileIfChanged writes content to path unless the file already matches.
+// Directories are created only when a write is certain, so dry runs and
+// no-op runs leave the filesystem untouched.
+func writeFileIfChanged(path string, content []byte, dryRun bool) (bool, error) {
+	existing, err := os.ReadFile(path)
+	if err == nil && bytes.Equal(existing, content) {
+		return false, nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if dryRun {
+		return true, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, fmt.Errorf("create plugin directory: %w", err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return false, fmt.Errorf("write %s: %w", path, err)
+	}
+	return true, nil
 }
 
 func upsertJSONServer(path string, schemaKey string, schemaValue string, containerKey string, serverName string, serverValue map[string]any, dryRun bool) (bool, error) {
