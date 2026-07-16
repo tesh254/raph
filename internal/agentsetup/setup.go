@@ -13,9 +13,32 @@ import (
 	"raph/internal/verbose"
 )
 
+const (
+	// ScopeGlobal installs the raph MCP entry into each agent's user-level
+	// config, so every project picks it up. This is the default.
+	ScopeGlobal = "global"
+	// ScopeLocal installs into project files under the chosen root.
+	ScopeLocal = "local"
+)
+
+// ParseScope normalizes a user-supplied scope answer. Empty input means the
+// default (global); a leading "g" or "l" is enough, so prompt answers like
+// "G" or "l" work.
+func ParseScope(input string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "", "g", ScopeGlobal:
+		return ScopeGlobal, nil
+	case "l", ScopeLocal:
+		return ScopeLocal, nil
+	default:
+		return "", fmt.Errorf("invalid scope %q: use %q or %q", input, ScopeGlobal, ScopeLocal)
+	}
+}
+
 type Options struct {
 	Root   string
 	DryRun bool
+	Scope  string
 }
 
 type Outcome struct {
@@ -29,14 +52,16 @@ type Outcome struct {
 
 type Result struct {
 	Root     string
+	Scope    string
 	Outcomes []Outcome
 }
 
 type agentSpec struct {
-	Name       string
-	Binary     string
-	ConfigPath func(root string) string
-	Write      func(path string, dryRun bool) (bool, error)
+	Name             string
+	Binary           string
+	LocalConfigPath  func(root string) string
+	GlobalConfigPath func() (string, error)
+	Write            func(path string, dryRun bool) (bool, error)
 }
 
 func Setup(opts Options) (Result, error) {
@@ -49,14 +74,30 @@ func Setup(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve project root: %w", err)
 	}
-	verbose.Printf("agents mcp setup root=%s dryRun=%t", absRoot, opts.DryRun)
+	scope, err := ParseScope(opts.Scope)
+	if err != nil {
+		return Result{}, err
+	}
+	verbose.Printf("agents mcp setup root=%s scope=%s dryRun=%t", absRoot, scope, opts.DryRun)
 
 	specs := []agentSpec{
 		{
 			Name:   "opencode",
 			Binary: "opencode",
-			ConfigPath: func(root string) string {
+			LocalConfigPath: func(root string) string {
 				return filepath.Join(root, "opencode.json")
+			},
+			GlobalConfigPath: func() (string, error) {
+				// opencode reads its user-level config from the XDG config
+				// directory on every platform, not the OS-native one.
+				if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+					return filepath.Join(xdg, "opencode", "opencode.json"), nil
+				}
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return "", fmt.Errorf("resolve home directory: %w", err)
+				}
+				return filepath.Join(home, ".config", "opencode", "opencode.json"), nil
 			},
 			Write: func(path string, dryRun bool) (bool, error) {
 				return upsertJSONServer(path, "$schema", "https://opencode.ai/config.json", "mcp", "raph", map[string]any{
@@ -74,9 +115,12 @@ func Setup(opts Options) (Result, error) {
 		{
 			Name:   "claude code",
 			Binary: "claude",
-			ConfigPath: func(root string) string {
+			LocalConfigPath: func(root string) string {
 				return filepath.Join(root, ".mcp.json")
 			},
+			// User-scope MCP servers live in ~/.claude.json under the same
+			// mcpServers key the project .mcp.json uses.
+			GlobalConfigPath: homeConfigPath(".claude.json"),
 			Write: func(path string, dryRun bool) (bool, error) {
 				return upsertJSONServer(path, "", "", "mcpServers", "raph", map[string]any{
 					"type":    "stdio",
@@ -89,9 +133,10 @@ func Setup(opts Options) (Result, error) {
 		{
 			Name:   "codex",
 			Binary: "codex",
-			ConfigPath: func(root string) string {
+			LocalConfigPath: func(root string) string {
 				return filepath.Join(root, ".codex", "config.toml")
 			},
+			GlobalConfigPath: homeConfigPath(".codex", "config.toml"),
 			Write: func(path string, dryRun bool) (bool, error) {
 				return upsertCodexServer(path, dryRun)
 			},
@@ -99,9 +144,10 @@ func Setup(opts Options) (Result, error) {
 		{
 			Name:   "cursor",
 			Binary: "cursor",
-			ConfigPath: func(root string) string {
+			LocalConfigPath: func(root string) string {
 				return filepath.Join(root, ".cursor", "mcp.json")
 			},
+			GlobalConfigPath: homeConfigPath(".cursor", "mcp.json"),
 			Write: func(path string, dryRun bool) (bool, error) {
 				return upsertJSONServer(path, "", "", "mcpServers", "raph", map[string]any{
 					"type":    "stdio",
@@ -114,9 +160,10 @@ func Setup(opts Options) (Result, error) {
 		{
 			Name:   "pi",
 			Binary: "pi",
-			ConfigPath: func(root string) string {
+			LocalConfigPath: func(root string) string {
 				return filepath.Join(root, ".pi", "mcp.json")
 			},
+			GlobalConfigPath: homeConfigPath(".pi", "mcp.json"),
 			Write: func(path string, dryRun bool) (bool, error) {
 				return upsertJSONServer(path, "", "", "mcpServers", "raph", map[string]any{
 					"type":    "stdio",
@@ -128,13 +175,19 @@ func Setup(opts Options) (Result, error) {
 		},
 	}
 
-	result := Result{Root: absRoot}
+	result := Result{Root: absRoot, Scope: scope}
 	for _, spec := range specs {
 		binaryPath, err := exec.LookPath(spec.Binary)
 		installed := err == nil
-		configPath := spec.ConfigPath(absRoot)
+		configPath := spec.LocalConfigPath(absRoot)
+		if scope == ScopeGlobal {
+			configPath, err = spec.GlobalConfigPath()
+			if err != nil {
+				return Result{}, fmt.Errorf("%s global config path: %w", spec.Name, err)
+			}
+		}
 
-		verbose.Printf("agent=%s installed=%t configPath=%s", spec.Name, installed, configPath)
+		verbose.Printf("agent=%s installed=%t scope=%s configPath=%s", spec.Name, installed, scope, configPath)
 		changed, writeErr := spec.Write(configPath, opts.DryRun)
 		if writeErr != nil {
 			return Result{}, fmt.Errorf("%s config: %w", spec.Name, writeErr)
@@ -226,6 +279,18 @@ func upsertJSONServer(path string, schemaKey string, schemaValue string, contain
 		return false, fmt.Errorf("write %s: %w", path, err)
 	}
 	return true, nil
+}
+
+// homeConfigPath returns a resolver for a config file rooted at the user's
+// home directory, e.g. homeConfigPath(".cursor", "mcp.json").
+func homeConfigPath(elem ...string) func() (string, error) {
+	return func() (string, error) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory: %w", err)
+		}
+		return filepath.Join(append([]string{home}, elem...)...), nil
+	}
 }
 
 func normalizeJSONValue(value any) (any, error) {

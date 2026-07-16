@@ -62,7 +62,7 @@ export const RaphPlugin: Plugin = async ({ client, directory, worktree }) => {
         async execute() {
           return [
             "Run `raph init --path .` to index the current repo.",
-            "Run `raph agents mcp setup --path .` to install project MCP config.",
+            "Run `raph agents mcp setup --path . --scope local` to install project MCP config (default scope is global).",
             "Run `raph sync --path .` to keep the repo continuously indexed.",
           ].join("\n")
         },

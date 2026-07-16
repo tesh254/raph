@@ -231,7 +231,7 @@ func TestUpsertCodexServerAppendsToExistingConfig(t *testing.T) {
 func TestSetupWritesEveryAgentConfigAndIsIdempotent(t *testing.T) {
 	root := t.TempDir()
 
-	result, err := Setup(Options{Root: root})
+	result, err := Setup(Options{Root: root, Scope: ScopeLocal})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestSetupWritesEveryAgentConfigAndIsIdempotent(t *testing.T) {
 		}
 	}
 
-	again, err := Setup(Options{Root: root})
+	again, err := Setup(Options{Root: root, Scope: ScopeLocal})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestSetupWritesEveryAgentConfigAndIsIdempotent(t *testing.T) {
 func TestSetupDryRunWritesNothing(t *testing.T) {
 	root := t.TempDir()
 
-	result, err := Setup(Options{Root: root, DryRun: true})
+	result, err := Setup(Options{Root: root, DryRun: true, Scope: ScopeLocal})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,5 +290,122 @@ func TestSetupDryRunWritesNothing(t *testing.T) {
 	}
 	if len(files) != 0 {
 		t.Fatalf("expected dry run to write no config files, found %v", files)
+	}
+}
+
+func TestParseScope(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+		fails bool
+	}{
+		{"", ScopeGlobal, false},
+		{"g", ScopeGlobal, false},
+		{"G", ScopeGlobal, false},
+		{"global", ScopeGlobal, false},
+		{" Global \n", ScopeGlobal, false},
+		{"l", ScopeLocal, false},
+		{"L", ScopeLocal, false},
+		{"local", ScopeLocal, false},
+		{"project", "", true},
+		{"x", "", true},
+	}
+	for _, tc := range cases {
+		got, err := ParseScope(tc.input)
+		if tc.fails {
+			if err == nil {
+				t.Fatalf("ParseScope(%q): expected error, got %q", tc.input, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Fatalf("ParseScope(%q) = %q, %v; want %q", tc.input, got, err, tc.want)
+		}
+	}
+}
+
+func TestSetupGlobalScopeWritesUserLevelConfigs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	// Scope defaults to global when unset.
+	result, err := Setup(Options{Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Scope != ScopeGlobal {
+		t.Fatalf("expected default scope global, got %q", result.Scope)
+	}
+
+	for _, rel := range []string{
+		filepath.Join(".config", "opencode", "opencode.json"),
+		".claude.json",
+		filepath.Join(".codex", "config.toml"),
+		filepath.Join(".cursor", "mcp.json"),
+		filepath.Join(".pi", "mcp.json"),
+	} {
+		if _, err := os.Stat(filepath.Join(home, rel)); err != nil {
+			t.Fatalf("expected global config %s under temp home: %v", rel, err)
+		}
+	}
+
+	// The claude user config carries far more than MCP entries; the upsert
+	// must merge, not replace.
+	claudePath := filepath.Join(home, ".claude.json")
+	data, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := root["mcpServers"].(map[string]any)["raph"]; !ok {
+		t.Fatalf("expected mcpServers.raph in %s, got %s", claudePath, data)
+	}
+
+	again, err := Setup(Options{Root: t.TempDir(), Scope: ScopeGlobal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, outcome := range again.Outcomes {
+		if outcome.Changed {
+			t.Fatalf("expected global setup to be idempotent for %s, got %q", outcome.Name, outcome.Message)
+		}
+	}
+}
+
+func TestSetupGlobalScopeHonorsXDGConfigHomeForOpencode(t *testing.T) {
+	home := t.TempDir()
+	xdg := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	result, err := Setup(Options{Root: t.TempDir(), Scope: ScopeGlobal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, outcome := range result.Outcomes {
+		if outcome.Name != "opencode" {
+			continue
+		}
+		want := filepath.Join(xdg, "opencode", "opencode.json")
+		if outcome.ConfigPath != want {
+			t.Fatalf("expected opencode global config at %s, got %s", want, outcome.ConfigPath)
+		}
+		if _, err := os.Stat(want); err != nil {
+			t.Fatalf("expected opencode config written to XDG path: %v", err)
+		}
+		return
+	}
+	t.Fatal("no opencode outcome in setup result")
+}
+
+func TestSetupRejectsUnknownScope(t *testing.T) {
+	if _, err := Setup(Options{Root: t.TempDir(), Scope: "everywhere"}); err == nil {
+		t.Fatal("expected unknown scope to be rejected")
 	}
 }
