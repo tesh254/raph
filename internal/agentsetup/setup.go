@@ -218,6 +218,9 @@ func Setup(opts Options) (Result, error) {
 		if spec.PluginLocalPath != nil {
 			pluginPath = spec.PluginLocalPath(absRoot)
 			if scope == ScopeGlobal {
+				if spec.PluginGlobalPath == nil {
+					return Result{}, fmt.Errorf("%s global plugin path: not configured", spec.Name)
+				}
 				pluginPath, err = spec.PluginGlobalPath()
 				if err != nil {
 					return Result{}, fmt.Errorf("%s global plugin path: %w", spec.Name, err)
