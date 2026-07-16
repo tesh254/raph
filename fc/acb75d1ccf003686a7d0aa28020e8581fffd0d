@@ -1,0 +1,27 @@
+internal/db/libsql.go
+  s_b616119b05f3cd::t_fdb6d4dc7b8585 228-233
+  s_b616119b05f3cd::t_13903e38be27bc 396
+  s_b616119b05f3cd::t_cbf942cb067885 355-366
+  s_b616119b05f3cd::t_268a21a22f28c0 234-236,247,255-259,277,279,281,296-297,306-307,314-317,324-328
+  s_b616119b05f3cd::t_5bc9813b77b8f1 338,340-341
+internal/db/libsql_test.go
+  s_b616119b05f3cd::t_73c69ae06ce413 428-451,453-463
+  s_b616119b05f3cd::t_6e10a807b1a286 5,7
+  s_b616119b05f3cd::t_6a12e44c1eb2a6 452
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "fcacb75d1ccf003686a7d0aa28020e8581fffd0d",
+  "prompts": {},
+  "sessions": {
+    "s_b616119b05f3cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "88cc8262-7d36-4d42-9a1c-6e2b6c7b31d9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
