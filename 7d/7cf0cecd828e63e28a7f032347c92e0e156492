@@ -1,0 +1,24 @@
+internal/agentsetup/setup_test.go
+  s_b616119b05f3cd::t_86bad3a849de22 1-103
+internal/agentsetup/setup.go
+  s_b616119b05f3cd::t_879e5db621fcce 174-183
+  s_b616119b05f3cd::t_d7110c02c6c2f3 66-70
+  s_b616119b05f3cd::t_60b4f3eaeae053 231-240
+  s_b616119b05f3cd::t_270f6d0bcecfb7 241-242
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "7d7cf0cecd828e63e28a7f032347c92e0e156492",
+  "prompts": {},
+  "sessions": {
+    "s_b616119b05f3cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "88cc8262-7d36-4d42-9a1c-6e2b6c7b31d9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
