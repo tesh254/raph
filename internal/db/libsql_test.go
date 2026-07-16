@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"path/filepath"
 	"testing"
 )
@@ -421,5 +423,41 @@ func TestMigrateIfNeededSkipsWhenSchemaVersionAhead(t *testing.T) {
 	}
 	if version != 99 {
 		t.Fatalf("expected stamped version preserved, got %d", version)
+	}
+}
+
+// TestSchemaVersionBumpedWhenMigrationsChange pins a hash of every migration
+// statement to the current schemaVersion. If you edit migrationStatements or
+// nodeColumnAdditions without bumping schemaVersion, existing databases would
+// silently skip the new DDL forever — this test turns that mistake into a
+// build failure with instructions.
+func TestSchemaVersionBumpedWhenMigrationsChange(t *testing.T) {
+	h := sha256.New()
+	for _, q := range migrationStatements {
+		h.Write([]byte(q))
+		h.Write([]byte{0})
+	}
+	for _, add := range nodeColumnAdditions {
+		h.Write([]byte(add.name))
+		h.Write([]byte{0})
+		h.Write([]byte(add.ddl))
+		h.Write([]byte{0})
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+
+	// One pinned hash per schemaVersion, ever. When migrations change:
+	// 1. bump schemaVersion in libsql.go
+	// 2. add the new version with the hash this test prints on failure
+	pinned := map[int]string{
+		1: "279659415c0a7a8b8b6fc79a9a7332dba1c42d490369f2984f9145ce0cc919f3",
+	}
+
+	want, ok := pinned[schemaVersion]
+	if !ok {
+		t.Fatalf("schemaVersion %d has no pinned migration hash; add {%d: %q} to this test", schemaVersion, schemaVersion, got)
+	}
+	if got != want {
+		t.Fatalf("migration statements changed but schemaVersion is still %d.\n"+
+			"Bump schemaVersion in libsql.go, then pin the new version's hash here: %q", schemaVersion, got)
 	}
 }
