@@ -390,3 +390,36 @@ func TestMigrateIfNeededRunsWhenSchemaVersionBehind(t *testing.T) {
 		t.Fatalf("expected migrated schema to accept writes: %v", err)
 	}
 }
+
+func TestMigrateIfNeededSkipsWhenSchemaVersionAhead(t *testing.T) {
+	rawDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &LibSQLStore{db: rawDB}
+	defer store.Close()
+
+	// A database stamped by a newer raph must not be re-migrated by an older
+	// binary: its schema is already a superset of what this binary creates.
+	if _, err := rawDB.Exec(`PRAGMA user_version = 99`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateIfNeeded(); err != nil {
+		t.Fatal(err)
+	}
+
+	var tables int
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatalf("expected no DDL against a schema stamped ahead, found %d tables", tables)
+	}
+	var version int
+	if err := rawDB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 99 {
+		t.Fatalf("expected stamped version preserved, got %d", version)
+	}
+}
