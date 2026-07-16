@@ -1,0 +1,19 @@
+internal/agentsetup/setup.go
+  s_b616119b05f3cd::t_dcb62948bd93c2 221-223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "8d3fa224a567be4831406e72f519d045cb9555df",
+  "prompts": {},
+  "sessions": {
+    "s_b616119b05f3cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "88cc8262-7d36-4d42-9a1c-6e2b6c7b31d9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
