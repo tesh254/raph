@@ -1,0 +1,52 @@
+cmd/raph/main.go
+  s_b616119b05f3cd::t_4938025562a655 1536,1543-1547,1550,1554-1559,1562-1563,1565-1566
+  s_b616119b05f3cd::t_cdc2926d2db574 4
+  s_b616119b05f3cd::t_fd12aa831d0d27 37
+  s_b616119b05f3cd::t_e966df00e7ed9c 1586,1588,1595-1621,1623
+  s_b616119b05f3cd::t_50c036d654643f 1622
+  s_b616119b05f3cd::t_9eab0bf9a97806 1624
+go.mod
+  s_b616119b05f3cd::t_d466903c5cb58b 17
+  s_b616119b05f3cd::t_24de0c6a2da421 16
+docs/getting-started.html
+  s_b616119b05f3cd::t_98bfc4537d2565 111,113
+docs/mcp-agents.html
+  s_b616119b05f3cd::t_db7d7b5a452dc4 35,37,39
+  s_b616119b05f3cd::t_89e9455cc2e7bb 155
+docs/reference.html
+  s_b616119b05f3cd::t_c70108e7f72938 103
+internal/agentsetup/setup_test.go
+  s_b616119b05f3cd::t_145cd8015a0cbf 234
+  s_b616119b05f3cd::t_c94ad07de6a40f 258,272
+  s_b616119b05f3cd::t_6763284db8eacf 295-411
+README.md
+  s_b616119b05f3cd::t_3a60e09d05a346 171
+  s_b616119b05f3cd::t_0a9d311bbf37b2 206-211
+  s_b616119b05f3cd::t_d3377dc26e99db 60,66-69
+  s_b616119b05f3cd::t_20af525b87b74f 70
+internal/agentsetup/setup.go
+  s_b616119b05f3cd::t_f85aaf5ff3ab80 77-81,87,90-100
+  s_b616119b05f3cd::t_a219493b88a90e 178,182-188,190
+  s_b616119b05f3cd::t_f6f437246adfae 16-37,41,55,60-64
+  s_b616119b05f3cd::t_c0139fe94b1bb7 284-295
+  s_b616119b05f3cd::t_434eb0f7228a37 118,121-123,136,139,147,150,163,166
+  s_b616119b05f3cd::t_b005cc6fba7cd1 101
+go.sum
+  s_b616119b05f3cd::t_c1a337e25d1a48 158-159,171-172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "1e3b73e8a2822c4422deb60451a923fdb7c02723",
+  "prompts": {},
+  "sessions": {
+    "s_b616119b05f3cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "88cc8262-7d36-4d42-9a1c-6e2b6c7b31d9",
+        "model": "claude-fable-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
