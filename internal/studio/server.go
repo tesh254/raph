@@ -116,6 +116,7 @@ func (s *StudioServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/activity", s.handleActivity)
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/analytics", s.handleAnalytics)
+	mux.HandleFunc("/api/timeline", s.handleTimeline)
 	mux.HandleFunc("/api/actions/clear", s.handleClearDB)
 	mux.HandleFunc("/api/actions/init", s.handleInitDemo)
 
@@ -620,6 +621,25 @@ func (s *StudioServer) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, analytics)
+}
+
+func (s *StudioServer) handleTimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	days := 30
+	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 365 {
+			days = parsed
+		}
+	}
+	timeline, err := s.store.Timeline(r.Context(), days)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, timeline)
 }
 
 func (s *StudioServer) handleStats(w http.ResponseWriter, r *http.Request) {

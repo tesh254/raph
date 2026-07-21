@@ -1872,6 +1872,101 @@ func (s *LibSQLStore) Analytics(ctx context.Context, limit int) (Analytics, erro
 	return a, nil
 }
 
+// TimelinePoint is one UTC day of memory and handoff creation counts.
+type TimelinePoint struct {
+	Date     string `json:"date"` // YYYY-MM-DD
+	Memories int    `json:"memories"`
+	Handoffs int    `json:"handoffs"`
+}
+
+type Timeline struct {
+	Days           int             `json:"days"`
+	Points         []TimelinePoint `json:"points"`
+	TotalMemories  int             `json:"total_memories"`
+	ActiveMemories int             `json:"active_memories"`
+	TotalHandoffs  int             `json:"total_handoffs"`
+	FreshHandoffs  int             `json:"fresh_handoffs"`
+	UsedHandoffs   int             `json:"used_handoffs"`
+}
+
+// Timeline reports how memory records and handoff documents accumulate over
+// the trailing N days (UTC day buckets, zero-filled), plus current totals.
+// Powers the studio "memory & handoffs over time" view.
+func (s *LibSQLStore) Timeline(ctx context.Context, days int) (Timeline, error) {
+	if days <= 0 || days > 365 {
+		days = 30
+	}
+	t := Timeline{Days: days}
+
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	start := today.AddDate(0, 0, -(days - 1))
+	cutoff := start.Format("2006-01-02")
+
+	index := make(map[string]int, days)
+	t.Points = make([]TimelinePoint, days)
+	for i := 0; i < days; i++ {
+		date := start.AddDate(0, 0, i).Format("2006-01-02")
+		t.Points[i] = TimelinePoint{Date: date}
+		index[date] = i
+	}
+
+	// created_at values are RFC3339 UTC, so their first 10 bytes are the day.
+	memRows, err := s.db.QueryContext(ctx,
+		`SELECT substr(created_at, 1, 10) AS d, count(*) FROM memory_records
+		 WHERE substr(created_at, 1, 10) >= ? GROUP BY d`, cutoff)
+	if err != nil {
+		return Timeline{}, err
+	}
+	for memRows.Next() {
+		var d string
+		var c int
+		if err := memRows.Scan(&d, &c); err != nil {
+			_ = memRows.Close()
+			return Timeline{}, err
+		}
+		if i, ok := index[d]; ok {
+			t.Points[i].Memories = c
+		}
+	}
+	_ = memRows.Close()
+
+	handoffWhere := `type = 'doc' AND json_extract(COALESCE(properties_json, '{}'), '$.doc_type') = 'handoff'`
+	handRows, err := s.db.QueryContext(ctx,
+		`SELECT substr(created_at, 1, 10) AS d, count(*) FROM nodes
+		 WHERE `+handoffWhere+` AND substr(created_at, 1, 10) >= ? GROUP BY d`, cutoff)
+	if err != nil {
+		return Timeline{}, err
+	}
+	for handRows.Next() {
+		var d string
+		var c int
+		if err := handRows.Scan(&d, &c); err != nil {
+			_ = handRows.Close()
+			return Timeline{}, err
+		}
+		if i, ok := index[d]; ok {
+			t.Points[i].Handoffs = c
+		}
+	}
+	_ = handRows.Close()
+
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*), COALESCE(sum(CASE WHEN lifecycle_state = 'active' THEN 1 ELSE 0 END), 0) FROM memory_records`).
+		Scan(&t.TotalMemories, &t.ActiveMemories); err != nil {
+		return Timeline{}, err
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*),
+		        COALESCE(sum(CASE WHEN json_extract(COALESCE(properties_json, '{}'), '$.status') = 'fresh' THEN 1 ELSE 0 END), 0),
+		        COALESCE(sum(CASE WHEN json_extract(COALESCE(properties_json, '{}'), '$.status') = 'used' THEN 1 ELSE 0 END), 0)
+		 FROM nodes WHERE `+handoffWhere).
+		Scan(&t.TotalHandoffs, &t.FreshHandoffs, &t.UsedHandoffs); err != nil {
+		return Timeline{}, err
+	}
+
+	return t, nil
+}
+
 func marshalProperties(props map[string]string) (string, error) {
 	if len(props) == 0 {
 		return "{}", nil
