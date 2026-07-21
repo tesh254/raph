@@ -1,0 +1,31 @@
+cmd/raph/main.go
+  s_376147c4cce38e::t_0f768268d7f862 498-506
+internal/mcp/server.go
+  s_376147c4cce38e::t_d1c88dfc819f36 342
+  s_376147c4cce38e::t_e1c5701cc14206 748-751
+  s_376147c4cce38e::t_0d8102f377948a 898
+  s_376147c4cce38e::t_00b652e456ddbb 732-736
+  s_376147c4cce38e::t_2be8b7848b6276 374
+  s_376147c4cce38e::t_91f428239ee155 358
+  s_376147c4cce38e::t_466f0ee5d4857a 952-990
+  s_376147c4cce38e::t_db3aa13203684e 310
+  s_376147c4cce38e::t_c1841fefa460c2 493
+  s_376147c4cce38e::t_818e34cd1d6e86 285
+  s_376147c4cce38e::t_f71fa3503ea4f9 991
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "8ff814a33c3abaa33e5c97fe905f65a0dca8324d",
+  "prompts": {},
+  "sessions": {
+    "s_376147c4cce38e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "97914b88-4e28-416b-9c70-bda273d0f1c1",
+        "model": "claude-fable-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
