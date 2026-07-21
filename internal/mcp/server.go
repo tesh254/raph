@@ -282,6 +282,7 @@ func (m *MCPServerWrapper) registerTools() {
 		if err != nil {
 			return nil, SearchOutput{}, err
 		}
+		m.recordSearchHits(ctx, query, nodeIDs(output.Matches))
 		return textResult(renderJSON(output)), output, nil
 	})
 
@@ -306,6 +307,7 @@ func (m *MCPServerWrapper) registerTools() {
 			if err != nil {
 				return nil, MultiSearchOutput{}, fmt.Errorf("search %q: %w", query, err)
 			}
+			m.recordSearchHits(ctx, query, nodeIDs(result.Matches))
 			output.Results = append(output.Results, QuerySearchOutput{
 				Query: query, Mode: result.Mode, Matches: result.Matches,
 			})
@@ -337,6 +339,7 @@ func (m *MCPServerWrapper) registerTools() {
 		if len(nodes) > 0 {
 			output.Match = &nodes[0]
 		}
+		m.recordSearchHits(ctx, query, nodeIDs(nodes))
 		return textResult(renderJSON(output)), output, nil
 	})
 
@@ -352,6 +355,7 @@ func (m *MCPServerWrapper) registerTools() {
 		if err != nil {
 			return nil, NeighborOutput{}, err
 		}
+		m.recordAccess(ctx, strings.TrimSpace(args.NodeID), "neighbors", "")
 		output := NeighborOutput{Nodes: nodes, Edges: edges}
 		return textResult(renderJSON(output)), output, nil
 	})
@@ -367,6 +371,7 @@ func (m *MCPServerWrapper) registerTools() {
 		if err != nil {
 			return nil, CrossCorpusNeighborOutput{}, err
 		}
+		m.recordAccess(ctx, strings.TrimSpace(args.NodeID), "neighbors", "")
 		return textResult(renderJSON(output)), output, nil
 	})
 
@@ -485,6 +490,7 @@ func (m *MCPServerWrapper) registerTools() {
 		if err != nil {
 			return nil, MemoryHistoryOutput{}, err
 		}
+		m.recordAccess(ctx, strings.TrimSpace(args.NodeID), "read", "")
 		output := MemoryHistoryOutput{NodeID: strings.TrimSpace(args.NodeID), Revisions: revisions}
 		return textResult(renderJSON(output)), output, nil
 	})
@@ -723,7 +729,11 @@ func (m *MCPServerWrapper) registerTools() {
 		if err != nil {
 			return nil, query.Result{}, err
 		}
-		m.recordAccess(ctx, "", "search", strings.TrimSpace(args.Query))
+		hits := make([]string, 0, len(result.Matches))
+		for _, match := range result.Matches {
+			hits = append(hits, match.ID)
+		}
+		m.recordSearchHits(ctx, args.Query, hits)
 		return textResult(renderJSON(result)), result, nil
 	})
 
@@ -735,6 +745,10 @@ func (m *MCPServerWrapper) registerTools() {
 		if err != nil {
 			return nil, SearchCodebaseOutput{}, err
 		}
+		hits := nodeIDs(output.Symbols)
+		hits = append(hits, nodeIDs(output.Files)...)
+		hits = append(hits, nodeIDs(output.Chunks)...)
+		m.recordSearchHits(ctx, args.Query, hits)
 		return textResult(renderJSON(output)), output, nil
 	})
 }
@@ -881,6 +895,7 @@ func (m *MCPServerWrapper) searchKnowledge(ctx context.Context, scopeType string
 	if err != nil {
 		return ScopedMemorySearchOutput{}, err
 	}
+	m.recordSearchHits(ctx, query, memoryNodeIDs(output.Matches))
 	return ScopedMemorySearchOutput{
 		ScopeType: scopeType,
 		ScopeID:   scopeID,
@@ -932,6 +947,46 @@ func (m *MCPServerWrapper) recordAccess(ctx context.Context, nodeID, kind, query
 	}); ok {
 		_ = rec.RecordAccess(ctx, nodeID, kind, query)
 	}
+}
+
+// maxRecordedHits caps per-search node attribution so one broad query doesn't
+// swamp the access log.
+const maxRecordedHits = 10
+
+// recordSearchHits attributes a search and the nodes it surfaced. Every node
+// returned to an agent counts as touched — that is what the studio's
+// "most accessed" view measures.
+func (m *MCPServerWrapper) recordSearchHits(ctx context.Context, query string, nodeIDs []string) {
+	if q := strings.TrimSpace(query); q != "" {
+		m.recordAccess(ctx, "", "search", q)
+	}
+	recorded := 0
+	for _, id := range nodeIDs {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		m.recordAccess(ctx, id, "hit", "")
+		recorded++
+		if recorded == maxRecordedHits {
+			return
+		}
+	}
+}
+
+func nodeIDs(nodes []db.Node) []string {
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		ids = append(ids, n.ID)
+	}
+	return ids
+}
+
+func memoryNodeIDs(records []db.MemoryRecord) []string {
+	ids := make([]string, 0, len(records))
+	for _, r := range records {
+		ids = append(ids, r.Node.ID)
+	}
+	return ids
 }
 
 // resolveWorkspace maps a path (default: server working directory) to a graph

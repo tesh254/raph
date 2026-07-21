@@ -495,6 +495,15 @@ func newSearchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Attribute the search and its hits so agent CLI usage (e.g. via the
+			// opencode plugin) shows up in studio analytics like MCP usage does.
+			_ = store.RecordAccess(cmd.Context(), "", "search", strings.Join(args, " "))
+			for i, match := range result.Matches {
+				if i == 10 {
+					break
+				}
+				_ = store.RecordAccess(cmd.Context(), match.ID, "hit", "")
+			}
 			return output.Print(cmd.OutOrStdout(), resolveFormat(), result, func(w io.Writer) error {
 				var sb strings.Builder
 				result.RenderText(&sb)
