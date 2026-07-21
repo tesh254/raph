@@ -1,0 +1,22 @@
+internal/studio/server.go
+  s_376147c4cce38e::t_5f57ba727ed4fd 119
+  s_376147c4cce38e::t_353bd5fc5368fb 626-644
+internal/db/libsql.go
+  s_376147c4cce38e::t_d2f8c24ee5cfdf 1875-1969
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "63ac97f73eb9bdc0605e1b46f5c773da808c286c",
+  "prompts": {},
+  "sessions": {
+    "s_376147c4cce38e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "97914b88-4e28-416b-9c70-bda273d0f1c1",
+        "model": "claude-fable-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
