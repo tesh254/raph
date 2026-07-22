@@ -1,0 +1,37 @@
+internal/db/lazy_test.go
+  s_1f2e6ddf8002c9::t_a16cb1d13fccf7 36-68
+internal/studio/server.go
+  s_1f2e6ddf8002c9::t_8de2415e512992 729-733,758
+  s_1f2e6ddf8002c9::t_15afd843974167 827-830,857-862,864-872,875
+internal/db/libsql.go
+  s_1f2e6ddf8002c9::t_a5c46e558c3201 1794-1832
+  s_1f2e6ddf8002c9::t_cc3d3e349da667 1970-1973
+  s_1f2e6ddf8002c9::t_a25b592cad90f5 1994-1997
+cmd/raph/main.go
+  s_1f2e6ddf8002c9::t_b50edc13bf0571 498-510,514
+internal/db/lazy.go
+  s_1f2e6ddf8002c9::t_580e8e286f766e 55-85
+internal/mcp/server_test.go
+  s_1f2e6ddf8002c9::t_252d2e534d0367 25-34
+  s_1f2e6ddf8002c9::t_77a54f6bf5828d 337-391
+internal/mcp/server.go
+  s_1f2e6ddf8002c9::t_a8fb2b75abd427 1028-1044
+  s_1f2e6ddf8002c9::t_543f48ff5589f5 1053,1055,1062,1065,1068
+  s_1f2e6ddf8002c9::t_b31bcbdd99a6ae 826
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "05063c8b953eaa23e43e64230be0208413845b8a",
+  "prompts": {},
+  "sessions": {
+    "s_1f2e6ddf8002c9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df08ec0e-b929-412f-923f-d2762ab14a0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
