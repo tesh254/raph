@@ -1,0 +1,21 @@
+internal/studio/server.go
+  s_1f2e6ddf8002c9::t_db635f9abf4e9a 653-867
+  s_1f2e6ddf8002c9::t_721e5f0965fd8b 20-21
+  s_1f2e6ddf8002c9::t_70cbc05583e9e5 122-127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "a5b3630a86d53150382aa9c943d815af69562855",
+  "prompts": {},
+  "sessions": {
+    "s_1f2e6ddf8002c9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df08ec0e-b929-412f-923f-d2762ab14a0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
