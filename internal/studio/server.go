@@ -726,6 +726,11 @@ func (s *StudioServer) handleUpdateMemory(w http.ResponseWriter, r *http.Request
 		http.Error(w, "node_id is required", http.StatusBadRequest)
 		return
 	}
+	// Invalid input is a 400; a failed persistence/embedding call below is a 500.
+	if strings.TrimSpace(req.Content) == "" {
+		http.Error(w, "content is required", http.StatusBadRequest)
+		return
+	}
 	existing, err := s.store.GetMemoryRecord(r.Context(), req.NodeID)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -750,7 +755,7 @@ func (s *StudioServer) handleUpdateMemory(w http.ResponseWriter, r *http.Request
 		Tags:          req.Tags,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	verbose.Printf("studio update memory id=%s revision=%d", req.NodeID, out.Record.Revision)
@@ -819,6 +824,10 @@ func (s *StudioServer) handleUpdateDocument(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
+	if strings.TrimSpace(req.Content) == "" {
+		http.Error(w, "content is required", http.StatusBadRequest)
+		return
+	}
 	node, err := s.store.GetNodeByID(r.Context(), req.ID)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -845,20 +854,25 @@ func (s *StudioServer) handleUpdateDocument(w http.ResponseWriter, r *http.Reque
 			tags = strings.Split(existing, ",")
 		}
 	}
+	// Carry over all existing properties so lifecycle metadata (status, used_at,
+	// used_by, freshness) survives the edit; Add overrides the fields it manages.
+	props := make(map[string]string, len(node.Properties))
+	for k, v := range node.Properties {
+		props[k] = v
+	}
 	doc, err := knowledge.Add(r.Context(), s.store, s.config, knowledge.AddInput{
-		Workspace: node.Workspace,
-		Key:       key,
-		Title:     req.Title,
-		Content:   req.Content,
-		DocType:   docType,
-		Source:    node.Prop("source"),
-		WriterID:  node.Prop("writer_id"),
-		Tags:      tags,
-		// Preserve lifecycle status (fresh/used) across the edit.
-		Properties: map[string]string{"status": node.Prop("status")},
+		Workspace:  node.Workspace,
+		Key:        key,
+		Title:      req.Title,
+		Content:    req.Content,
+		DocType:    docType,
+		Source:     node.Prop("source"),
+		WriterID:   node.Prop("writer_id"),
+		Tags:       tags,
+		Properties: props,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	verbose.Printf("studio update document id=%s", req.ID)

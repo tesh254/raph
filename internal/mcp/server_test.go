@@ -22,6 +22,16 @@ type protocolStore struct {
 	records           map[string]db.MemoryRecord
 	vectorSearchLimit int
 	vectorSearchNodes []db.Node
+	accesses          []db.AccessEvent
+}
+
+func (s *protocolStore) RecordAccess(_ context.Context, nodeID, kind, query string) error {
+	s.accesses = append(s.accesses, db.AccessEvent{NodeID: nodeID, Kind: kind, Query: query})
+	return nil
+}
+func (s *protocolStore) RecordAccessBatch(_ context.Context, events []db.AccessEvent) error {
+	s.accesses = append(s.accesses, events...)
+	return nil
 }
 
 func newProtocolStore() *protocolStore {
@@ -321,6 +331,61 @@ func TestBestVectorMatchReturnsSingleMatch(t *testing.T) {
 	}
 	if store.vectorSearchLimit != 1 {
 		t.Fatalf("expected vector search limit 1, got %d", store.vectorSearchLimit)
+	}
+}
+
+func TestSearchRecordsAttribution(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := newProtocolStore()
+	// KeywordSearch on the fake returns one node, so a search yields one hit.
+	store.nodes["func:foo"] = db.Node{ID: "func:foo", Type: "func", Name: "Foo", Content: "does foo"}
+
+	wrapper := NewMCPServerWrapper(store, nil)
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	go func() { _ = wrapper.server.Run(ctx, serverTransport) }()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "raph-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name:      "hybrid_semantic_search",
+		Arguments: map[string]any{"query": "foo"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("search returned tool error: %+v", result.Content)
+	}
+
+	// A search must attribute both the query and the node it surfaced — this is
+	// what the studio "most accessed" view reads. (Regression guard for search
+	// attribution silently going missing.)
+	var searches, hits int
+	for _, e := range store.accesses {
+		switch e.Kind {
+		case "search":
+			if e.Query != "foo" {
+				t.Fatalf("expected search query 'foo', got %q", e.Query)
+			}
+			searches++
+		case "hit":
+			if e.NodeID == "" {
+				t.Fatalf("hit event must reference a node id")
+			}
+			hits++
+		}
+	}
+	if searches != 1 {
+		t.Fatalf("expected 1 search event, got %d (%+v)", searches, store.accesses)
+	}
+	if hits != 1 {
+		t.Fatalf("expected 1 hit event, got %d (%+v)", hits, store.accesses)
 	}
 }
 

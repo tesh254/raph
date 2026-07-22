@@ -1791,6 +1791,45 @@ func (s *LibSQLStore) RecordAccess(ctx context.Context, nodeID string, kind stri
 	return err
 }
 
+// AccessEvent is one telemetry row for RecordAccessBatch.
+type AccessEvent struct {
+	NodeID string
+	Kind   string
+	Query  string
+}
+
+// RecordAccessBatch inserts several access events in a single statement so a
+// search plus its hits cost one write instead of one per row — keeping search
+// latency from scaling with the number of attributed nodes. Blank-kind events
+// are skipped.
+func (s *LibSQLStore) RecordAccessBatch(ctx context.Context, events []AccessEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	now := nowTimestamp()
+	var b strings.Builder
+	b.WriteString("INSERT INTO access_events (node_id, kind, query, created_at) VALUES ")
+	args := make([]any, 0, len(events)*4)
+	n := 0
+	for _, e := range events {
+		kind := strings.TrimSpace(e.Kind)
+		if kind == "" {
+			continue
+		}
+		if n > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString("(?, ?, ?, ?)")
+		args = append(args, strings.TrimSpace(e.NodeID), kind, strings.TrimSpace(e.Query), now)
+		n++
+	}
+	if n == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, b.String(), args...)
+	return err
+}
+
 func (s *LibSQLStore) Analytics(ctx context.Context, limit int) (Analytics, error) {
 	if limit <= 0 {
 		limit = 10
@@ -1928,6 +1967,10 @@ func (s *LibSQLStore) Timeline(ctx context.Context, days int) (Timeline, error) 
 			t.Points[i].Memories = c
 		}
 	}
+	if err := memRows.Err(); err != nil {
+		_ = memRows.Close()
+		return Timeline{}, err
+	}
 	_ = memRows.Close()
 
 	handoffWhere := `type = 'doc' AND json_extract(COALESCE(properties_json, '{}'), '$.doc_type') = 'handoff'`
@@ -1947,6 +1990,10 @@ func (s *LibSQLStore) Timeline(ctx context.Context, days int) (Timeline, error) 
 		if i, ok := index[d]; ok {
 			t.Points[i].Handoffs = c
 		}
+	}
+	if err := handRows.Err(); err != nil {
+		_ = handRows.Close()
+		return Timeline{}, err
 	}
 	_ = handRows.Close()
 

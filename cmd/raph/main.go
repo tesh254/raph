@@ -495,15 +495,23 @@ func newSearchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Attribute the search and its hits so agent CLI usage (e.g. via the
-			// opencode plugin) shows up in studio analytics like MCP usage does.
-			_ = store.RecordAccess(cmd.Context(), "", "search", strings.Join(args, " "))
-			for i, match := range result.Matches {
-				if i == 10 {
+			// Attribute the search and the nodes it surfaced so agent CLI usage
+			// (e.g. via the opencode plugin) shows up in studio analytics like MCP
+			// usage does. Batched into one write so latency doesn't scale with the
+			// number of hits; blank ids are skipped (they can't be attributed).
+			events := []db.AccessEvent{{Kind: "search", Query: strings.Join(args, " ")}}
+			recorded := 0
+			for _, match := range result.Matches {
+				if strings.TrimSpace(match.ID) == "" {
+					continue
+				}
+				events = append(events, db.AccessEvent{NodeID: match.ID, Kind: "hit"})
+				recorded++
+				if recorded == 10 {
 					break
 				}
-				_ = store.RecordAccess(cmd.Context(), match.ID, "hit", "")
 			}
+			_ = store.RecordAccessBatch(cmd.Context(), events)
 			return output.Print(cmd.OutOrStdout(), resolveFormat(), result, func(w io.Writer) error {
 				var sb strings.Builder
 				result.RenderText(&sb)

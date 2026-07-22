@@ -823,6 +823,7 @@ func (m *MCPServerWrapper) registerTools() {
 		hits := nodeIDs(output.Symbols)
 		hits = append(hits, nodeIDs(output.Files)...)
 		hits = append(hits, nodeIDs(output.Chunks)...)
+		hits = append(hits, nodeIDs(output.Unassigned)...)
 		m.recordSearchHits(ctx, args.Query, hits)
 		return textResult(renderJSON(output)), output, nil
 	})
@@ -1024,6 +1025,23 @@ func (m *MCPServerWrapper) recordAccess(ctx context.Context, nodeID, kind, query
 	}
 }
 
+// recordAccessBatch writes several access events in one store call when the
+// store supports it, falling back to individual writes otherwise.
+func (m *MCPServerWrapper) recordAccessBatch(ctx context.Context, events []db.AccessEvent) {
+	if len(events) == 0 {
+		return
+	}
+	if rec, ok := m.store.(interface {
+		RecordAccessBatch(context.Context, []db.AccessEvent) error
+	}); ok {
+		_ = rec.RecordAccessBatch(ctx, events)
+		return
+	}
+	for _, e := range events {
+		m.recordAccess(ctx, e.NodeID, e.Kind, e.Query)
+	}
+}
+
 // maxRecordedHits caps per-search node attribution so one broad query doesn't
 // swamp the access log.
 const maxRecordedHits = 10
@@ -1032,20 +1050,22 @@ const maxRecordedHits = 10
 // returned to an agent counts as touched — that is what the studio's
 // "most accessed" view measures.
 func (m *MCPServerWrapper) recordSearchHits(ctx context.Context, query string, nodeIDs []string) {
+	events := make([]db.AccessEvent, 0, maxRecordedHits+1)
 	if q := strings.TrimSpace(query); q != "" {
-		m.recordAccess(ctx, "", "search", q)
+		events = append(events, db.AccessEvent{Kind: "search", Query: q})
 	}
 	recorded := 0
 	for _, id := range nodeIDs {
 		if strings.TrimSpace(id) == "" {
 			continue
 		}
-		m.recordAccess(ctx, id, "hit", "")
+		events = append(events, db.AccessEvent{NodeID: id, Kind: "hit"})
 		recorded++
 		if recorded == maxRecordedHits {
-			return
+			break
 		}
 	}
+	m.recordAccessBatch(ctx, events)
 }
 
 func nodeIDs(nodes []db.Node) []string {
