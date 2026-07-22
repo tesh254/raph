@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"raph/internal/config"
@@ -55,9 +56,36 @@ func (s *protocolStore) KeywordSearchWorkspace(ctx context.Context, _ string, qu
 func (s *protocolStore) LexicalSearch(ctx context.Context, _ string, query string, limit int) ([]db.Node, error) {
 	return s.KeywordSearch(ctx, query, limit)
 }
-func (s *protocolStore) ListNodes(_ context.Context, _ db.NodeFilter) ([]db.Node, error) {
+func (s *protocolStore) ListNodes(_ context.Context, f db.NodeFilter) ([]db.Node, error) {
 	out := make([]db.Node, 0, len(s.nodes))
 	for _, node := range s.nodes {
+		if len(f.Types) > 0 {
+			matchType := false
+			for _, t := range f.Types {
+				if node.Type == t {
+					matchType = true
+					break
+				}
+			}
+			if !matchType {
+				continue
+			}
+		}
+		matchProps := true
+		for k, v := range f.PropertyEquals {
+			if node.Prop(k) != v {
+				matchProps = false
+				break
+			}
+		}
+		if !matchProps {
+			continue
+		}
+		if q := strings.TrimSpace(strings.ToLower(f.Query)); q != "" {
+			if !strings.Contains(strings.ToLower(node.Name), q) && !strings.Contains(strings.ToLower(node.Content), q) {
+				continue
+			}
+		}
 		out = append(out, node)
 	}
 	return out, nil
@@ -293,6 +321,87 @@ func TestBestVectorMatchReturnsSingleMatch(t *testing.T) {
 	}
 	if store.vectorSearchLimit != 1 {
 		t.Fatalf("expected vector search limit 1, got %d", store.vectorSearchLimit)
+	}
+}
+
+func TestReadDocumentResolvesByIDOrQuery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := newProtocolStore()
+	handoff := func(id, name string) db.Node {
+		return db.Node{
+			ID: id, Type: "doc", Name: name, Content: name + " body",
+			URL:        "knowledge://ws/" + id,
+			Properties: map[string]string{"doc_type": "handoff", "status": "fresh"},
+		}
+	}
+	// Two handoffs match "deploy"; one uniquely matches "billing".
+	store.nodes["doc:h1"] = handoff("doc:h1", "Deploy pipeline handoff")
+	store.nodes["doc:h2"] = handoff("doc:h2", "Deploy rollback handoff")
+	store.nodes["doc:h3"] = handoff("doc:h3", "Billing migration handoff")
+
+	wrapper := NewMCPServerWrapper(store, nil)
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	go func() { _ = wrapper.server.Run(ctx, serverTransport) }()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "raph-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	readDoc := func(args map[string]any) ReadDocumentOutput {
+		t.Helper()
+		result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: "read_document", Arguments: args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.IsError {
+			t.Fatalf("read_document returned tool error: %+v", result.Content)
+		}
+		text, ok := result.Content[0].(*mcpsdk.TextContent)
+		if !ok {
+			t.Fatalf("expected text content, got %T", result.Content[0])
+		}
+		var out ReadDocumentOutput
+		if err := json.Unmarshal([]byte(text.Text), &out); err != nil {
+			t.Fatalf("unmarshal output: %v", err)
+		}
+		return out
+	}
+
+	// (1) Ambiguous query → candidates, and nothing is read or claimed.
+	out := readDoc(map[string]any{"query": "Deploy", "doc_type": "handoff"})
+	if len(out.Candidates) != 2 {
+		t.Fatalf("expected 2 candidates for ambiguous query, got %d (%+v)", len(out.Candidates), out.Candidates)
+	}
+	if out.Document != nil {
+		t.Fatalf("ambiguous query must not read a document, got %+v", out.Document)
+	}
+	if s := store.nodes["doc:h1"].Prop("status"); s != "fresh" {
+		t.Fatalf("ambiguous query must not claim a handoff, doc:h1 status=%q", s)
+	}
+
+	// (2) Unique query → document read, but as a peek (status stays fresh).
+	out = readDoc(map[string]any{"query": "Billing", "doc_type": "handoff"})
+	if out.Document == nil || out.Document.Node.ID != "doc:h3" {
+		t.Fatalf("expected unique query to read doc:h3, got %+v", out.Document)
+	}
+	if out.Resolved != "query" {
+		t.Fatalf("expected resolved=query, got %q", out.Resolved)
+	}
+	if s := store.nodes["doc:h3"].Prop("status"); s != "fresh" {
+		t.Fatalf("query-resolved read must be a peek, doc:h3 status=%q", s)
+	}
+
+	// (3) Explicit id → read and claimed (status becomes used).
+	out = readDoc(map[string]any{"id": "doc:h3"})
+	if out.Document == nil || out.Resolved != "id" {
+		t.Fatalf("expected id read of doc:h3, got %+v (resolved=%q)", out.Document, out.Resolved)
+	}
+	if s := store.nodes["doc:h3"].Prop("status"); s != "used" {
+		t.Fatalf("id read of a handoff must claim it, doc:h3 status=%q", s)
 	}
 }
 

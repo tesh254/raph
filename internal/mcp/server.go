@@ -126,9 +126,29 @@ type ListDocumentsOutput struct {
 }
 
 type ReadDocumentArgs struct {
-	ID       string `json:"id" jsonschema:"The document node id"`
-	MarkUsed *bool  `json:"mark_used,omitempty" jsonschema:"Mark a handoff as used on read (default true). Set false to peek"`
+	ID       string `json:"id,omitempty" jsonschema:"Document node id. If omitted, provide query to resolve the document by search."`
+	Query    string `json:"query,omitempty" jsonschema:"Resolve the document by text search when the id is unknown. A single match is read (as a peek); multiple matches return candidates to choose from."`
+	DocType  string `json:"doc_type,omitempty" jsonschema:"Optional doc type filter for the query path, e.g. handoff"`
+	Scope    string `json:"scope,omitempty" jsonschema:"Optional scope for the query path: project or global"`
+	MarkUsed *bool  `json:"mark_used,omitempty" jsonschema:"Mark a handoff as used on read. Defaults to true for an id read and false for a query-resolved read (a peek). Set explicitly to override."`
 	ReaderID string `json:"reader_id,omitempty" jsonschema:"Stable identifier for the reading agent"`
+}
+
+// DocCandidate is a lightweight match returned when a read_document query is
+// ambiguous, so the caller can pick an exact id.
+type DocCandidate struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	DocType string `json:"doc_type,omitempty"`
+	Status  string `json:"status,omitempty"`
+}
+
+// ReadDocumentOutput carries either the resolved document or, when a query
+// matched more than one, the candidates to disambiguate.
+type ReadDocumentOutput struct {
+	Document   *knowledge.Document `json:"document,omitempty"`
+	Candidates []DocCandidate      `json:"candidates,omitempty"`
+	Resolved   string              `json:"resolved,omitempty"` // "id" or "query"
 }
 
 type LinkNodesArgs struct {
@@ -578,22 +598,77 @@ func (m *MCPServerWrapper) registerTools() {
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "read_document",
-		Description: "Reads a document with its chunks and related nodes. Reading a handoff marks it as used so the next agent knows the work is taken. Pass mark_used=false to peek without claiming.",
-	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args ReadDocumentArgs) (*mcpsdk.CallToolResult, knowledge.Document, error) {
-		markUsed := true
-		if args.MarkUsed != nil {
-			markUsed = *args.MarkUsed
-		}
+		Description: "Reads a document with its chunks and related nodes. Provide id for a direct read, or query to resolve by search (a single match is read; multiple matches return candidates to pick from). Reading a handoff by id marks it used so the next agent knows the work is taken; a query-resolved read is a peek by default. Pass mark_used to override.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args ReadDocumentArgs) (*mcpsdk.CallToolResult, ReadDocumentOutput, error) {
 		reader := strings.TrimSpace(args.ReaderID)
 		if reader == "" {
 			reader = "agent"
 		}
-		doc, err := knowledge.Read(ctx, m.store, args.ID, markUsed, reader)
-		if err != nil {
-			return nil, knowledge.Document{}, err
+
+		id := strings.TrimSpace(args.ID)
+		resolvedByQuery := false
+
+		// No id: resolve by search. A single unambiguous match is read; multiple
+		// matches return candidates without reading or claiming any (so a fuzzy
+		// query can't silently mark the wrong handoff used).
+		if id == "" {
+			query := strings.TrimSpace(args.Query)
+			if query == "" {
+				return nil, ReadDocumentOutput{}, fmt.Errorf("either id or query is required")
+			}
+			workspace := ""
+			if scope := strings.TrimSpace(args.Scope); scope != "" {
+				ws, err := m.resolveDocWorkspace(scope)
+				if err != nil {
+					return nil, ReadDocumentOutput{}, err
+				}
+				workspace = ws
+			}
+			matches, err := knowledge.List(ctx, m.store, knowledge.ListFilter{
+				Workspace: workspace,
+				DocType:   strings.TrimSpace(args.DocType),
+				Query:     query,
+				Limit:     10,
+			})
+			if err != nil {
+				return nil, ReadDocumentOutput{}, err
+			}
+			if len(matches) == 0 {
+				return nil, ReadDocumentOutput{}, fmt.Errorf("no documents match query %q", query)
+			}
+			if len(matches) > 1 {
+				out := ReadDocumentOutput{Resolved: "query"}
+				for _, n := range matches {
+					out.Candidates = append(out.Candidates, DocCandidate{
+						ID: n.ID, Title: n.Name, DocType: n.Prop("doc_type"), Status: n.Prop("status"),
+					})
+				}
+				return textResult(renderJSON(out)), out, nil
+			}
+			id = matches[0].ID
+			resolvedByQuery = true
 		}
-		m.recordAccess(ctx, args.ID, "read", "")
-		return textResult(renderJSON(doc)), doc, nil
+
+		// Claim on an explicit id read; peek when resolved via query. An explicit
+		// mark_used always wins.
+		markUsed := true
+		if args.MarkUsed != nil {
+			markUsed = *args.MarkUsed
+		} else if resolvedByQuery {
+			markUsed = false
+		}
+
+		doc, err := knowledge.Read(ctx, m.store, id, markUsed, reader)
+		if err != nil {
+			return nil, ReadDocumentOutput{}, err
+		}
+		m.recordAccess(ctx, id, "read", "")
+		resolved := "id"
+		if resolvedByQuery {
+			resolved = "query"
+		}
+		out := ReadDocumentOutput{Document: &doc, Resolved: resolved}
+		return textResult(renderJSON(out)), out, nil
 	})
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
