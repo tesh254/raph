@@ -33,6 +33,39 @@ func TestLazyStoreDefersOpenUntilFirstCall(t *testing.T) {
 	}
 }
 
+// RecordAccess and RecordAccessBatch are optional capabilities forwarded
+// through the lazy wrapper. If forwarding regresses, MCP attribution silently
+// records nothing (the wrapper is what `raph start` runs behind).
+func TestLazyStoreForwardsAccessTelemetry(t *testing.T) {
+	ctx := context.Background()
+	var underlying *LibSQLStore
+	lazy := NewLazyStore(func() (GraphStore, error) {
+		underlying = newTestStore(t)
+		return underlying, nil
+	})
+
+	if err := lazy.RecordAccess(ctx, "n1", "read", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := lazy.RecordAccessBatch(ctx, []AccessEvent{
+		{Kind: "search", Query: "foo"},
+		{NodeID: "n1", Kind: "hit"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := underlying.Analytics(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.TotalEvents != 3 {
+		t.Fatalf("expected 3 recorded events through the lazy wrapper, got %d", a.TotalEvents)
+	}
+	if a.Searches != 1 {
+		t.Fatalf("expected 1 search event, got %d", a.Searches)
+	}
+}
+
 func TestLazyStoreCloseWithoutUseDoesNotOpen(t *testing.T) {
 	opens := 0
 	lazy := NewLazyStore(func() (GraphStore, error) {

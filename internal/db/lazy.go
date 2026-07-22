@@ -52,6 +52,37 @@ func (l *LazyStore) Close() error {
 	return err
 }
 
+// RecordAccess and RecordAccessBatch are optional telemetry capabilities that
+// are not part of the GraphStore interface. Forward them explicitly so studio
+// attribution works when the MCP server (`raph start`) runs behind this lazy
+// wrapper — otherwise the wrapper wouldn't expose the methods and the callers'
+// capability type-assertion would silently fail, recording no events.
+func (l *LazyStore) RecordAccess(ctx context.Context, nodeID, kind, query string) error {
+	s, err := l.ensure()
+	if err != nil {
+		return err
+	}
+	if rec, ok := s.(interface {
+		RecordAccess(context.Context, string, string, string) error
+	}); ok {
+		return rec.RecordAccess(ctx, nodeID, kind, query)
+	}
+	return nil
+}
+
+func (l *LazyStore) RecordAccessBatch(ctx context.Context, events []AccessEvent) error {
+	s, err := l.ensure()
+	if err != nil {
+		return err
+	}
+	if rec, ok := s.(interface {
+		RecordAccessBatch(context.Context, []AccessEvent) error
+	}); ok {
+		return rec.RecordAccessBatch(ctx, events)
+	}
+	return nil
+}
+
 func (l *LazyStore) SaveNode(ctx context.Context, node Node) error {
 	store, err := l.ensure()
 	if err != nil {
