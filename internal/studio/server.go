@@ -17,6 +17,8 @@ import (
 	"raph/internal/crawler"
 	"raph/internal/db"
 	"raph/internal/indexer"
+	"raph/internal/knowledge"
+	"raph/internal/memory"
 	"raph/internal/verbose"
 )
 
@@ -117,6 +119,12 @@ func (s *StudioServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/analytics", s.handleAnalytics)
 	mux.HandleFunc("/api/timeline", s.handleTimeline)
+	mux.HandleFunc("/api/memories", s.handleListMemories)
+	mux.HandleFunc("/api/memory", s.handleGetMemory)
+	mux.HandleFunc("/api/memory/update", s.handleUpdateMemory)
+	mux.HandleFunc("/api/handoffs", s.handleListHandoffs)
+	mux.HandleFunc("/api/document", s.handleGetDocument)
+	mux.HandleFunc("/api/document/update", s.handleUpdateDocument)
 	mux.HandleFunc("/api/actions/clear", s.handleClearDB)
 	mux.HandleFunc("/api/actions/init", s.handleInitDemo)
 
@@ -640,6 +648,221 @@ func (s *StudioServer) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, timeline)
+}
+
+// Memory & handoff browsing/editing. These power the studio's Memory and
+// Handovers pages: list, read (with revision history), and edit.
+
+func (s *StudioServer) handleListMemories(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 1000 {
+			limit = parsed
+		}
+	}
+	// No lifecycle filter: surface active and deprecated so users see the full
+	// picture (the UI badges the state).
+	records, err := s.store.SearchMemoryRecords(r.Context(), db.MemorySearchFilter{
+		Query:         strings.TrimSpace(r.URL.Query().Get("query")),
+		KnowledgeType: strings.TrimSpace(r.URL.Query().Get("type")),
+		ScopeType:     strings.TrimSpace(r.URL.Query().Get("scope")),
+		Limit:         limit,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": records})
+}
+
+func (s *StudioServer) handleGetMemory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	record, err := s.store.GetMemoryRecord(r.Context(), id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "memory not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	revisions, err := s.store.ListMemoryRevisions(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = s.store.RecordAccess(r.Context(), id, "view", "")
+	writeJSON(w, http.StatusOK, map[string]any{"record": record, "revisions": revisions})
+}
+
+func (s *StudioServer) handleUpdateMemory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		NodeID  string   `json:"node_id"`
+		Title   string   `json:"title"`
+		Content string   `json:"content"`
+		Tags    []string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.NodeID) == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	existing, err := s.store.GetMemoryRecord(r.Context(), req.NodeID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "memory not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Edit content/title/tags while preserving the record's identity (scope,
+	// knowledge type, key) and authorship. Update bumps the revision and appends
+	// the prior version to history.
+	out, err := memory.Update(r.Context(), s.store, s.config, memory.UpdateInput{
+		ScopeType:     existing.ScopeType,
+		ScopeID:       existing.ScopeID,
+		KnowledgeType: existing.KnowledgeType,
+		MemoryKey:     existing.MemoryKey,
+		Title:         req.Title,
+		Content:       req.Content,
+		Source:        existing.Source,
+		WriterID:      existing.WriterID,
+		Tags:          req.Tags,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	verbose.Printf("studio update memory id=%s revision=%d", req.NodeID, out.Record.Revision)
+	writeJSON(w, http.StatusOK, out.Record)
+}
+
+func (s *StudioServer) handleListHandoffs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nodes, err := knowledge.List(r.Context(), s.store, knowledge.ListFilter{
+		DocType: knowledge.DocHandoff,
+		Status:  strings.TrimSpace(r.URL.Query().Get("status")),
+		Query:   strings.TrimSpace(r.URL.Query().Get("query")),
+		Limit:   200,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": nodes})
+}
+
+func (s *StudioServer) handleGetDocument(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	// Peek (markUsed=false): browsing a handoff in studio must not claim it out
+	// from under the next agent.
+	doc, err := knowledge.Read(r.Context(), s.store, id, false, "studio")
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "document not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = s.store.RecordAccess(r.Context(), id, "view", "")
+	writeJSON(w, http.StatusOK, doc)
+}
+
+func (s *StudioServer) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID      string   `json:"id"`
+		Title   string   `json:"title"`
+		Content string   `json:"content"`
+		Tags    []string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.ID) == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	node, err := s.store.GetNodeByID(r.Context(), req.ID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "document not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// A doc's stable key lives in its URL: knowledge://<workspace>/<key>. We need
+	// it so Add overwrites this document in place instead of creating a new one.
+	key := strings.TrimPrefix(node.URL, "knowledge://"+node.Workspace+"/")
+	if key == "" || key == node.URL {
+		http.Error(w, "cannot resolve document key", http.StatusUnprocessableEntity)
+		return
+	}
+	docType := node.Prop("doc_type")
+	if docType == "" {
+		docType = knowledge.DocHandoff
+	}
+	tags := req.Tags
+	if len(tags) == 0 {
+		if existing := strings.TrimSpace(node.Prop("tags")); existing != "" {
+			tags = strings.Split(existing, ",")
+		}
+	}
+	doc, err := knowledge.Add(r.Context(), s.store, s.config, knowledge.AddInput{
+		Workspace: node.Workspace,
+		Key:       key,
+		Title:     req.Title,
+		Content:   req.Content,
+		DocType:   docType,
+		Source:    node.Prop("source"),
+		WriterID:  node.Prop("writer_id"),
+		Tags:      tags,
+		// Preserve lifecycle status (fresh/used) across the edit.
+		Properties: map[string]string{"status": node.Prop("status")},
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	verbose.Printf("studio update document id=%s", req.ID)
+	writeJSON(w, http.StatusOK, doc)
 }
 
 func (s *StudioServer) handleStats(w http.ResponseWriter, r *http.Request) {
