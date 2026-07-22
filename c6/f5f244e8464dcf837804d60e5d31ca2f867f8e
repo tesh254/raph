@@ -1,0 +1,26 @@
+internal/mcp/server_test.go
+  s_1f2e6ddf8002c9::t_70c969aae9d781 327-405
+  s_1f2e6ddf8002c9::t_780764701ef60a 59,62-88
+  s_1f2e6ddf8002c9::t_7284069250040d 11
+  s_1f2e6ddf8002c9::t_984b2c92cfe95a 406-407
+internal/mcp/server.go
+  s_1f2e6ddf8002c9::t_c5ba0f2b642fbf 601-602,607-661,663,665-671
+  s_1f2e6ddf8002c9::t_ec0f66d98c9503 129-133,137-152
+  s_1f2e6ddf8002c9::t_cd3980db8f2dc3 153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "c6f5f244e8464dcf837804d60e5d31ca2f867f8e",
+  "prompts": {},
+  "sessions": {
+    "s_1f2e6ddf8002c9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df08ec0e-b929-412f-923f-d2762ab14a0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
