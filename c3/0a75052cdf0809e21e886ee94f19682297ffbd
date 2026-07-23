@@ -1,0 +1,24 @@
+internal/mcp/server_test.go
+  s_1f2e6ddf8002c9::t_99cb37a35539d6 337-360
+internal/agentsetup/opencode_plugin.ts
+  s_1f2e6ddf8002c9::t_ba609a28bf2f65 54
+internal/mcp/server.go
+  s_1f2e6ddf8002c9::t_4fbc5d68684d40 279-290
+  s_1f2e6ddf8002c9::t_b170c04f5120e1 296-301
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "c30a75052cdf0809e21e886ee94f19682297ffbd",
+  "prompts": {},
+  "sessions": {
+    "s_1f2e6ddf8002c9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df08ec0e-b929-412f-923f-d2762ab14a0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
