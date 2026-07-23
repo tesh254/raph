@@ -51,6 +51,7 @@ export const RaphPlugin: Plugin = async ({ client, directory, worktree }) => {
           return [
             "Use Raph memory first.",
             "Search project or shared knowledge before answering.",
+            "If an existing memory is out of date, update it in place (update_memory with the node_id from the search result) instead of storing a duplicate.",
             "Store durable repo decisions, setup facts, and gotchas before finishing.",
             "Use Raph indexing when a repo or docs context may matter.",
           ].join("\n")

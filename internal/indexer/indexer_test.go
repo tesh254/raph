@@ -62,6 +62,9 @@ func (*indexCaptureStore) ListMemoryRevisions(context.Context, string) ([]db.Mem
 func (*indexCaptureStore) SearchMemoryRecords(context.Context, db.MemorySearchFilter) ([]db.MemoryRecord, error) {
 	return nil, nil
 }
+func (*indexCaptureStore) VectorSearchMemoryRecords(context.Context, []float32, db.MemorySearchFilter) ([]db.MemoryRecord, error) {
+	return nil, nil
+}
 func (*indexCaptureStore) SetMemoryLifecycle(context.Context, string, string, string, string) error {
 	return nil
 }

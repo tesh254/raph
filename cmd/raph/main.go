@@ -704,7 +704,7 @@ func newMemCmd() *cobra.Command {
 			if q == "" && len(args) > 0 {
 				q = strings.Join(args, " ")
 			}
-			res, err := memory.Search(cmd.Context(), store, memory.SearchInput{
+			res, err := memory.Search(cmd.Context(), store, cfg, memory.SearchInput{
 				Query: q, ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: sType, Limit: sLimit,
 			})
 			if err != nil {
@@ -748,7 +748,73 @@ func newMemCmd() *cobra.Command {
 	rmCmd.Flags().StringVar(&rmReason, "reason", "", "Why this memory is being deprecated")
 	rmCmd.Flags().StringVar(&rmReplacement, "replacement", "", "Node id that replaces this memory")
 
-	memCmd.AddCommand(setCmd, searchCmd, rmCmd)
+	reembedCmd := &cobra.Command{
+		Use:   "reembed",
+		Short: "Backfill vector embeddings for memories saved without them",
+		Long: "Generates embeddings for existing memory records that don't have one yet — " +
+			"typically memories stored before an embedding provider was configured. Without " +
+			"embeddings, memory search falls back to keyword matching instead of semantic search.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			if cfg == nil || !cfg.HasEmbeddingProvider() {
+				return fmt.Errorf("no embedding provider configured — set one up (e.g. `raph config`) before reembedding; without it memory search stays keyword-only")
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			out := cmd.OutOrStdout()
+			// Paginate over every memory record regardless of scope or lifecycle
+			// (empty LifecycleStates means "all states") so the backfill isn't
+			// silently capped on large stores. Reembedding only changes
+			// embedding_json, not the row set or its order, so offset paging is
+			// stable across the loop.
+			const batch = 500
+			var embedded, skipped, failed, total int
+			for offset := 0; ; offset += batch {
+				records, err := store.SearchMemoryRecords(cmd.Context(), db.MemorySearchFilter{Limit: batch, Offset: offset})
+				if err != nil {
+					return err
+				}
+				if len(records) == 0 {
+					break
+				}
+				total += len(records)
+				for _, rec := range records {
+					if rec.Node.EmbeddingLength > 0 {
+						skipped++
+						continue
+					}
+					vec, err := config.GenerateEmbedding(cmd.Context(), cfg, rec.Node.Name+"\n\n"+rec.Node.Content)
+					if err != nil || len(vec) == 0 {
+						failed++
+						fmt.Fprintf(out, "  failed to embed %s: %v\n", rec.Node.ID, err)
+						continue
+					}
+					if err := store.UpdateNodeEmbedding(cmd.Context(), rec.Node.ID, vec); err != nil {
+						failed++
+						fmt.Fprintf(out, "  failed to save embedding for %s: %v\n", rec.Node.ID, err)
+						continue
+					}
+					embedded++
+				}
+				if len(records) < batch {
+					break
+				}
+			}
+			fmt.Fprintf(out, "Reembed complete: %d embedded, %d already had embeddings, %d failed (of %d memories)\n",
+				embedded, skipped, failed, total)
+			return nil
+		},
+	}
+
+	memCmd.AddCommand(setCmd, searchCmd, rmCmd, reembedCmd)
 	return memCmd
 }
 
@@ -839,7 +905,7 @@ func newRulesCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				res, err := memory.Search(cmd.Context(), store, memory.SearchInput{
+				res, err := memory.Search(cmd.Context(), store, cfg, memory.SearchInput{
 					Query: lQuery, ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: "rule", Limit: remaining,
 				})
 				if err != nil {
@@ -1732,7 +1798,32 @@ func newReleaseCmd() *cobra.Command {
 	_ = verifyCmd.MarkFlagRequired("artifact")
 	_ = verifyCmd.MarkFlagRequired("signature")
 
+	var pkKeyEnv, pkPasswordEnv string
+	publicKeyCmd := &cobra.Command{
+		Use:   "public-key",
+		Short: "Print the minisign public key matching the signing private key",
+		Long: "Derives the public key from the signing private key so it can be committed to " +
+			"internal/signing/raph.minisign.pub. The embedded key MUST match the key the release " +
+			"pipeline signs with, or `raph update` fails signature verification.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			privateKeyText := []byte(os.Getenv(pkKeyEnv))
+			if len(privateKeyText) == 0 {
+				return fmt.Errorf("%s is required", pkKeyEnv)
+			}
+			text, err := signing.DerivePublicKeyText(privateKeyText, os.Getenv(pkPasswordEnv))
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), strings.TrimRight(string(text), "\n"))
+			return nil
+		},
+	}
+	publicKeyCmd.Flags().StringVar(&pkKeyEnv, "key-env", signing.DefaultPrivateKeyEnv, "Environment variable containing the encrypted minisign private key")
+	publicKeyCmd.Flags().StringVar(&pkPasswordEnv, "password-env", signing.DefaultPasswordEnv, "Environment variable containing the minisign key password")
+
 	releaseCmd.AddCommand(signCmd)
 	releaseCmd.AddCommand(verifyCmd)
+	releaseCmd.AddCommand(publicKeyCmd)
 	return releaseCmd
 }

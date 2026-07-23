@@ -63,6 +63,9 @@ func (*crawlStore) ListMemoryRevisions(context.Context, string) ([]db.MemoryRevi
 func (*crawlStore) SearchMemoryRecords(context.Context, db.MemorySearchFilter) ([]db.MemoryRecord, error) {
 	return nil, nil
 }
+func (*crawlStore) VectorSearchMemoryRecords(context.Context, []float32, db.MemorySearchFilter) ([]db.MemoryRecord, error) {
+	return nil, nil
+}
 func (*crawlStore) SetMemoryLifecycle(context.Context, string, string, string, string) error {
 	return nil
 }

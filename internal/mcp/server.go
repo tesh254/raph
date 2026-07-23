@@ -57,15 +57,16 @@ type StoreMemoryArgs struct {
 }
 
 type UpdateMemoryArgs struct {
-	ScopeType     string   `json:"scope_type" jsonschema:"Immutable memory scope type"`
+	NodeID        string   `json:"node_id,omitempty" jsonschema:"Target a particular memory by its node id (e.g. from a search result). When set, scope_type/knowledge_type/memory_key are resolved from the record and need not be supplied"`
+	ScopeType     string   `json:"scope_type,omitempty" jsonschema:"Immutable memory scope type. Required unless node_id is set"`
 	ScopeID       string   `json:"scope_id,omitempty" jsonschema:"Immutable scope identifier. Project scope can infer this from the current workspace when omitted"`
-	KnowledgeType string   `json:"knowledge_type" jsonschema:"Immutable knowledge category"`
+	KnowledgeType string   `json:"knowledge_type,omitempty" jsonschema:"Immutable knowledge category. Required unless node_id is set"`
 	Title         string   `json:"title" jsonschema:"Updated short descriptive title"`
 	Content       string   `json:"content" jsonschema:"Updated durable information"`
-	Source        string   `json:"source" jsonschema:"Origin of the update"`
-	WriterID      string   `json:"writer_id" jsonschema:"Stable identifier for the writer updating this memory"`
+	Source        string   `json:"source,omitempty" jsonschema:"Origin of the update. Defaults to the record's current source when omitted"`
+	WriterID      string   `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer updating this memory. Defaults to the record's current writer when omitted"`
 	Tags          []string `json:"tags,omitempty" jsonschema:"Optional replacement tag set"`
-	MemoryKey     string   `json:"memory_key" jsonschema:"Stable immutable key used to locate the memory"`
+	MemoryKey     string   `json:"memory_key,omitempty" jsonschema:"Stable immutable key used to locate the memory. Required unless node_id is set"`
 }
 
 type DeprecateMemoryArgs struct {
@@ -275,12 +276,29 @@ type CrossCorpusNeighborOutput struct {
 	Matches     []db.Node `json:"matches"`
 }
 
+// mcpInstructions is the server-level guidance clients receive on initialize.
+// It teaches the memory-first loop and, crucially, that existing memories
+// should be updated in place rather than re-stored as duplicates.
+const mcpInstructions = `raph is a shared knowledge graph for code, docs, and durable agent memory.
+
+Memory-first workflow:
+- Before answering, search existing knowledge (search_project_knowledge, search_shared_knowledge, search_global_preferences).
+- Reuse what you find. If a memory is out of date, UPDATE it instead of storing a duplicate: call update_memory with the node_id from the search result (its immutable scope/type/key are resolved for you). Use store_memory only for genuinely new facts.
+- Record durable decisions, setup facts, and gotchas before finishing.
+- get_memory_history shows a memory's revisions; deprecate_memory retires one that no longer applies.
+- Handoffs are documents (add_document with doc_type=handoff); read_document accepts a query when you don't have the id.`
+
 func NewMCPServerWrapper(store db.GraphStore, cfg *config.Config) *MCPServerWrapper {
 	verbose.Printf("creating MCP server")
 	s := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "raph",
 		Version: "1.0.0",
-	}, nil)
+	}, &mcpsdk.ServerOptions{
+		// Sent to clients on initialize so agents learn the memory-first
+		// workflow — including that memories are updatable — without relying on
+		// an external prompt.
+		Instructions: mcpInstructions,
+	})
 
 	wrapper := &MCPServerWrapper{server: s, store: store, config: cfg}
 	wrapper.registerTools()
@@ -288,7 +306,149 @@ func NewMCPServerWrapper(store db.GraphStore, cfg *config.Config) *MCPServerWrap
 	return wrapper
 }
 
+// LearnRaphOutput is the structured orientation returned by learn_raph.
+type LearnRaphOutput struct {
+	Overview string             `json:"overview"`
+	Workflow []string           `json:"workflow"`
+	Groups   []learnRaphGroup   `json:"groups"`
+	Examples []learnRaphExample `json:"examples"`
+}
+
+type learnRaphExample struct {
+	Goal string `json:"goal"`
+	Call string `json:"call"`
+}
+
+type learnRaphGroup struct {
+	Title string          `json:"title"`
+	Tools []learnRaphTool `json:"tools"`
+}
+
+type learnRaphTool struct {
+	Name string `json:"name"`
+	When string `json:"when"`
+}
+
+var learnRaphWorkflow = []string{
+	"Search existing knowledge before answering (search_project_knowledge, search_shared_knowledge, search_global_preferences).",
+	"Reuse what you find; if a memory is out of date, update_memory in place instead of storing a duplicate.",
+	"Record durable decisions, setup facts, and gotchas before finishing (store_memory / store_rule).",
+	"Index a repo (index_codebase) when code context matters; crawl_website for external docs.",
+}
+
+// learnRaphGroups documents every registered tool. TestLearnRaphCoversAllTools
+// fails if a tool is added without a matching entry here, keeping it in sync.
+var learnRaphGroups = []learnRaphGroup{
+	{Title: "Search & retrieval", Tools: []learnRaphTool{
+		{"hybrid_semantic_search", "Primary graph search; embeddings with keyword fallback."},
+		{"multi_query_search", "Run several searches in one call, grouped by query."},
+		{"best_vector_match", "Single closest semantic match (needs an embedding provider)."},
+		{"search", "CLI-style search: auto/literal/regex/vector modes, type filters."},
+		{"search_codebase", "Codebase search grouped into symbols, files, and chunks."},
+	}},
+	{Title: "Graph traversal", Tools: []learnRaphTool{
+		{"graph_neighbors", "Structural neighbors and edges of a node."},
+		{"graph_neighbors_cross_corpus", "Semantic expansion into other corpora/workspaces."},
+	}},
+	{Title: "Memory (durable knowledge)", Tools: []learnRaphTool{
+		{"search_project_knowledge", "Search this project's active memories — do this first."},
+		{"search_shared_knowledge", "Search a shared scope's memories."},
+		{"search_global_preferences", "Search global preference memories."},
+		{"store_memory", "Create a NEW memory — only for genuinely new facts."},
+		{"update_memory", "Update an existing memory in place (by node_id or coordinates) instead of duplicating."},
+		{"deprecate_memory", "Retire a memory that no longer applies."},
+		{"get_memory_history", "Show a memory's revision history."},
+	}},
+	{Title: "Rules", Tools: []learnRaphTool{
+		{"store_rule", "Store or update a rule to follow (global or project scope)."},
+		{"list_rules", "List active rules for a scope."},
+	}},
+	{Title: "Documents & handoffs", Tools: []learnRaphTool{
+		{"add_document", "Attach a document: architecture, handoff, reference, or note."},
+		{"list_documents", "List documents, filter by doc_type or status."},
+		{"read_document", "Read by id, or resolve by query; reading a handoff claims it."},
+		{"link_nodes", "Relate two nodes so they're one hop apart."},
+	}},
+	{Title: "Web", Tools: []learnRaphTool{
+		{"crawl_url", "Index one web page."},
+		{"crawl_website", "Crawl a site and return compact answers to a question."},
+	}},
+	{Title: "Indexing", Tools: []learnRaphTool{
+		{"index_codebase", "Index a local codebase into the graph."},
+	}},
+}
+
+// learnRaphExamples show concrete tool calls so agents copy the right shape —
+// especially: search memory (semantic) then update in place rather than
+// re-storing.
+var learnRaphExamples = []learnRaphExample{
+	{
+		Goal: "Recall project knowledge (semantic — searches by meaning, with keyword fallback)",
+		Call: `search_project_knowledge {"query": "how do we deploy"}`,
+	},
+	{
+		Goal: "Update an existing memory in place using the node_id from a search result",
+		Call: `update_memory {"node_id": "memory:...", "title": "Deploy process", "content": "..."}`,
+	},
+	{
+		Goal: "Store a genuinely new fact (only when nothing existing fits)",
+		Call: `store_memory {"scope_type": "project", "knowledge_type": "decision", "title": "...", "content": "..."}`,
+	},
+	{
+		Goal: "Find a handoff without its id",
+		Call: `read_document {"query": "payment migration", "doc_type": "handoff"}`,
+	},
+}
+
+// renderLearnRaph turns the orientation into a readable markdown guide.
+func renderLearnRaph(out LearnRaphOutput) string {
+	var b strings.Builder
+	b.WriteString(out.Overview)
+	b.WriteString("\n\nWorkflow:\n")
+	for _, step := range out.Workflow {
+		b.WriteString("- ")
+		b.WriteString(step)
+		b.WriteString("\n")
+	}
+	for _, g := range out.Groups {
+		b.WriteString("\n")
+		b.WriteString(g.Title)
+		b.WriteString(":\n")
+		for _, t := range g.Tools {
+			b.WriteString("- ")
+			b.WriteString(t.Name)
+			b.WriteString(" — ")
+			b.WriteString(t.When)
+			b.WriteString("\n")
+		}
+	}
+	if len(out.Examples) > 0 {
+		b.WriteString("\nExamples:\n")
+		for _, ex := range out.Examples {
+			b.WriteString("- ")
+			b.WriteString(ex.Goal)
+			b.WriteString(":\n    ")
+			b.WriteString(ex.Call)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 func (m *MCPServerWrapper) registerTools() {
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "learn_raph",
+		Description: "Orientation to raph: the memory-first workflow and every tool grouped by purpose, with when to use each. Call this first if you're unsure which tool fits.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, _ struct{}) (*mcpsdk.CallToolResult, LearnRaphOutput, error) {
+		out := LearnRaphOutput{
+			Overview: "raph is a shared knowledge graph over code, docs, and durable agent memory.",
+			Workflow: learnRaphWorkflow,
+			Groups:   learnRaphGroups,
+			Examples: learnRaphExamples,
+		}
+		return textResult(renderLearnRaph(out)), out, nil
+	})
+
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "hybrid_semantic_search",
 		Description: "Queries semantic codebase components and documentation chunks using embeddings when configured, with keyword fallback.",
@@ -422,23 +582,44 @@ func (m *MCPServerWrapper) registerTools() {
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "update_memory",
-		Description: "Updates the current contents of an existing scoped memory record and saves the previous version to revision history.",
+		Description: "Updates the contents of an existing scoped memory and saves the previous version to revision history. Target it either by node_id (e.g. a node id from a search result) or by its immutable coordinates (scope_type + knowledge_type + memory_key).",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args UpdateMemoryArgs) (*mcpsdk.CallToolResult, memory.StoreOutput, error) {
-		scopeID, err := m.resolveScopeID(args.ScopeType, args.ScopeID)
-		if err != nil {
-			return nil, memory.StoreOutput{}, err
+		input := memory.UpdateInput{
+			Title:    args.Title,
+			Content:  args.Content,
+			Source:   args.Source,
+			WriterID: args.WriterID,
+			Tags:     args.Tags,
 		}
-		output, err := memory.Update(ctx, m.store, m.config, memory.UpdateInput{
-			ScopeType:     args.ScopeType,
-			ScopeID:       scopeID,
-			KnowledgeType: args.KnowledgeType,
-			Title:         args.Title,
-			Content:       args.Content,
-			Source:        args.Source,
-			WriterID:      args.WriterID,
-			Tags:          args.Tags,
-			MemoryKey:     args.MemoryKey,
-		})
+		if nodeID := strings.TrimSpace(args.NodeID); nodeID != "" {
+			// Update a particular memory directly: resolve its immutable
+			// coordinates from the stored record so the caller doesn't have to
+			// restate them, and default authorship to the record's current values.
+			record, err := m.store.GetMemoryRecord(ctx, nodeID)
+			if err != nil {
+				return nil, memory.StoreOutput{}, fmt.Errorf("load memory %s: %w", nodeID, err)
+			}
+			input.ScopeType = record.ScopeType
+			input.ScopeID = record.ScopeID
+			input.KnowledgeType = record.KnowledgeType
+			input.MemoryKey = record.MemoryKey
+			if strings.TrimSpace(input.Source) == "" {
+				input.Source = record.Source
+			}
+			if strings.TrimSpace(input.WriterID) == "" {
+				input.WriterID = record.WriterID
+			}
+		} else {
+			scopeID, err := m.resolveScopeID(args.ScopeType, args.ScopeID)
+			if err != nil {
+				return nil, memory.StoreOutput{}, err
+			}
+			input.ScopeType = args.ScopeType
+			input.ScopeID = scopeID
+			input.KnowledgeType = args.KnowledgeType
+			input.MemoryKey = args.MemoryKey
+		}
+		output, err := memory.Update(ctx, m.store, m.config, input)
 		if err != nil {
 			return nil, memory.StoreOutput{}, err
 		}
@@ -961,7 +1142,7 @@ func (m *MCPServerWrapper) resolveScopeID(scopeType string, provided string) (st
 }
 
 func (m *MCPServerWrapper) searchKnowledge(ctx context.Context, scopeType string, scopeID string, knowledgeType string, query string, limit int) (ScopedMemorySearchOutput, error) {
-	output, err := memory.Search(ctx, m.store, memory.SearchInput{
+	output, err := memory.Search(ctx, m.store, m.config, memory.SearchInput{
 		Query:         query,
 		ScopeType:     scopeType,
 		ScopeID:       scopeID,

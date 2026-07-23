@@ -65,6 +65,7 @@ type StoreOutput struct {
 }
 
 type SearchOutput struct {
+	Mode    string            `json:"mode"` // "semantic" or "keyword"
 	Matches []db.MemoryRecord `json:"matches"`
 }
 
@@ -188,19 +189,44 @@ func Deprecate(ctx context.Context, store db.GraphStore, input DeprecateInput) (
 	return store.GetMemoryRecord(ctx, record.Node.ID)
 }
 
-func Search(ctx context.Context, store db.GraphStore, input SearchInput) (SearchOutput, error) {
-	matches, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
-		Query:           input.Query,
+func Search(ctx context.Context, store db.GraphStore, cfg *config.Config, input SearchInput) (SearchOutput, error) {
+	filter := db.MemorySearchFilter{
 		ScopeType:       input.ScopeType,
 		ScopeID:         input.ScopeID,
 		KnowledgeType:   input.KnowledgeType,
 		LifecycleStates: []string{lifecycleActive},
 		Limit:           input.Limit,
-	})
+	}
+
+	// Prefer semantic search over the stored embeddings so agents find memories
+	// by meaning, not just literal keywords. This embeds the query via the
+	// configured provider — a network call — so it's bounded by a short timeout
+	// and always falls back to a local keyword search when there's no provider,
+	// the query can't be embedded (offline/unavailable/timeout), or nothing
+	// ranks above zero similarity. A read never hangs on the provider, and
+	// stays fully functional offline.
+	query := strings.TrimSpace(input.Query)
+	if query != "" && cfg != nil && cfg.HasEmbeddingProvider() {
+		embedCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		vec, err := config.GenerateEmbedding(embedCtx, cfg, query)
+		cancel()
+		if err == nil && len(vec) > 0 {
+			matches, err := store.VectorSearchMemoryRecords(ctx, vec, filter)
+			if err != nil {
+				return SearchOutput{}, err
+			}
+			if len(matches) > 0 {
+				return SearchOutput{Mode: "semantic", Matches: matches}, nil
+			}
+		}
+	}
+
+	filter.Query = input.Query
+	matches, err := store.SearchMemoryRecords(ctx, filter)
 	if err != nil {
 		return SearchOutput{}, err
 	}
-	return SearchOutput{Matches: matches}, nil
+	return SearchOutput{Mode: "keyword", Matches: matches}, nil
 }
 
 func History(ctx context.Context, store db.GraphStore, nodeID string) ([]db.MemoryRevision, error) {

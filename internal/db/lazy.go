@@ -227,6 +227,14 @@ func (l *LazyStore) SearchMemoryRecords(ctx context.Context, filter MemorySearch
 	return store.SearchMemoryRecords(ctx, filter)
 }
 
+func (l *LazyStore) VectorSearchMemoryRecords(ctx context.Context, embedding []float32, filter MemorySearchFilter) ([]MemoryRecord, error) {
+	store, err := l.ensure()
+	if err != nil {
+		return nil, err
+	}
+	return store.VectorSearchMemoryRecords(ctx, embedding, filter)
+}
+
 func (l *LazyStore) SetMemoryLifecycle(ctx context.Context, nodeID string, lifecycleState string, replacedByNodeID string, deprecatedMessage string) error {
 	store, err := l.ensure()
 	if err != nil {

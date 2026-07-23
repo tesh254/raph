@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -158,6 +159,9 @@ func (s *protocolStore) SearchMemoryRecords(_ context.Context, filter db.MemoryS
 		out = append(out, record)
 	}
 	return out, nil
+}
+func (*protocolStore) VectorSearchMemoryRecords(context.Context, []float32, db.MemorySearchFilter) ([]db.MemoryRecord, error) {
+	return nil, nil
 }
 func (*protocolStore) SetMemoryLifecycle(context.Context, string, string, string, string) error {
 	return nil
@@ -334,6 +338,74 @@ func TestBestVectorMatchReturnsSingleMatch(t *testing.T) {
 	}
 }
 
+func TestLearnRaphCoversAllTools(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wrapper := NewMCPServerWrapper(newProtocolStore(), nil)
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	go func() { _ = wrapper.server.Run(ctx, serverTransport) }()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "raph-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: "learn_raph"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("learn_raph returned tool error: %+v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcpsdk.TextContent)
+	if !ok {
+		t.Fatalf("expected text content, got %T", result.Content[0])
+	}
+
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools.Tools {
+		if tool.Name == "learn_raph" {
+			continue
+		}
+		// Word-boundary match, not substring: otherwise a short name like
+		// "search" would appear to be documented merely because "search_codebase"
+		// is present, hiding a removed entry.
+		matcher := regexp.MustCompile(`\b` + regexp.QuoteMeta(tool.Name) + `\b`)
+		if !matcher.MatchString(text.Text) {
+			t.Fatalf("learn_raph output does not document tool %q — add it to learnRaphGroups", tool.Name)
+		}
+	}
+}
+
+func TestServerAdvertisesMemoryUpdateGuidance(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wrapper := NewMCPServerWrapper(newProtocolStore(), nil)
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	go func() { _ = wrapper.server.Run(ctx, serverTransport) }()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "raph-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	instr := session.InitializeResult().Instructions
+	if instr == "" {
+		t.Fatal("server sent no instructions on initialize")
+	}
+	// Agents must be told memories are updatable in place, not just stored.
+	if !strings.Contains(instr, "update_memory") {
+		t.Fatalf("instructions do not mention update_memory: %q", instr)
+	}
+}
+
 func TestSearchRecordsAttribution(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -386,6 +458,66 @@ func TestSearchRecordsAttribution(t *testing.T) {
 	}
 	if hits != 1 {
 		t.Fatalf("expected 1 hit event, got %d (%+v)", hits, store.accesses)
+	}
+}
+
+func TestUpdateMemoryByNodeID(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := newProtocolStore()
+	rec := db.MemoryRecord{
+		Node:           db.Node{ID: "memory:abc", Type: "memory", Name: "Old title", Content: "old content"},
+		ScopeType:      "project",
+		ScopeID:        "proj",
+		KnowledgeType:  "decision",
+		MemoryKey:      "the-key",
+		Source:         "agent",
+		WriterID:       "agent:one",
+		LifecycleState: "active",
+		Revision:       1,
+	}
+	store.records[rec.Node.ID] = rec
+	store.nodes[rec.Node.ID] = rec.Node
+
+	wrapper := NewMCPServerWrapper(store, nil)
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	go func() { _ = wrapper.server.Run(ctx, serverTransport) }()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "raph-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	// Update by node id alone — no scope/knowledge_type/memory_key supplied.
+	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "update_memory",
+		Arguments: map[string]any{
+			"node_id": "memory:abc",
+			"title":   "New title",
+			"content": "new content",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("update_memory by node id returned tool error: %+v", result.Content)
+	}
+
+	got := store.records["memory:abc"]
+	if got.Node.Content != "new content" || got.Node.Name != "New title" {
+		t.Fatalf("memory not updated: name=%q content=%q", got.Node.Name, got.Node.Content)
+	}
+	// Authorship defaulted from the record since the caller omitted it.
+	if got.WriterID != "agent:one" {
+		t.Fatalf("expected writer preserved, got %q", got.WriterID)
+	}
+	// The update must bump the revision (1 -> 2) and snapshot history; guards
+	// against the handler bypassing the revisioned update path.
+	if got.Revision != 2 {
+		t.Fatalf("expected revision bumped to 2, got %d", got.Revision)
 	}
 }
 
