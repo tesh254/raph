@@ -360,3 +360,111 @@ func TestStudioRejectsRebindingHost(t *testing.T) {
 		t.Fatalf("expected 403 for foreign Host header, got %d", rec.Code)
 	}
 }
+
+func TestStudioDeleteMemoryEndpoint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	mNode := db.Node{
+		ID:        "memory:delete-test",
+		Workspace: "ws:test",
+		Domain:    "memory",
+		Type:      "memory",
+		Name:      "Delete me",
+		Content:   "transient",
+	}
+	if err := store.SaveNode(context.Background(), mNode); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertMemoryRecord(context.Background(), db.MemoryRecord{
+		Node:           mNode,
+		MemoryKey:      "delete/test",
+		ScopeType:      "project",
+		ScopeID:        "project:test",
+		LifecycleState: "active",
+		KnowledgeType:  "decision",
+		Source:         "user",
+		WriterID:       "agent:test",
+		CreatedAt:      "2026-07-24T00:00:00Z",
+		UpdatedAt:      "2026-07-24T00:00:00Z",
+		Revision:       1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A plain graph node that is NOT a memory record — the endpoint must refuse
+	// to delete it, so the memory-only guard survives the move to an atomic
+	// check-and-delete.
+	nonMemory := db.Node{
+		ID:        "file:non-memory",
+		Workspace: "ws:test",
+		Domain:    "code",
+		Type:      "file",
+		Name:      "main.go",
+		Content:   "package main",
+	}
+	if err := store.SaveNode(context.Background(), nonMemory); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewStudioServer(store, "", 0)
+
+	deleteReq := httptest.NewRequest(http.MethodPost, "/api/memory/delete",
+		strings.NewReader(`{"node_id":"memory:delete-test"}`))
+	deleteRec := httptest.NewRecorder()
+	srv.handleDeleteMemory(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on first delete, got %d body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, err := store.GetMemoryRecord(context.Background(), mNode.ID); err == nil {
+		t.Fatal("expected memory record to be gone after delete")
+	}
+	if _, err := store.GetNodeByID(context.Background(), mNode.ID); err == nil {
+		t.Fatal("expected memory node to be gone after delete")
+	}
+
+	// Second delete of the same id is now a 404 (not a memory) — confirms the
+	// guard re-checks at delete time rather than trusting the earlier read.
+	againReq := httptest.NewRequest(http.MethodPost, "/api/memory/delete",
+		strings.NewReader(`{"node_id":"memory:delete-test"}`))
+	againRec := httptest.NewRecorder()
+	srv.handleDeleteMemory(againRec, againReq)
+	if againRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on re-delete, got %d body=%s", againRec.Code, againRec.Body.String())
+	}
+
+	// Deleting a non-memory node is refused: the endpoint cannot be used to
+	// remove arbitrary graph nodes.
+	guardReq := httptest.NewRequest(http.MethodPost, "/api/memory/delete",
+		strings.NewReader(`{"node_id":"file:non-memory"}`))
+	guardRec := httptest.NewRecorder()
+	srv.handleDeleteMemory(guardRec, guardReq)
+	if guardRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when deleting a non-memory node, got %d body=%s", guardRec.Code, guardRec.Body.String())
+	}
+	if _, err := store.GetNodeByID(context.Background(), nonMemory.ID); err != nil {
+		t.Fatalf("non-memory node should still exist after refused delete: %v", err)
+	}
+
+	// Missing node_id is a 400.
+	badReq := httptest.NewRequest(http.MethodPost, "/api/memory/delete",
+		strings.NewReader(`{}`))
+	badRec := httptest.NewRecorder()
+	srv.handleDeleteMemory(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing node_id, got %d", badRec.Code)
+	}
+
+	// Non-POST is 405.
+	getReq := httptest.NewRequest(http.MethodGet, "/api/memory/delete", nil)
+	getRec := httptest.NewRecorder()
+	srv.handleDeleteMemory(getRec, getReq)
+	if getRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET, got %d", getRec.Code)
+	}
+}

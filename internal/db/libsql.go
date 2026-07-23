@@ -1736,6 +1736,42 @@ func (s *LibSQLStore) DeleteNodeByID(ctx context.Context, id string) error {
 	})
 }
 
+// DeleteMemoryNode deletes the graph node identified by nodeID only if it is
+// currently the node of a memory record. The classification check and the
+// delete run inside a single write transaction (the store's BEGIN IMMEDIATE
+// acquires the write lock for the whole call), so a concurrent rewrite that
+// repoints memory_records.node_id at a different node between a separate read
+// and a separate delete cannot turn this into a way to delete an arbitrary
+// graph node: by the time the lock is held the node is re-verified against
+// memory_records, and the node row is removed in the same atomic step.
+//
+// Returns sql.ErrNoRows when nodeID is not a memory node (or no longer is, if a
+// concurrent writer removed/repointed its memory_records row).
+func (s *LibSQLStore) DeleteMemoryNode(ctx context.Context, nodeID string) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		var exists int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT 1 FROM memory_records WHERE node_id = ? LIMIT 1`,
+			nodeID,
+		).Scan(&exists); err != nil {
+			if err == sql.ErrNoRows {
+				return sql.ErrNoRows
+			}
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE source_id = ? OR target_id = ?`, nodeID, nodeID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, nodeID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, nodeID); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 func (s *LibSQLStore) DeleteFileNodes(ctx context.Context, workspace string, relativePath string) error {
 	relativePath = filepath.ToSlash(relativePath)
 	return s.withTx(ctx, func(tx *sql.Tx) error {
