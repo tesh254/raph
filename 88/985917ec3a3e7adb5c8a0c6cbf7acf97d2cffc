@@ -1,0 +1,23 @@
+internal/signing/signing.go
+  s_1f2e6ddf8002c9::t_c5012966f2aa6d 42-57
+cmd/raph/main.go
+  s_1f2e6ddf8002c9::t_d9281220c9cf6a 1735-1758,1761
+internal/signing/signing_test.go
+  s_1f2e6ddf8002c9::t_e2adab711cb848 57-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "88985917ec3a3e7adb5c8a0c6cbf7acf97d2cffc",
+  "prompts": {},
+  "sessions": {
+    "s_1f2e6ddf8002c9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df08ec0e-b929-412f-923f-d2762ab14a0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
