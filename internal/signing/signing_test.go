@@ -54,3 +54,26 @@ func TestVerifyMessageRejectsTampering(t *testing.T) {
 		t.Fatal("expected verification failure for tampered message")
 	}
 }
+
+func TestDerivePublicKeyTextMatchesKeypair(t *testing.T) {
+	publicKey, privateKey, err := minisign.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := minisign.EncryptKey("pw", privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := DerivePublicKeyText(encrypted, "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := publicKey.MarshalText()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("derived public key %q, want %q", got, want)
+	}
+}

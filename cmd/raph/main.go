@@ -1732,7 +1732,32 @@ func newReleaseCmd() *cobra.Command {
 	_ = verifyCmd.MarkFlagRequired("artifact")
 	_ = verifyCmd.MarkFlagRequired("signature")
 
+	var pkKeyEnv, pkPasswordEnv string
+	publicKeyCmd := &cobra.Command{
+		Use:   "public-key",
+		Short: "Print the minisign public key matching the signing private key",
+		Long: "Derives the public key from the signing private key so it can be committed to " +
+			"internal/signing/raph.minisign.pub. The embedded key MUST match the key the release " +
+			"pipeline signs with, or `raph update` fails signature verification.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			privateKeyText := []byte(os.Getenv(pkKeyEnv))
+			if len(privateKeyText) == 0 {
+				return fmt.Errorf("%s is required", pkKeyEnv)
+			}
+			text, err := signing.DerivePublicKeyText(privateKeyText, os.Getenv(pkPasswordEnv))
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), strings.TrimRight(string(text), "\n"))
+			return nil
+		},
+	}
+	publicKeyCmd.Flags().StringVar(&pkKeyEnv, "key-env", signing.DefaultPrivateKeyEnv, "Environment variable containing the encrypted minisign private key")
+	publicKeyCmd.Flags().StringVar(&pkPasswordEnv, "password-env", signing.DefaultPasswordEnv, "Environment variable containing the minisign key password")
+
 	releaseCmd.AddCommand(signCmd)
 	releaseCmd.AddCommand(verifyCmd)
+	releaseCmd.AddCommand(publicKeyCmd)
 	return releaseCmd
 }
