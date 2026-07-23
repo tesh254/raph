@@ -1,0 +1,24 @@
+internal/studio/server.go
+  s_a57d653f4a07a1::t_3d45ced406a39b 766-802
+  s_a57d653f4a07a1::t_ed5fecb0a92da5 125
+internal/updater/updater.go
+  s_a57d653f4a07a1::t_da84cfbdb35249 17
+  s_a57d653f4a07a1::t_1d0136e0a56865 99-101
+  s_a57d653f4a07a1::t_619033beac3af4 135-184
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "782176164caf11422ea392102008f846c8e0463b",
+  "prompts": {},
+  "sessions": {
+    "s_a57d653f4a07a1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "428b4258-1ebc-4b78-b6d9-14553fd3a686",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
