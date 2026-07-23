@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -95,9 +96,9 @@ func Update(ctx context.Context, current string) (Result, error) {
 	if err != nil {
 		return result, fmt.Errorf("download checksum signature: %w", err)
 	}
-	verbose.Printf("verifying checksum signature")
-	if err := signing.VerifyTrustedMessage(checksums, checksumsSignature); err != nil {
-		return result, fmt.Errorf("verify checksum signature: %w", err)
+	verbose.Printf("verifying checksums authenticity")
+	if err := verifyChecksums(ctx, checksums, checksumsSignature); err != nil {
+		return result, err
 	}
 	want, err := checksumFor(checksums, archiveName)
 	if err != nil {
@@ -129,6 +130,56 @@ func Update(ctx context.Context, current string) (Result, error) {
 	verbose.Printf("update applied successfully")
 	result.Updated = true
 	return result, nil
+}
+
+// verifyChecksums establishes that checksums.txt genuinely came from the raph
+// release pipeline. It prefers GitHub build-provenance attestations (verified
+// via the gh CLI against sigstore's trust root) because that trust anchor lives
+// with GitHub, not baked into this binary — so an old binary can't be locked
+// out by a rotated signing key. It falls back to the embedded minisign public
+// key when gh is unavailable, and returns an actionable error if neither works.
+func verifyChecksums(ctx context.Context, checksums, signature []byte) error {
+	if ghPath, err := exec.LookPath("gh"); err == nil {
+		if verr := verifyAttestation(ctx, ghPath, "checksums.txt", checksums); verr == nil {
+			verbose.Printf("verified checksums via GitHub build attestation")
+			return nil
+		} else {
+			verbose.Printf("attestation verify unavailable (%v); trying embedded signature", verr)
+		}
+	} else {
+		verbose.Printf("gh CLI not found; verifying with embedded signature")
+	}
+
+	if err := signing.VerifyTrustedMessage(checksums, signature); err != nil {
+		return fmt.Errorf("could not verify release authenticity: %w.\n"+
+			"Install the GitHub CLI (gh) so updates can verify via build attestations, "+
+			"or reinstall raph to refresh its signing key: "+
+			"curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | sh", err, repository)
+	}
+	verbose.Printf("verified checksums via embedded signature")
+	return nil
+}
+
+// verifyAttestation writes data to a temp file and asks gh to verify its
+// GitHub build-provenance attestation for the repository.
+func verifyAttestation(ctx context.Context, ghPath, name string, data []byte) error {
+	f, err := os.CreateTemp("", "raph-verify-*-"+name)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, ghPath, "attestation", "verify", f.Name(), "--repo", repository)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func ShouldAutoCheck() bool {
