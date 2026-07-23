@@ -1,0 +1,23 @@
+internal/mcp/server_test.go
+  s_1f2e6ddf8002c9::t_c9597ba4bdfacb 337-376
+internal/mcp/server.go
+  s_1f2e6ddf8002c9::t_8d7f6ece76ff18 309-399
+  s_1f2e6ddf8002c9::t_507a248ae696f2 402-412
+  s_1f2e6ddf8002c9::t_6558b3cd5c20e9 401
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "226b428a2f1c3e0f0066a1e0ff552248457d5150",
+  "prompts": {},
+  "sessions": {
+    "s_1f2e6ddf8002c9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df08ec0e-b929-412f-923f-d2762ab14a0d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
