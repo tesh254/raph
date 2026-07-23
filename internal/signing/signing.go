@@ -39,6 +39,22 @@ func ParsePrivateKey(text []byte, password string) (minisign.PrivateKey, error) 
 	return key, nil
 }
 
+// DerivePublicKeyText returns the minisign public key that matches a signing
+// private key, in the text form used by raph.minisign.pub. It's the source of
+// truth for the embedded verification key: if that file drifts from the key the
+// release pipeline signs with, `raph update` fails signature verification.
+func DerivePublicKeyText(privateKeyText []byte, password string) ([]byte, error) {
+	privateKey, err := ParsePrivateKey(privateKeyText, password)
+	if err != nil {
+		return nil, err
+	}
+	publicKey, ok := privateKey.Public().(minisign.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("unexpected public key type %T", privateKey.Public())
+	}
+	return publicKey.MarshalText()
+}
+
 func SignMessage(privateKey minisign.PrivateKey, message []byte, trustedComment string) ([]byte, error) {
 	return minisign.SignWithComments(privateKey, message, trustedComment, "signature from raph release pipeline"), nil
 }
