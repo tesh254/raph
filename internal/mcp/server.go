@@ -306,7 +306,110 @@ func NewMCPServerWrapper(store db.GraphStore, cfg *config.Config) *MCPServerWrap
 	return wrapper
 }
 
+// LearnRaphOutput is the structured orientation returned by learn_raph.
+type LearnRaphOutput struct {
+	Overview string           `json:"overview"`
+	Workflow []string         `json:"workflow"`
+	Groups   []learnRaphGroup `json:"groups"`
+}
+
+type learnRaphGroup struct {
+	Title string          `json:"title"`
+	Tools []learnRaphTool `json:"tools"`
+}
+
+type learnRaphTool struct {
+	Name string `json:"name"`
+	When string `json:"when"`
+}
+
+var learnRaphWorkflow = []string{
+	"Search existing knowledge before answering (search_project_knowledge, search_shared_knowledge, search_global_preferences).",
+	"Reuse what you find; if a memory is out of date, update_memory in place instead of storing a duplicate.",
+	"Record durable decisions, setup facts, and gotchas before finishing (store_memory / store_rule).",
+	"Index a repo (index_codebase) when code context matters; crawl_website for external docs.",
+}
+
+// learnRaphGroups documents every registered tool. TestLearnRaphCoversAllTools
+// fails if a tool is added without a matching entry here, keeping it in sync.
+var learnRaphGroups = []learnRaphGroup{
+	{Title: "Search & retrieval", Tools: []learnRaphTool{
+		{"hybrid_semantic_search", "Primary graph search; embeddings with keyword fallback."},
+		{"multi_query_search", "Run several searches in one call, grouped by query."},
+		{"best_vector_match", "Single closest semantic match (needs an embedding provider)."},
+		{"search", "CLI-style search: auto/literal/regex/vector modes, type filters."},
+		{"search_codebase", "Codebase search grouped into symbols, files, and chunks."},
+	}},
+	{Title: "Graph traversal", Tools: []learnRaphTool{
+		{"graph_neighbors", "Structural neighbors and edges of a node."},
+		{"graph_neighbors_cross_corpus", "Semantic expansion into other corpora/workspaces."},
+	}},
+	{Title: "Memory (durable knowledge)", Tools: []learnRaphTool{
+		{"search_project_knowledge", "Search this project's active memories — do this first."},
+		{"search_shared_knowledge", "Search a shared scope's memories."},
+		{"search_global_preferences", "Search global preference memories."},
+		{"store_memory", "Create a NEW memory — only for genuinely new facts."},
+		{"update_memory", "Update an existing memory in place (by node_id or coordinates) instead of duplicating."},
+		{"deprecate_memory", "Retire a memory that no longer applies."},
+		{"get_memory_history", "Show a memory's revision history."},
+	}},
+	{Title: "Rules", Tools: []learnRaphTool{
+		{"store_rule", "Store or update a rule to follow (global or project scope)."},
+		{"list_rules", "List active rules for a scope."},
+	}},
+	{Title: "Documents & handoffs", Tools: []learnRaphTool{
+		{"add_document", "Attach a document: architecture, handoff, reference, or note."},
+		{"list_documents", "List documents, filter by doc_type or status."},
+		{"read_document", "Read by id, or resolve by query; reading a handoff claims it."},
+		{"link_nodes", "Relate two nodes so they're one hop apart."},
+	}},
+	{Title: "Web", Tools: []learnRaphTool{
+		{"crawl_url", "Index one web page."},
+		{"crawl_website", "Crawl a site and return compact answers to a question."},
+	}},
+	{Title: "Indexing", Tools: []learnRaphTool{
+		{"index_codebase", "Index a local codebase into the graph."},
+	}},
+}
+
+// renderLearnRaph turns the orientation into a readable markdown guide.
+func renderLearnRaph(out LearnRaphOutput) string {
+	var b strings.Builder
+	b.WriteString(out.Overview)
+	b.WriteString("\n\nWorkflow:\n")
+	for _, step := range out.Workflow {
+		b.WriteString("- ")
+		b.WriteString(step)
+		b.WriteString("\n")
+	}
+	for _, g := range out.Groups {
+		b.WriteString("\n")
+		b.WriteString(g.Title)
+		b.WriteString(":\n")
+		for _, t := range g.Tools {
+			b.WriteString("- ")
+			b.WriteString(t.Name)
+			b.WriteString(" — ")
+			b.WriteString(t.When)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 func (m *MCPServerWrapper) registerTools() {
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "learn_raph",
+		Description: "Orientation to raph: the memory-first workflow and every tool grouped by purpose, with when to use each. Call this first if you're unsure which tool fits.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, _ struct{}) (*mcpsdk.CallToolResult, LearnRaphOutput, error) {
+		out := LearnRaphOutput{
+			Overview: "raph is a shared knowledge graph over code, docs, and durable agent memory.",
+			Workflow: learnRaphWorkflow,
+			Groups:   learnRaphGroups,
+		}
+		return textResult(renderLearnRaph(out)), out, nil
+	})
+
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "hybrid_semantic_search",
 		Description: "Queries semantic codebase components and documentation chunks using embeddings when configured, with keyword fallback.",

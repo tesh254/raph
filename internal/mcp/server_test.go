@@ -334,6 +334,46 @@ func TestBestVectorMatchReturnsSingleMatch(t *testing.T) {
 	}
 }
 
+func TestLearnRaphCoversAllTools(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wrapper := NewMCPServerWrapper(newProtocolStore(), nil)
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	go func() { _ = wrapper.server.Run(ctx, serverTransport) }()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "raph-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: "learn_raph"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("learn_raph returned tool error: %+v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcpsdk.TextContent)
+	if !ok {
+		t.Fatalf("expected text content, got %T", result.Content[0])
+	}
+
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools.Tools {
+		if tool.Name == "learn_raph" {
+			continue
+		}
+		if !strings.Contains(text.Text, tool.Name) {
+			t.Fatalf("learn_raph output does not document tool %q — add it to learnRaphGroups", tool.Name)
+		}
+	}
+}
+
 func TestServerAdvertisesMemoryUpdateGuidance(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
