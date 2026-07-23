@@ -122,6 +122,7 @@ func (s *StudioServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/memories", s.handleListMemories)
 	mux.HandleFunc("/api/memory", s.handleGetMemory)
 	mux.HandleFunc("/api/memory/update", s.handleUpdateMemory)
+	mux.HandleFunc("/api/memory/delete", s.handleDeleteMemory)
 	mux.HandleFunc("/api/handoffs", s.handleListHandoffs)
 	mux.HandleFunc("/api/document", s.handleGetDocument)
 	mux.HandleFunc("/api/document/update", s.handleUpdateDocument)
@@ -760,6 +761,43 @@ func (s *StudioServer) handleUpdateMemory(w http.ResponseWriter, r *http.Request
 	}
 	verbose.Printf("studio update memory id=%s revision=%d", req.NodeID, out.Record.Revision)
 	writeJSON(w, http.StatusOK, out.Record)
+}
+
+func (s *StudioServer) handleDeleteMemory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		NodeID string `json:"node_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSpace(req.NodeID)
+	if id == "" {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+	// Confirm it's a memory before deleting so this endpoint can't be used to
+	// remove arbitrary graph nodes.
+	if _, err := s.store.GetMemoryRecord(r.Context(), id); err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "memory not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Hard delete: removing the node cascades to its memory_records row,
+	// revisions, and edges (all FK ON DELETE CASCADE).
+	if err := s.store.DeleteNodeByID(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	verbose.Printf("studio delete memory id=%s", id)
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *StudioServer) handleListHandoffs(w http.ResponseWriter, r *http.Request) {
