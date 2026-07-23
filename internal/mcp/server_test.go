@@ -334,6 +334,30 @@ func TestBestVectorMatchReturnsSingleMatch(t *testing.T) {
 	}
 }
 
+func TestServerAdvertisesMemoryUpdateGuidance(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wrapper := NewMCPServerWrapper(newProtocolStore(), nil)
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	go func() { _ = wrapper.server.Run(ctx, serverTransport) }()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "raph-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	instr := session.InitializeResult().Instructions
+	if instr == "" {
+		t.Fatal("server sent no instructions on initialize")
+	}
+	// Agents must be told memories are updatable in place, not just stored.
+	if !strings.Contains(instr, "update_memory") {
+		t.Fatalf("instructions do not mention update_memory: %q", instr)
+	}
+}
+
 func TestSearchRecordsAttribution(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

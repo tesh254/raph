@@ -276,12 +276,29 @@ type CrossCorpusNeighborOutput struct {
 	Matches     []db.Node `json:"matches"`
 }
 
+// mcpInstructions is the server-level guidance clients receive on initialize.
+// It teaches the memory-first loop and, crucially, that existing memories
+// should be updated in place rather than re-stored as duplicates.
+const mcpInstructions = `raph is a shared knowledge graph for code, docs, and durable agent memory.
+
+Memory-first workflow:
+- Before answering, search existing knowledge (search_project_knowledge, search_shared_knowledge, search_global_preferences).
+- Reuse what you find. If a memory is out of date, UPDATE it instead of storing a duplicate: call update_memory with the node_id from the search result (its immutable scope/type/key are resolved for you). Use store_memory only for genuinely new facts.
+- Record durable decisions, setup facts, and gotchas before finishing.
+- get_memory_history shows a memory's revisions; deprecate_memory retires one that no longer applies.
+- Handoffs are documents (add_document with doc_type=handoff); read_document accepts a query when you don't have the id.`
+
 func NewMCPServerWrapper(store db.GraphStore, cfg *config.Config) *MCPServerWrapper {
 	verbose.Printf("creating MCP server")
 	s := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name:    "raph",
 		Version: "1.0.0",
-	}, nil)
+	}, &mcpsdk.ServerOptions{
+		// Sent to clients on initialize so agents learn the memory-first
+		// workflow — including that memories are updatable — without relying on
+		// an external prompt.
+		Instructions: mcpInstructions,
+	})
 
 	wrapper := &MCPServerWrapper{server: s, store: store, config: cfg}
 	wrapper.registerTools()
