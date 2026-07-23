@@ -1,0 +1,28 @@
+internal/memory/memory.go
+  s_a57d653f4a07a1::t_222fffd00e2d28 202-207,210-213
+internal/db/libsql.go
+  s_a57d653f4a07a1::t_0fa9807ea577b4 1532-1535
+  s_a57d653f4a07a1::t_fc6ca2241b0bc6 89
+cmd/raph/main.go
+  s_a57d653f4a07a1::t_9651763452c037 773-783,785-786,788-808,812
+internal/db/libsql_test.go
+  s_a57d653f4a07a1::t_6c16cc107b1099 536-541
+  s_a57d653f4a07a1::t_46f6433a2dcab9 533-535
+  s_a57d653f4a07a1::t_252df95501c510 542-544
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "8b51f2face6f3ad7dee7bb3d6b2aaf3d1b326d18",
+  "prompts": {},
+  "sessions": {
+    "s_a57d653f4a07a1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "428b4258-1ebc-4b78-b6d9-14553fd3a686",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
