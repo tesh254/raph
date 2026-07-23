@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -371,7 +372,11 @@ func TestLearnRaphCoversAllTools(t *testing.T) {
 		if tool.Name == "learn_raph" {
 			continue
 		}
-		if !strings.Contains(text.Text, tool.Name) {
+		// Word-boundary match, not substring: otherwise a short name like
+		// "search" would appear to be documented merely because "search_codebase"
+		// is present, hiding a removed entry.
+		matcher := regexp.MustCompile(`\b` + regexp.QuoteMeta(tool.Name) + `\b`)
+		if !matcher.MatchString(text.Text) {
 			t.Fatalf("learn_raph output does not document tool %q — add it to learnRaphGroups", tool.Name)
 		}
 	}
@@ -508,6 +513,11 @@ func TestUpdateMemoryByNodeID(t *testing.T) {
 	// Authorship defaulted from the record since the caller omitted it.
 	if got.WriterID != "agent:one" {
 		t.Fatalf("expected writer preserved, got %q", got.WriterID)
+	}
+	// The update must bump the revision (1 -> 2) and snapshot history; guards
+	// against the handler bypassing the revisioned update path.
+	if got.Revision != 2 {
+		t.Fatalf("expected revision bumped to 2, got %d", got.Revision)
 	}
 }
 
