@@ -389,6 +389,61 @@ func TestSearchRecordsAttribution(t *testing.T) {
 	}
 }
 
+func TestUpdateMemoryByNodeID(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := newProtocolStore()
+	rec := db.MemoryRecord{
+		Node:           db.Node{ID: "memory:abc", Type: "memory", Name: "Old title", Content: "old content"},
+		ScopeType:      "project",
+		ScopeID:        "proj",
+		KnowledgeType:  "decision",
+		MemoryKey:      "the-key",
+		Source:         "agent",
+		WriterID:       "agent:one",
+		LifecycleState: "active",
+		Revision:       1,
+	}
+	store.records[rec.Node.ID] = rec
+	store.nodes[rec.Node.ID] = rec.Node
+
+	wrapper := NewMCPServerWrapper(store, nil)
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	go func() { _ = wrapper.server.Run(ctx, serverTransport) }()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "raph-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	// Update by node id alone — no scope/knowledge_type/memory_key supplied.
+	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "update_memory",
+		Arguments: map[string]any{
+			"node_id": "memory:abc",
+			"title":   "New title",
+			"content": "new content",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("update_memory by node id returned tool error: %+v", result.Content)
+	}
+
+	got := store.records["memory:abc"]
+	if got.Node.Content != "new content" || got.Node.Name != "New title" {
+		t.Fatalf("memory not updated: name=%q content=%q", got.Node.Name, got.Node.Content)
+	}
+	// Authorship defaulted from the record since the caller omitted it.
+	if got.WriterID != "agent:one" {
+		t.Fatalf("expected writer preserved, got %q", got.WriterID)
+	}
+}
+
 func TestReadDocumentResolvesByIDOrQuery(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

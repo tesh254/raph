@@ -57,15 +57,16 @@ type StoreMemoryArgs struct {
 }
 
 type UpdateMemoryArgs struct {
-	ScopeType     string   `json:"scope_type" jsonschema:"Immutable memory scope type"`
+	NodeID        string   `json:"node_id,omitempty" jsonschema:"Target a particular memory by its node id (e.g. from a search result). When set, scope_type/knowledge_type/memory_key are resolved from the record and need not be supplied"`
+	ScopeType     string   `json:"scope_type,omitempty" jsonschema:"Immutable memory scope type. Required unless node_id is set"`
 	ScopeID       string   `json:"scope_id,omitempty" jsonschema:"Immutable scope identifier. Project scope can infer this from the current workspace when omitted"`
-	KnowledgeType string   `json:"knowledge_type" jsonschema:"Immutable knowledge category"`
+	KnowledgeType string   `json:"knowledge_type,omitempty" jsonschema:"Immutable knowledge category. Required unless node_id is set"`
 	Title         string   `json:"title" jsonschema:"Updated short descriptive title"`
 	Content       string   `json:"content" jsonschema:"Updated durable information"`
-	Source        string   `json:"source" jsonschema:"Origin of the update"`
-	WriterID      string   `json:"writer_id" jsonschema:"Stable identifier for the writer updating this memory"`
+	Source        string   `json:"source,omitempty" jsonschema:"Origin of the update. Defaults to the record's current source when omitted"`
+	WriterID      string   `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer updating this memory. Defaults to the record's current writer when omitted"`
 	Tags          []string `json:"tags,omitempty" jsonschema:"Optional replacement tag set"`
-	MemoryKey     string   `json:"memory_key" jsonschema:"Stable immutable key used to locate the memory"`
+	MemoryKey     string   `json:"memory_key,omitempty" jsonschema:"Stable immutable key used to locate the memory. Required unless node_id is set"`
 }
 
 type DeprecateMemoryArgs struct {
@@ -422,23 +423,44 @@ func (m *MCPServerWrapper) registerTools() {
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "update_memory",
-		Description: "Updates the current contents of an existing scoped memory record and saves the previous version to revision history.",
+		Description: "Updates the contents of an existing scoped memory and saves the previous version to revision history. Target it either by node_id (e.g. a node id from a search result) or by its immutable coordinates (scope_type + knowledge_type + memory_key).",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args UpdateMemoryArgs) (*mcpsdk.CallToolResult, memory.StoreOutput, error) {
-		scopeID, err := m.resolveScopeID(args.ScopeType, args.ScopeID)
-		if err != nil {
-			return nil, memory.StoreOutput{}, err
+		input := memory.UpdateInput{
+			Title:    args.Title,
+			Content:  args.Content,
+			Source:   args.Source,
+			WriterID: args.WriterID,
+			Tags:     args.Tags,
 		}
-		output, err := memory.Update(ctx, m.store, m.config, memory.UpdateInput{
-			ScopeType:     args.ScopeType,
-			ScopeID:       scopeID,
-			KnowledgeType: args.KnowledgeType,
-			Title:         args.Title,
-			Content:       args.Content,
-			Source:        args.Source,
-			WriterID:      args.WriterID,
-			Tags:          args.Tags,
-			MemoryKey:     args.MemoryKey,
-		})
+		if nodeID := strings.TrimSpace(args.NodeID); nodeID != "" {
+			// Update a particular memory directly: resolve its immutable
+			// coordinates from the stored record so the caller doesn't have to
+			// restate them, and default authorship to the record's current values.
+			record, err := m.store.GetMemoryRecord(ctx, nodeID)
+			if err != nil {
+				return nil, memory.StoreOutput{}, fmt.Errorf("load memory %s: %w", nodeID, err)
+			}
+			input.ScopeType = record.ScopeType
+			input.ScopeID = record.ScopeID
+			input.KnowledgeType = record.KnowledgeType
+			input.MemoryKey = record.MemoryKey
+			if strings.TrimSpace(input.Source) == "" {
+				input.Source = record.Source
+			}
+			if strings.TrimSpace(input.WriterID) == "" {
+				input.WriterID = record.WriterID
+			}
+		} else {
+			scopeID, err := m.resolveScopeID(args.ScopeType, args.ScopeID)
+			if err != nil {
+				return nil, memory.StoreOutput{}, err
+			}
+			input.ScopeType = args.ScopeType
+			input.ScopeID = scopeID
+			input.KnowledgeType = args.KnowledgeType
+			input.MemoryKey = args.MemoryKey
+		}
+		output, err := memory.Update(ctx, m.store, m.config, input)
 		if err != nil {
 			return nil, memory.StoreOutput{}, err
 		}
