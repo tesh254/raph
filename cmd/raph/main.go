@@ -769,34 +769,47 @@ func newMemCmd() *cobra.Command {
 			}
 			defer store.Close()
 
-			// Pull every memory record regardless of scope or lifecycle; empty
-			// LifecycleStates means "all states".
-			records, err := store.SearchMemoryRecords(cmd.Context(), db.MemorySearchFilter{Limit: 100000})
-			if err != nil {
-				return err
-			}
 			out := cmd.OutOrStdout()
-			var embedded, skipped, failed int
-			for _, rec := range records {
-				if rec.Node.EmbeddingLength > 0 {
-					skipped++
-					continue
+			// Paginate over every memory record regardless of scope or lifecycle
+			// (empty LifecycleStates means "all states") so the backfill isn't
+			// silently capped on large stores. Reembedding only changes
+			// embedding_json, not the row set or its order, so offset paging is
+			// stable across the loop.
+			const batch = 500
+			var embedded, skipped, failed, total int
+			for offset := 0; ; offset += batch {
+				records, err := store.SearchMemoryRecords(cmd.Context(), db.MemorySearchFilter{Limit: batch, Offset: offset})
+				if err != nil {
+					return err
 				}
-				vec, err := config.GenerateEmbedding(cmd.Context(), cfg, rec.Node.Name+"\n\n"+rec.Node.Content)
-				if err != nil || len(vec) == 0 {
-					failed++
-					fmt.Fprintf(out, "  failed to embed %s: %v\n", rec.Node.ID, err)
-					continue
+				if len(records) == 0 {
+					break
 				}
-				if err := store.UpdateNodeEmbedding(cmd.Context(), rec.Node.ID, vec); err != nil {
-					failed++
-					fmt.Fprintf(out, "  failed to save embedding for %s: %v\n", rec.Node.ID, err)
-					continue
+				total += len(records)
+				for _, rec := range records {
+					if rec.Node.EmbeddingLength > 0 {
+						skipped++
+						continue
+					}
+					vec, err := config.GenerateEmbedding(cmd.Context(), cfg, rec.Node.Name+"\n\n"+rec.Node.Content)
+					if err != nil || len(vec) == 0 {
+						failed++
+						fmt.Fprintf(out, "  failed to embed %s: %v\n", rec.Node.ID, err)
+						continue
+					}
+					if err := store.UpdateNodeEmbedding(cmd.Context(), rec.Node.ID, vec); err != nil {
+						failed++
+						fmt.Fprintf(out, "  failed to save embedding for %s: %v\n", rec.Node.ID, err)
+						continue
+					}
+					embedded++
 				}
-				embedded++
+				if len(records) < batch {
+					break
+				}
 			}
 			fmt.Fprintf(out, "Reembed complete: %d embedded, %d already had embeddings, %d failed (of %d memories)\n",
-				embedded, skipped, failed, len(records))
+				embedded, skipped, failed, total)
 			return nil
 		},
 	}

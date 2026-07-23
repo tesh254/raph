@@ -528,3 +528,35 @@ func TestUpdateNodeEmbeddingBackfills(t *testing.T) {
 		t.Fatalf("expected m1 to be vector-searchable after backfill, got %+v", got)
 	}
 }
+
+func TestSearchMemoryRecordsPaginatesWithOffset(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	// updated_at DESC, id ASC ordering — stamp distinct times for a stable order.
+	timestamps := []string{"2026-01-03T00:00:00Z", "2026-01-02T00:00:00Z", "2026-01-01T00:00:00Z"} // m1 newest
+	for i, id := range []string{"m1", "m2", "m3"} {
+		if err := store.SaveNode(ctx, Node{ID: id, Workspace: "ws", Domain: "memory", Type: "memory", Name: id, Content: id}); err != nil {
+			t.Fatal(err)
+		}
+		ts := timestamps[i]
+		if err := store.UpsertMemoryRecord(ctx, MemoryRecord{
+			Node: Node{ID: id}, ScopeType: "project", ScopeID: "p", LifecycleState: "active",
+			KnowledgeType: "decision", Source: "u", WriterID: "w", MemoryKey: id,
+			CreatedAt: ts, UpdatedAt: ts, Revision: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page1, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{Limit: 2, Offset: 0})
+	if err != nil || len(page1) != 2 {
+		t.Fatalf("page1 = %d records, %v", len(page1), err)
+	}
+	page2, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{Limit: 2, Offset: 2})
+	if err != nil || len(page2) != 1 {
+		t.Fatalf("page2 = %d records, %v", len(page2), err)
+	}
+	// No overlap between pages.
+	if page2[0].Node.ID == page1[0].Node.ID || page2[0].Node.ID == page1[1].Node.ID {
+		t.Fatalf("offset page overlaps first page: %q", page2[0].Node.ID)
+	}
+}

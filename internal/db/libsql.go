@@ -86,6 +86,7 @@ type MemorySearchFilter struct {
 	KnowledgeType   string
 	LifecycleStates []string
 	Limit           int
+	Offset          int // for keyset-free pagination of SearchMemoryRecords
 }
 
 type WebCorpus struct {
@@ -1528,6 +1529,10 @@ func (s *LibSQLStore) SearchMemoryRecords(ctx context.Context, filter MemorySear
 	}
 	query += ` ORDER BY mr.updated_at DESC, n.id ASC LIMIT ?`
 	args = append(args, limit)
+	if filter.Offset > 0 {
+		query += ` OFFSET ?`
+		args = append(args, filter.Offset)
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {

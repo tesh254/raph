@@ -199,12 +199,18 @@ func Search(ctx context.Context, store db.GraphStore, cfg *config.Config, input 
 	}
 
 	// Prefer semantic search over the stored embeddings so agents find memories
-	// by meaning, not just literal keywords. Fall back to keyword matching when
-	// there's no embedding provider, the query can't be embedded, or nothing
-	// ranks above zero similarity.
+	// by meaning, not just literal keywords. This embeds the query via the
+	// configured provider — a network call — so it's bounded by a short timeout
+	// and always falls back to a local keyword search when there's no provider,
+	// the query can't be embedded (offline/unavailable/timeout), or nothing
+	// ranks above zero similarity. A read never hangs on the provider, and
+	// stays fully functional offline.
 	query := strings.TrimSpace(input.Query)
 	if query != "" && cfg != nil && cfg.HasEmbeddingProvider() {
-		if vec, err := config.GenerateEmbedding(ctx, cfg, query); err == nil && len(vec) > 0 {
+		embedCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		vec, err := config.GenerateEmbedding(embedCtx, cfg, query)
+		cancel()
+		if err == nil && len(vec) > 0 {
 			matches, err := store.VectorSearchMemoryRecords(ctx, vec, filter)
 			if err != nil {
 				return SearchOutput{}, err
