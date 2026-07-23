@@ -1,0 +1,23 @@
+internal/db/libsql.go
+  s_0cfe2ac3aa9d37::t_0a4d6dda58706d 1739-1774
+internal/studio/server_test.go
+  s_0cfe2ac3aa9d37::t_2b28b77f27df6d 363-470
+internal/studio/server.go
+  s_0cfe2ac3aa9d37::t_1df2c1d437fc7a 783-789
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "2d2a0f39c7e08962601633e5916813de376da027",
+  "prompts": {},
+  "sessions": {
+    "s_0cfe2ac3aa9d37": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_06f181625ffeG4J4lPVEbnX17a",
+        "model": "glm-5.2"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
