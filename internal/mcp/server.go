@@ -308,9 +308,15 @@ func NewMCPServerWrapper(store db.GraphStore, cfg *config.Config) *MCPServerWrap
 
 // LearnRaphOutput is the structured orientation returned by learn_raph.
 type LearnRaphOutput struct {
-	Overview string           `json:"overview"`
-	Workflow []string         `json:"workflow"`
-	Groups   []learnRaphGroup `json:"groups"`
+	Overview string             `json:"overview"`
+	Workflow []string           `json:"workflow"`
+	Groups   []learnRaphGroup   `json:"groups"`
+	Examples []learnRaphExample `json:"examples"`
+}
+
+type learnRaphExample struct {
+	Goal string `json:"goal"`
+	Call string `json:"call"`
 }
 
 type learnRaphGroup struct {
@@ -372,6 +378,28 @@ var learnRaphGroups = []learnRaphGroup{
 	}},
 }
 
+// learnRaphExamples show concrete tool calls so agents copy the right shape —
+// especially: search memory (semantic) then update in place rather than
+// re-storing.
+var learnRaphExamples = []learnRaphExample{
+	{
+		Goal: "Recall project knowledge (semantic — searches by meaning, with keyword fallback)",
+		Call: `search_project_knowledge {"query": "how do we deploy"}`,
+	},
+	{
+		Goal: "Update an existing memory in place using the node_id from a search result",
+		Call: `update_memory {"node_id": "memory:...", "title": "Deploy process", "content": "..."}`,
+	},
+	{
+		Goal: "Store a genuinely new fact (only when nothing existing fits)",
+		Call: `store_memory {"scope_type": "project", "knowledge_type": "decision", "title": "...", "content": "..."}`,
+	},
+	{
+		Goal: "Find a handoff without its id",
+		Call: `read_document {"query": "payment migration", "doc_type": "handoff"}`,
+	},
+}
+
 // renderLearnRaph turns the orientation into a readable markdown guide.
 func renderLearnRaph(out LearnRaphOutput) string {
 	var b strings.Builder
@@ -394,6 +422,16 @@ func renderLearnRaph(out LearnRaphOutput) string {
 			b.WriteString("\n")
 		}
 	}
+	if len(out.Examples) > 0 {
+		b.WriteString("\nExamples:\n")
+		for _, ex := range out.Examples {
+			b.WriteString("- ")
+			b.WriteString(ex.Goal)
+			b.WriteString(":\n    ")
+			b.WriteString(ex.Call)
+			b.WriteString("\n")
+		}
+	}
 	return b.String()
 }
 
@@ -406,6 +444,7 @@ func (m *MCPServerWrapper) registerTools() {
 			Overview: "raph is a shared knowledge graph over code, docs, and durable agent memory.",
 			Workflow: learnRaphWorkflow,
 			Groups:   learnRaphGroups,
+			Examples: learnRaphExamples,
 		}
 		return textResult(renderLearnRaph(out)), out, nil
 	})
@@ -1103,7 +1142,7 @@ func (m *MCPServerWrapper) resolveScopeID(scopeType string, provided string) (st
 }
 
 func (m *MCPServerWrapper) searchKnowledge(ctx context.Context, scopeType string, scopeID string, knowledgeType string, query string, limit int) (ScopedMemorySearchOutput, error) {
-	output, err := memory.Search(ctx, m.store, memory.SearchInput{
+	output, err := memory.Search(ctx, m.store, m.config, memory.SearchInput{
 		Query:         query,
 		ScopeType:     scopeType,
 		ScopeID:       scopeID,

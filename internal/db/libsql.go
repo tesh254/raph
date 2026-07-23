@@ -131,6 +131,7 @@ type GraphStore interface {
 	InsertMemoryRevision(ctx context.Context, revision MemoryRevision) error
 	ListMemoryRevisions(ctx context.Context, nodeID string) ([]MemoryRevision, error)
 	SearchMemoryRecords(ctx context.Context, filter MemorySearchFilter) ([]MemoryRecord, error)
+	VectorSearchMemoryRecords(ctx context.Context, embedding []float32, filter MemorySearchFilter) ([]MemoryRecord, error)
 	SetMemoryLifecycle(ctx context.Context, nodeID string, lifecycleState string, replacedByNodeID string, deprecatedMessage string) error
 	SaveWebCorpus(ctx context.Context, corpus WebCorpus) error
 	SaveWebCrawlVersion(ctx context.Context, version WebCrawlVersion) error
@@ -1555,6 +1556,126 @@ func (s *LibSQLStore) SearchMemoryRecords(ctx context.Context, filter MemorySear
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+// VectorSearchMemoryRecords ranks memory records by cosine similarity of their
+// stored embedding to the query vector, within the given scope/type/lifecycle
+// filter. It is the semantic counterpart of SearchMemoryRecords; callers fall
+// back to the keyword variant when no embedding provider is configured or when
+// this returns nothing. The memory store is small, so in-memory ranking is fine.
+func (s *LibSQLStore) VectorSearchMemoryRecords(ctx context.Context, embedding []float32, filter MemorySearchFilter) ([]MemoryRecord, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if len(embedding) == 0 {
+		return nil, nil
+	}
+
+	query := `SELECT
+		n.id, n.workspace, n.domain, n.type, n.name, n.content, COALESCE(n.url, ''), COALESCE(n.path, ''), COALESCE(n.embedding_json, '[]'),
+		mr.memory_key, mr.scope_type, mr.scope_id, mr.lifecycle_state, mr.knowledge_type, mr.source, mr.writer_id,
+		mr.created_at, mr.updated_at, mr.normalized_tags_json, mr.display_tags_json, mr.revision,
+		COALESCE(mr.replaced_by_node_id, ''), COALESCE(mr.deprecated_message, '')
+		FROM memory_records mr
+		JOIN nodes n ON n.id = mr.node_id`
+
+	// Same scope/type/lifecycle filtering as SearchMemoryRecords, minus the text
+	// query, and only rows that actually carry an embedding.
+	where := []string{`n.embedding_json IS NOT NULL AND n.embedding_json <> '' AND n.embedding_json <> '[]'`}
+	var args []any
+	if q := strings.TrimSpace(filter.ScopeType); q != "" {
+		where = append(where, `mr.scope_type = ?`)
+		args = append(args, q)
+	}
+	if q := strings.TrimSpace(filter.ScopeID); q != "" {
+		where = append(where, `mr.scope_id = ?`)
+		args = append(args, q)
+	}
+	if q := strings.TrimSpace(filter.KnowledgeType); q != "" {
+		where = append(where, `mr.knowledge_type = ?`)
+		args = append(args, q)
+	}
+	if len(filter.LifecycleStates) > 0 {
+		placeholders := make([]string, 0, len(filter.LifecycleStates))
+		for _, state := range filter.LifecycleStates {
+			if state = strings.TrimSpace(state); state != "" {
+				placeholders = append(placeholders, "?")
+				args = append(args, state)
+			}
+		}
+		if len(placeholders) > 0 {
+			where = append(where, `mr.lifecycle_state IN (`+strings.Join(placeholders, ", ")+`)`)
+		}
+	}
+	query += ` WHERE ` + strings.Join(where, ` AND `)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type scored struct {
+		record MemoryRecord
+		score  float64
+	}
+	var ranked []scored
+	for rows.Next() {
+		var record MemoryRecord
+		var normalizedTagsJSON, displayTagsJSON, embeddingJSON string
+		if err := rows.Scan(
+			&record.Node.ID, &record.Node.Workspace, &record.Node.Domain, &record.Node.Type, &record.Node.Name, &record.Node.Content,
+			&record.Node.URL, &record.Node.Path, &embeddingJSON,
+			&record.MemoryKey, &record.ScopeType, &record.ScopeID, &record.LifecycleState, &record.KnowledgeType, &record.Source, &record.WriterID,
+			&record.CreatedAt, &record.UpdatedAt, &normalizedTagsJSON, &displayTagsJSON, &record.Revision,
+			&record.ReplacedByNodeID, &record.DeprecatedMessage,
+		); err != nil {
+			return nil, err
+		}
+		var vec []float32
+		if err := json.Unmarshal([]byte(embeddingJSON), &vec); err != nil || len(vec) == 0 {
+			continue
+		}
+		score := cosineSimilarity(embedding, vec)
+		if math.IsNaN(score) || score <= 0 {
+			continue
+		}
+		record.Node.EmbeddingLength = len(vec)
+		record.NormalizedTags = jsonStringSlice(normalizedTagsJSON)
+		record.DisplayTags = jsonStringSlice(displayTagsJSON)
+		ranked = append(ranked, scored{record: record, score: score})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].score == ranked[j].score {
+			return ranked[i].record.Node.ID < ranked[j].record.Node.ID
+		}
+		return ranked[i].score > ranked[j].score
+	})
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	out := make([]MemoryRecord, 0, len(ranked))
+	for _, r := range ranked {
+		out = append(out, r.record)
+	}
+	return out, nil
+}
+
+// UpdateNodeEmbedding overwrites just a node's embedding vector, leaving all
+// other columns (and updated_at) untouched — used to backfill embeddings for
+// memories stored before an embedding provider was configured.
+func (s *LibSQLStore) UpdateNodeEmbedding(ctx context.Context, nodeID string, embedding []float32) error {
+	data, err := json.Marshal(embedding)
+	if err != nil {
+		return fmt.Errorf("marshal embedding: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE nodes SET embedding_json = ? WHERE id = ?`, string(data), nodeID)
+	return err
 }
 
 func (s *LibSQLStore) SetMemoryLifecycle(ctx context.Context, nodeID string, lifecycleState string, replacedByNodeID string, deprecatedMessage string) error {

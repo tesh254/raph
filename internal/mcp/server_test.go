@@ -159,6 +159,9 @@ func (s *protocolStore) SearchMemoryRecords(_ context.Context, filter db.MemoryS
 	}
 	return out, nil
 }
+func (*protocolStore) VectorSearchMemoryRecords(context.Context, []float32, db.MemorySearchFilter) ([]db.MemoryRecord, error) {
+	return nil, nil
+}
 func (*protocolStore) SetMemoryLifecycle(context.Context, string, string, string, string) error {
 	return nil
 }

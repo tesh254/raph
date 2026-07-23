@@ -704,7 +704,7 @@ func newMemCmd() *cobra.Command {
 			if q == "" && len(args) > 0 {
 				q = strings.Join(args, " ")
 			}
-			res, err := memory.Search(cmd.Context(), store, memory.SearchInput{
+			res, err := memory.Search(cmd.Context(), store, cfg, memory.SearchInput{
 				Query: q, ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: sType, Limit: sLimit,
 			})
 			if err != nil {
@@ -748,7 +748,60 @@ func newMemCmd() *cobra.Command {
 	rmCmd.Flags().StringVar(&rmReason, "reason", "", "Why this memory is being deprecated")
 	rmCmd.Flags().StringVar(&rmReplacement, "replacement", "", "Node id that replaces this memory")
 
-	memCmd.AddCommand(setCmd, searchCmd, rmCmd)
+	reembedCmd := &cobra.Command{
+		Use:   "reembed",
+		Short: "Backfill vector embeddings for memories saved without them",
+		Long: "Generates embeddings for existing memory records that don't have one yet — " +
+			"typically memories stored before an embedding provider was configured. Without " +
+			"embeddings, memory search falls back to keyword matching instead of semantic search.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			if cfg == nil || !cfg.HasEmbeddingProvider() {
+				return fmt.Errorf("no embedding provider configured — set one up (e.g. `raph config`) before reembedding; without it memory search stays keyword-only")
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			// Pull every memory record regardless of scope or lifecycle; empty
+			// LifecycleStates means "all states".
+			records, err := store.SearchMemoryRecords(cmd.Context(), db.MemorySearchFilter{Limit: 100000})
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			var embedded, skipped, failed int
+			for _, rec := range records {
+				if rec.Node.EmbeddingLength > 0 {
+					skipped++
+					continue
+				}
+				vec, err := config.GenerateEmbedding(cmd.Context(), cfg, rec.Node.Name+"\n\n"+rec.Node.Content)
+				if err != nil || len(vec) == 0 {
+					failed++
+					fmt.Fprintf(out, "  failed to embed %s: %v\n", rec.Node.ID, err)
+					continue
+				}
+				if err := store.UpdateNodeEmbedding(cmd.Context(), rec.Node.ID, vec); err != nil {
+					failed++
+					fmt.Fprintf(out, "  failed to save embedding for %s: %v\n", rec.Node.ID, err)
+					continue
+				}
+				embedded++
+			}
+			fmt.Fprintf(out, "Reembed complete: %d embedded, %d already had embeddings, %d failed (of %d memories)\n",
+				embedded, skipped, failed, len(records))
+			return nil
+		},
+	}
+
+	memCmd.AddCommand(setCmd, searchCmd, rmCmd, reembedCmd)
 	return memCmd
 }
 
@@ -839,7 +892,7 @@ func newRulesCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				res, err := memory.Search(cmd.Context(), store, memory.SearchInput{
+				res, err := memory.Search(cmd.Context(), store, cfg, memory.SearchInput{
 					Query: lQuery, ScopeType: scopeType, ScopeID: resolvedID, KnowledgeType: "rule", Limit: remaining,
 				})
 				if err != nil {

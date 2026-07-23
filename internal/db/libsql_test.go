@@ -461,3 +461,70 @@ func TestSchemaVersionBumpedWhenMigrationsChange(t *testing.T) {
 			"Bump schemaVersion in libsql.go, then pin the new version's hash here: %q", schemaVersion, got)
 	}
 }
+
+func TestVectorSearchMemoryRecordsRanksAndScopes(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	seed := func(id string, scopeID string, embedding []float32) {
+		if err := store.SaveNode(ctx, Node{
+			ID: id, Workspace: "ws", Domain: "memory", Type: "memory",
+			Name: id, Content: "content " + id, Embedding: embedding,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertMemoryRecord(ctx, MemoryRecord{
+			Node: Node{ID: id}, ScopeType: "project", ScopeID: scopeID, LifecycleState: "active",
+			KnowledgeType: "decision", Source: "user", WriterID: "w", MemoryKey: id,
+			CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z", Revision: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("m-near", "proj", []float32{1, 0})
+	seed("m-far", "proj", []float32{0.6, 0.8}) // similar, but less than m-near
+	seed("m-other", "otherproj", []float32{1, 0}) // right vector, wrong scope
+
+	got, err := store.VectorSearchMemoryRecords(ctx, []float32{1, 0}, MemorySearchFilter{
+		ScopeType: "project", ScopeID: "proj", LifecycleStates: []string{"active"}, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 in-scope records, got %d (%+v)", len(got), got)
+	}
+	if got[0].Node.ID != "m-near" {
+		t.Fatalf("expected m-near ranked first, got %q", got[0].Node.ID)
+	}
+	for _, r := range got {
+		if r.Node.ID == "m-other" {
+			t.Fatal("scope filter leaked a record from another scope")
+		}
+	}
+}
+
+func TestUpdateNodeEmbeddingBackfills(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	if err := store.SaveNode(ctx, Node{
+		ID: "m1", Workspace: "ws", Domain: "memory", Type: "memory", Name: "m1", Content: "body",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// No embedding yet → not vector-searchable.
+	if got, _ := store.VectorSearch(ctx, []float32{1, 0}, 5); len(got) != 0 {
+		t.Fatalf("expected no vector matches before backfill, got %d", len(got))
+	}
+	if err := store.UpdateNodeEmbedding(ctx, "m1", []float32{1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.VectorSearch(ctx, []float32{1, 0}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "m1" {
+		t.Fatalf("expected m1 to be vector-searchable after backfill, got %+v", got)
+	}
+}
