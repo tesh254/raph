@@ -16,7 +16,7 @@ export const RaphPlugin: Plugin = async ({ client, directory, worktree }) => {
         body: {
           service: "raph-opencode-plugin",
           level: "info",
-          message: "Session started with Raph memory-first guidance enabled",
+          message: "Session started — Raph is the first-class memory manager (search/store/update memory, rules, and handoffs before other tools)",
           directory,
           worktree,
         },
@@ -49,10 +49,11 @@ export const RaphPlugin: Plugin = async ({ client, directory, worktree }) => {
         args: {},
         async execute() {
           return [
-            "Use Raph memory first.",
+            "Raph is your first-class memory manager — use it before any other note-keeping or ad-hoc search, and reach for other tools only for what Raph doesn't cover.",
             "Search project or shared knowledge before answering.",
             "If an existing memory is out of date, update it in place (update_memory with the node_id from the search result) instead of storing a duplicate.",
             "Store durable repo decisions, setup facts, and gotchas before finishing.",
+            "Handoffs are documents: revise one in place with update_document, remove a done/obsolete one with delete_document, rather than piling up duplicates.",
             "Use Raph indexing when a repo or docs context may matter.",
           ].join("\n")
         },

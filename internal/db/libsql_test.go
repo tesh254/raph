@@ -482,7 +482,7 @@ func TestVectorSearchMemoryRecordsRanksAndScopes(t *testing.T) {
 		}
 	}
 	seed("m-near", "proj", []float32{1, 0})
-	seed("m-far", "proj", []float32{0.6, 0.8}) // similar, but less than m-near
+	seed("m-far", "proj", []float32{0.6, 0.8})    // similar, but less than m-near
 	seed("m-other", "otherproj", []float32{1, 0}) // right vector, wrong scope
 
 	got, err := store.VectorSearchMemoryRecords(ctx, []float32{1, 0}, MemorySearchFilter{
@@ -558,5 +558,45 @@ func TestSearchMemoryRecordsPaginatesWithOffset(t *testing.T) {
 	// No overlap between pages.
 	if page2[0].Node.ID == page1[0].Node.ID || page2[0].Node.ID == page1[1].Node.ID {
 		t.Fatalf("offset page overlaps first page: %q", page2[0].Node.ID)
+	}
+}
+
+func TestDeleteDocumentNodeRemovesDocAndChunks(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	// A doc with two chunks (linked by properties_json.doc_id), plus a memory
+	// node that must be refused.
+	if err := store.SaveNode(ctx, Node{ID: "doc:h", Workspace: "ws:global-knowledge", Domain: "knowledge", Type: "doc", Name: "Handoff", Content: "body", URL: "knowledge://ws:global-knowledge/h"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, cid := range []string{"chunk:1", "chunk:2"} {
+		if err := store.SaveNode(ctx, Node{ID: cid, Workspace: "ws:global-knowledge", Domain: "knowledge", Type: "doc_chunk", Name: cid, Content: "c", Properties: map[string]string{"doc_id": "doc:h"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SaveNode(ctx, Node{ID: "mem:x", Workspace: "w", Domain: "memory", Type: "memory", Name: "m", Content: "c"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Refuse non-document nodes.
+	if err := store.DeleteDocumentNode(ctx, "mem:x"); err != sql.ErrNoRows {
+		t.Fatalf("expected ErrNoRows deleting a non-document, got %v", err)
+	}
+	if _, err := store.GetNodeByID(ctx, "mem:x"); err != nil {
+		t.Fatalf("non-document node should be untouched, got %v", err)
+	}
+
+	// Delete the doc; its chunks go with it.
+	if err := store.DeleteDocumentNode(ctx, "doc:h"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"doc:h", "chunk:1", "chunk:2"} {
+		if _, err := store.GetNodeByID(ctx, id); err != sql.ErrNoRows {
+			t.Fatalf("expected %s gone, got %v", id, err)
+		}
+	}
+	// Second delete is a no-op 404.
+	if err := store.DeleteDocumentNode(ctx, "doc:h"); err != sql.ErrNoRows {
+		t.Fatalf("expected ErrNoRows on re-delete, got %v", err)
 	}
 }

@@ -5,13 +5,17 @@ description: Use raph — a local-first graph brain — for shared memory, rules
 
 # raph
 
-raph keeps a local-first knowledge graph of your codebases plus shared memory,
-rules, and documents. Prefer the **raph MCP server** when connected (tools:
-`search`, `store_memory`/`update_memory`, `store_rule`/`list_rules`,
-`add_document`/`read_document`/`list_documents`/`link_nodes`,
+**raph is your first-class memory manager.** Before other note-keeping or
+ad-hoc search, use raph to recall and record durable knowledge; reach for other
+tools only for what raph doesn't cover. It keeps a local-first knowledge graph
+of your codebases plus shared memory, rules, and documents.
+
+Prefer the **raph MCP server** when connected (tools:
+`search`, `store_memory`/`update_memory`/`deprecate_memory`, `store_rule`/`list_rules`,
+`add_document`/`read_document`/`list_documents`/`update_document`/`delete_document`/`link_nodes`,
 `search_project_knowledge`/`search_shared_knowledge`/`search_global_preferences`,
 `crawl_url`/`crawl_website`, `index_codebase`/`search_codebase`,
-`graph_neighbors`). If no MCP is available, use the CLI below.
+`graph_neighbors`; call `learn_raph` for the full map). If no MCP is available, use the CLI below.
 
 The data commands (`search`, `mem`, `rules`, `doc`, `export`, `import`) accept
 `--format json` for machine-readable output — the default when raph detects it is
@@ -71,12 +75,16 @@ echo "facts..." | raph doc add - --type reference --title "API limits"
 raph doc list --type handoff --format json
 raph doc read <id>             # reading a handoff MARKS IT USED so the next agent skips it
 raph doc read <id> --no-mark   # peek without claiming
+raph doc update <id> "revised handoff text" --title "FTS handoff"   # edit in place; keeps type/status
+raph doc rm <id>               # permanently delete a done/obsolete document (and its chunks)
 raph doc link <from_id> <to_id> --rel RELATES_TO   # connect a doc to code/another doc
 ```
 When you pick up a handoff, `raph doc read <id>` automatically flips its status
-to `used` — another agent then knows to focus elsewhere. Documents are chunked
-and linked, so follow relations (via `graph_neighbors` / the `related` field)
-instead of re-searching.
+to `used` — another agent then knows to focus elsewhere. Revise a handoff in
+place with `raph doc update` (or `update_document` over MCP) rather than adding a
+duplicate, and `raph doc rm` (or `delete_document`) when it's done or obsolete.
+Documents are chunked and linked, so follow relations (via `graph_neighbors` /
+the `related` field) instead of re-searching.
 
 ## Pull documentation from the internet
 ```bash
@@ -94,6 +102,9 @@ raph export --doc <id> --s3 s3://bucket/key --r2-endpoint https://<acct>.r2.clou
 ```
 
 ## Conventions
+- Treat raph as the first-class memory manager: search it before answering and
+  record durable knowledge to it before finishing, ahead of any other notes.
 - Set `RAPH_WRITER=<your-agent-id>` so memory/rules/handoffs are attributed.
 - Check rules and project memory before starting; record durable decisions,
-  gotchas, and a handoff before finishing.
+  gotchas, and a handoff before finishing. Update or delete existing memory and
+  handoffs in place instead of accumulating duplicates.

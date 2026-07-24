@@ -267,6 +267,14 @@ func (l *LazyStore) DeleteNodeByID(ctx context.Context, id string) error {
 	return store.DeleteNodeByID(ctx, id)
 }
 
+func (l *LazyStore) DeleteDocumentNode(ctx context.Context, nodeID string) error {
+	store, err := l.ensure()
+	if err != nil {
+		return err
+	}
+	return store.DeleteDocumentNode(ctx, nodeID)
+}
+
 func (l *LazyStore) DeleteFileNodes(ctx context.Context, workspace string, relativePath string) error {
 	store, err := l.ensure()
 	if err != nil {
