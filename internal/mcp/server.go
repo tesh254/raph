@@ -152,6 +152,22 @@ type ReadDocumentOutput struct {
 	Resolved   string              `json:"resolved,omitempty"` // "id" or "query"
 }
 
+type UpdateDocumentArgs struct {
+	ID      string   `json:"id" jsonschema:"The document node id (e.g. a handoff id from list_documents or read_document)"`
+	Title   string   `json:"title" jsonschema:"Updated title"`
+	Content string   `json:"content" jsonschema:"Updated full document text"`
+	Tags    []string `json:"tags,omitempty" jsonschema:"Replacement tags; omit to keep the current tags"`
+}
+
+type DeleteDocumentArgs struct {
+	ID string `json:"id" jsonschema:"The document node id to permanently delete (e.g. a handoff). Removes the document and its chunks."`
+}
+
+type DeleteDocumentOutput struct {
+	ID      string `json:"id"`
+	Deleted bool   `json:"deleted"`
+}
+
 type LinkNodesArgs struct {
 	From string `json:"from" jsonschema:"Source node id"`
 	To   string `json:"to" jsonschema:"Target node id"`
@@ -279,14 +295,19 @@ type CrossCorpusNeighborOutput struct {
 // mcpInstructions is the server-level guidance clients receive on initialize.
 // It teaches the memory-first loop and, crucially, that existing memories
 // should be updated in place rather than re-stored as duplicates.
-const mcpInstructions = `raph is a shared knowledge graph for code, docs, and durable agent memory.
+const mcpInstructions = `raph is your first-class memory manager — a shared knowledge graph for durable agent memory, rules, docs/handoffs, and code search. Reach for raph before any other note-keeping or ad-hoc search; use other tools only for what raph doesn't cover.
 
 Memory-first workflow:
 - Before answering, search existing knowledge (search_project_knowledge, search_shared_knowledge, search_global_preferences).
 - Reuse what you find. If a memory is out of date, UPDATE it instead of storing a duplicate: call update_memory with the node_id from the search result (its immutable scope/type/key are resolved for you). Use store_memory only for genuinely new facts.
 - Record durable decisions, setup facts, and gotchas before finishing.
 - get_memory_history shows a memory's revisions; deprecate_memory retires one that no longer applies.
-- Handoffs are documents (add_document with doc_type=handoff); read_document accepts a query when you don't have the id.`
+
+Handoffs & documents:
+- Handoffs are documents (add_document with doc_type=handoff). read_document accepts a query when you don't have the id.
+- Revise a handoff/document in place with update_document (by id) rather than adding a duplicate; delete_document permanently removes one that's done or obsolete.
+
+Full tool map: call learn_raph.`
 
 func NewMCPServerWrapper(store db.GraphStore, cfg *config.Config) *MCPServerWrapper {
 	verbose.Printf("creating MCP server")
@@ -367,6 +388,8 @@ var learnRaphGroups = []learnRaphGroup{
 		{"add_document", "Attach a document: architecture, handoff, reference, or note."},
 		{"list_documents", "List documents, filter by doc_type or status."},
 		{"read_document", "Read by id, or resolve by query; reading a handoff claims it."},
+		{"update_document", "Revise a document/handoff in place by id (don't add a duplicate)."},
+		{"delete_document", "Permanently delete a document/handoff (and its chunks) by id."},
 		{"link_nodes", "Relate two nodes so they're one hop apart."},
 	}},
 	{Title: "Web", Tools: []learnRaphTool{
@@ -849,6 +872,40 @@ func (m *MCPServerWrapper) registerTools() {
 			resolved = "query"
 		}
 		out := ReadDocumentOutput{Document: &doc, Resolved: resolved}
+		return textResult(renderJSON(out)), out, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "update_document",
+		Description: "Updates a document's title/content/tags in place by id (handoff, architecture, reference, or note), preserving its scope, type, and lifecycle status. Re-chunks the content. Use this to revise a handoff rather than adding a duplicate.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args UpdateDocumentArgs) (*mcpsdk.CallToolResult, knowledge.Document, error) {
+		if strings.TrimSpace(args.ID) == "" {
+			return nil, knowledge.Document{}, fmt.Errorf("id is required")
+		}
+		if strings.TrimSpace(args.Content) == "" {
+			return nil, knowledge.Document{}, fmt.Errorf("content is required")
+		}
+		doc, err := knowledge.Update(ctx, m.store, m.config, knowledge.UpdateInput{
+			ID: args.ID, Title: args.Title, Content: args.Content, Tags: args.Tags,
+		})
+		if err != nil {
+			return nil, knowledge.Document{}, err
+		}
+		return textResult(renderJSON(doc)), doc, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "delete_document",
+		Description: "Permanently deletes a document by id (e.g. a handoff that is done or obsolete), along with its chunks. Only documents can be deleted through this tool.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args DeleteDocumentArgs) (*mcpsdk.CallToolResult, DeleteDocumentOutput, error) {
+		id := strings.TrimSpace(args.ID)
+		if id == "" {
+			return nil, DeleteDocumentOutput{}, fmt.Errorf("id is required")
+		}
+		if err := knowledge.Delete(ctx, m.store, id); err != nil {
+			return nil, DeleteDocumentOutput{}, err
+		}
+		out := DeleteDocumentOutput{ID: id, Deleted: true}
 		return textResult(renderJSON(out)), out, nil
 	})
 

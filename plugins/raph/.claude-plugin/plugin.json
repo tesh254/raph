@@ -1,6 +1,6 @@
 {
   "name": "raph",
-  "description": "Local-first graph-vector brain for coding agents: ripgrep-style code/doc search, scoped memory, rules, local documents and handoffs, and realtime codebase sync over MCP.",
+  "description": "First-class memory manager for coding agents: durable scoped memory, rules, local documents and handoffs (create/update/delete), plus ripgrep-style code/doc search and realtime codebase sync over MCP. Use raph before other note-keeping or ad-hoc search.",
   "version": "0.1.0",
   "author": {
     "name": "Erick Wachira"

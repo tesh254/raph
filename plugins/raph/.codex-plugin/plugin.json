@@ -7,13 +7,14 @@
   },
   "interface": {
     "displayName": "Raph",
-    "shortDescription": "Memory-first Codex context via Raph.",
-    "longDescription": "Connect Codex to Raph so shared memory, URL-based documentation, and codebase indexing are always available when the plugin is used.",
+    "shortDescription": "Raph is your first-class memory manager for Codex.",
+    "longDescription": "Connect Codex to Raph and use it as the first-class memory manager: search, store, and update durable memory, rules, docs, and handoffs before reaching for other tools. Shared memory, URL-based documentation, and codebase indexing are always available.",
     "developerName": "Erick Wachira",
     "category": "Productivity",
     "capabilities": [],
     "defaultPrompt": [
-      "Use Raph as shared memory before answering.",
+      "Use Raph as your first-class memory manager — search project/shared memory before answering, and reach for other tools only for what Raph doesn't cover.",
+      "Update an existing memory in place (update_memory) instead of storing a duplicate; revise or delete handoffs with update_document/delete_document.",
       "Crawl docs from URLs and retain useful facts.",
       "Index the current codebase whenever context may help."
     ]

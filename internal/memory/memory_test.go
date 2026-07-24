@@ -87,6 +87,7 @@ func (*captureStore) SetMemoryLifecycle(context.Context, string, string, string,
 func (*captureStore) SaveWebCorpus(context.Context, db.WebCorpus) error             { return nil }
 func (*captureStore) SaveWebCrawlVersion(context.Context, db.WebCrawlVersion) error { return nil }
 func (*captureStore) DeleteNodeByID(context.Context, string) error                  { return nil }
+func (*captureStore) DeleteDocumentNode(context.Context, string) error              { return nil }
 func (*captureStore) DeleteFileNodes(context.Context, string, string) error         { return nil }
 func (*captureStore) DeleteWorkspace(context.Context, string) error                 { return nil }
 func (*captureStore) ClearAll(context.Context) error                                { return nil }

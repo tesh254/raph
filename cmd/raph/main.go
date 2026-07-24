@@ -1130,7 +1130,66 @@ func newDocCmd() *cobra.Command {
 	}
 	linkCmd.Flags().StringVar(&rel, "rel", knowledge.RelRelatesTo, "Relation type")
 
-	docCmd.AddCommand(addCmd, listCmd, readCmd, linkCmd)
+	var updTitle string
+	var updTags []string
+	updateCmd := &cobra.Command{
+		Use:   "update <id> <content>",
+		Short: "Update a document in place (handoff, architecture, reference, note)",
+		Long:  "Rewrite a document's content/title/tags by id, preserving its scope, type, and status. Use `-` as content to read from stdin.",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			content, err := readContent(cmd, "", args[1:])
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(content) == "" {
+				return fmt.Errorf("content is required")
+			}
+			doc, err := knowledge.Update(cmd.Context(), store, cfg, knowledge.UpdateInput{
+				ID: args[0], Title: updTitle, Content: content, Tags: updTags,
+			})
+			if err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), doc, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Updated %s (%s, %d chunks)\n", doc.Node.ID, doc.Node.Prop("doc_type"), doc.ChunkCount)
+				return err
+			})
+		},
+	}
+	updateCmd.Flags().StringVar(&updTitle, "title", "", "New title (defaults to a preview of the content)")
+	updateCmd.Flags().StringSliceVar(&updTags, "tag", nil, "Replacement tags (repeatable); omit to keep current tags")
+
+	rmDocCmd := &cobra.Command{
+		Use:   "rm <id>",
+		Short: "Permanently delete a document and its chunks",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			if err := knowledge.Delete(cmd.Context(), store, args[0]); err != nil {
+				return err
+			}
+			return output.Print(cmd.OutOrStdout(), resolveFormat(), map[string]any{"id": args[0], "deleted": true}, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Deleted document %s\n", args[0])
+				return err
+			})
+		},
+	}
+
+	docCmd.AddCommand(addCmd, listCmd, readCmd, linkCmd, updateCmd, rmDocCmd)
 	return docCmd
 }
 

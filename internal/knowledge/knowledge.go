@@ -219,6 +219,63 @@ type ListFilter struct {
 	Limit     int
 }
 
+// UpdateInput edits an existing document in place, keyed by its node id.
+type UpdateInput struct {
+	ID      string
+	Title   string
+	Content string
+	Tags    []string // nil keeps the document's current tags
+}
+
+// Update rewrites a document's title/content/tags while preserving its
+// identity (workspace + key), doc_type, source, writer, and lifecycle metadata
+// (status/used_at/used_by/freshness). Returns sql.ErrNoRows when the id is
+// unknown.
+func Update(ctx context.Context, store db.GraphStore, cfg *config.Config, in UpdateInput) (Document, error) {
+	node, err := store.GetNodeByID(ctx, strings.TrimSpace(in.ID))
+	if err != nil {
+		return Document{}, err
+	}
+	// A doc's stable key lives in its URL: knowledge://<workspace>/<key>.
+	key := strings.TrimPrefix(node.URL, "knowledge://"+node.Workspace+"/")
+	if key == "" || key == node.URL {
+		return Document{}, fmt.Errorf("cannot resolve document key for %s", in.ID)
+	}
+	docType := node.Prop("doc_type")
+	if docType == "" {
+		docType = DocHandoff
+	}
+	tags := in.Tags
+	if len(tags) == 0 {
+		if existing := strings.TrimSpace(node.Prop("tags")); existing != "" {
+			tags = strings.Split(existing, ",")
+		}
+	}
+	// Carry over all existing properties so lifecycle metadata survives the
+	// edit; Add overrides the fields it manages.
+	props := make(map[string]string, len(node.Properties))
+	for k, v := range node.Properties {
+		props[k] = v
+	}
+	return Add(ctx, store, cfg, AddInput{
+		Workspace:  node.Workspace,
+		Key:        key,
+		Title:      in.Title,
+		Content:    in.Content,
+		DocType:    docType,
+		Source:     node.Prop("source"),
+		WriterID:   node.Prop("writer_id"),
+		Tags:       tags,
+		Properties: props,
+	})
+}
+
+// Delete removes a document and its chunk children atomically. Returns
+// sql.ErrNoRows when the id is not a document.
+func Delete(ctx context.Context, store db.GraphStore, id string) error {
+	return store.DeleteDocumentNode(ctx, strings.TrimSpace(id))
+}
+
 func List(ctx context.Context, store db.GraphStore, f ListFilter) ([]db.Node, error) {
 	props := map[string]string{}
 	if t := strings.TrimSpace(f.DocType); t != "" {
