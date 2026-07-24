@@ -1,0 +1,57 @@
+plugins/raph/.claude-plugin/plugin.json
+  s_a57d653f4a07a1::t_253a06adf3b50b 3
+internal/agentsetup/opencode_plugin.ts
+  s_a57d653f4a07a1::t_c3dd5bedb38af4 19
+  s_a57d653f4a07a1::t_039d1be6a02314 52,56
+internal/db/libsql.go
+  s_a57d653f4a07a1::t_da49708a8c599b 140
+  s_a57d653f4a07a1::t_b69c8d5ece6a0c 1776-1831
+internal/memory/memory_test.go
+  s_a57d653f4a07a1::t_b32966acaff73f 90
+internal/mcp/server.go
+  s_a57d653f4a07a1::t_7d09b8859cc818 298,305-310
+  s_a57d653f4a07a1::t_8cfd293b7ca8c4 879-912
+  s_a57d653f4a07a1::t_e7f0c57952bccc 155-170
+  s_a57d653f4a07a1::t_3e363386be273d 391-392
+internal/studio/server.go
+  s_a57d653f4a07a1::t_4f672c72313bf4 129
+  s_a57d653f4a07a1::t_e6189897f40af9 868-870,879-885,888-889,891-893,895-905,909-910
+plugins/raph/.codex-plugin/plugin.json
+  s_a57d653f4a07a1::t_c7936b093e6a50 10-11,16-17
+internal/crawler/crawler_test.go
+  s_a57d653f4a07a1::t_071d7511fdd6f4 75
+internal/indexer/indexer_test.go
+  s_a57d653f4a07a1::t_b0e4fdc3e06c35 74
+internal/knowledge/knowledge.go
+  s_a57d653f4a07a1::t_5ee0d09e6f3863 222-278
+plugins/raph/skills/raph/SKILL.md
+  s_a57d653f4a07a1::t_8c2ee87ad979e5 105-106,109-110
+  s_a57d653f4a07a1::t_797767c3b8467a 78-79,83-87
+  s_a57d653f4a07a1::t_10f6bd41803003 8-15,18
+cmd/raph/main.go
+  s_a57d653f4a07a1::t_959fbe63f42e46 1133-1149,1151-1192
+  s_a57d653f4a07a1::t_37e873cfc71b15 1150
+internal/mcp/server_test.go
+  s_a57d653f4a07a1::t_d75a1af7a28cc1 175-187
+  s_a57d653f4a07a1::t_ef4ec86674623f 537-616
+internal/db/lazy.go
+  s_a57d653f4a07a1::t_b42b835843a939 270-277
+internal/db/libsql_test.go
+  s_a57d653f4a07a1::t_365abbb26cc6d1 485,563-602
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "611e9c98c0bd0ad9e3f63ca43750180edc12b6c0",
+  "prompts": {},
+  "sessions": {
+    "s_a57d653f4a07a1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "428b4258-1ebc-4b78-b6d9-14553fd3a686",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
