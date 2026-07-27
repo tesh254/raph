@@ -72,6 +72,7 @@ func (*crawlStore) SetMemoryLifecycle(context.Context, string, string, string, s
 func (*crawlStore) SaveWebCorpus(context.Context, db.WebCorpus) error             { return nil }
 func (*crawlStore) SaveWebCrawlVersion(context.Context, db.WebCrawlVersion) error { return nil }
 func (*crawlStore) DeleteNodeByID(context.Context, string) error                  { return nil }
+func (*crawlStore) DeleteDocumentNode(context.Context, string) error              { return nil }
 func (*crawlStore) DeleteFileNodes(context.Context, string, string) error         { return nil }
 func (*crawlStore) DeleteWorkspace(context.Context, string) error                 { return nil }
 func (*crawlStore) ClearAll(context.Context) error                                { return nil }

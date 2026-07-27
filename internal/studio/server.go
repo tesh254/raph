@@ -126,6 +126,7 @@ func (s *StudioServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/handoffs", s.handleListHandoffs)
 	mux.HandleFunc("/api/document", s.handleGetDocument)
 	mux.HandleFunc("/api/document/update", s.handleUpdateDocument)
+	mux.HandleFunc("/api/document/delete", s.handleDeleteDocument)
 	mux.HandleFunc("/api/actions/clear", s.handleClearDB)
 	mux.HandleFunc("/api/actions/init", s.handleInitDemo)
 
@@ -864,7 +865,9 @@ func (s *StudioServer) handleUpdateDocument(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "content is required", http.StatusBadRequest)
 		return
 	}
-	node, err := s.store.GetNodeByID(r.Context(), req.ID)
+	doc, err := knowledge.Update(r.Context(), s.store, s.config, knowledge.UpdateInput{
+		ID: req.ID, Title: req.Title, Content: req.Content, Tags: req.Tags,
+	})
 	if err != nil {
 		if err == sql.ErrNoRows {
 			http.Error(w, "document not found", http.StatusNotFound)
@@ -873,46 +876,38 @@ func (s *StudioServer) handleUpdateDocument(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// A doc's stable key lives in its URL: knowledge://<workspace>/<key>. We need
-	// it so Add overwrites this document in place instead of creating a new one.
-	key := strings.TrimPrefix(node.URL, "knowledge://"+node.Workspace+"/")
-	if key == "" || key == node.URL {
-		http.Error(w, "cannot resolve document key", http.StatusUnprocessableEntity)
+	verbose.Printf("studio update document id=%s", req.ID)
+	writeJSON(w, http.StatusOK, doc)
+}
+
+func (s *StudioServer) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	docType := node.Prop("doc_type")
-	if docType == "" {
-		docType = knowledge.DocHandoff
+	var req struct {
+		ID string `json:"id"`
 	}
-	tags := req.Tags
-	if len(tags) == 0 {
-		if existing := strings.TrimSpace(node.Prop("tags")); existing != "" {
-			tags = strings.Split(existing, ",")
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.ID) == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	// Deletes only if the node is a document (atomic type check + delete of the
+	// doc and its chunks); a non-document id returns 404.
+	if err := knowledge.Delete(r.Context(), s.store, req.ID); err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "document not found", http.StatusNotFound)
+			return
 		}
-	}
-	// Carry over all existing properties so lifecycle metadata (status, used_at,
-	// used_by, freshness) survives the edit; Add overrides the fields it manages.
-	props := make(map[string]string, len(node.Properties))
-	for k, v := range node.Properties {
-		props[k] = v
-	}
-	doc, err := knowledge.Add(r.Context(), s.store, s.config, knowledge.AddInput{
-		Workspace:  node.Workspace,
-		Key:        key,
-		Title:      req.Title,
-		Content:    req.Content,
-		DocType:    docType,
-		Source:     node.Prop("source"),
-		WriterID:   node.Prop("writer_id"),
-		Tags:       tags,
-		Properties: props,
-	})
-	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	verbose.Printf("studio update document id=%s", req.ID)
-	writeJSON(w, http.StatusOK, doc)
+	verbose.Printf("studio delete document id=%s", req.ID)
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *StudioServer) handleStats(w http.ResponseWriter, r *http.Request) {

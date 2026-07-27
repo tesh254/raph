@@ -172,6 +172,19 @@ func (s *protocolStore) DeleteNodeByID(_ context.Context, id string) error {
 	delete(s.nodes, id)
 	return nil
 }
+func (s *protocolStore) DeleteDocumentNode(_ context.Context, nodeID string) error {
+	n, ok := s.nodes[nodeID]
+	if !ok || n.Type != "doc" {
+		return sql.ErrNoRows
+	}
+	for id, node := range s.nodes {
+		if node.Type == "doc_chunk" && node.Prop("doc_id") == nodeID {
+			delete(s.nodes, id)
+		}
+	}
+	delete(s.nodes, nodeID)
+	return nil
+}
 func (*protocolStore) DeleteFileNodes(context.Context, string, string) error { return nil }
 func (*protocolStore) DeleteWorkspace(context.Context, string) error         { return nil }
 func (*protocolStore) ClearAll(context.Context) error                        { return nil }
@@ -519,6 +532,86 @@ func TestUpdateMemoryByNodeID(t *testing.T) {
 	if got.Revision != 2 {
 		t.Fatalf("expected revision bumped to 2, got %d", got.Revision)
 	}
+}
+
+func TestDocumentUpdateAndDelete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wrapper := NewMCPServerWrapper(newProtocolStore(), nil)
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	go func() { _ = wrapper.server.Run(ctx, serverTransport) }()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "raph-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	call := func(name string, args map[string]any) *mcpsdk.CallToolResult {
+		t.Helper()
+		res, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: name, Arguments: args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	text := func(res *mcpsdk.CallToolResult) string {
+		t.Helper()
+		tc, ok := res.Content[0].(*mcpsdk.TextContent)
+		if !ok {
+			t.Fatalf("expected text content, got %T", res.Content[0])
+		}
+		return tc.Text
+	}
+
+	// Create a handoff, then capture its node id.
+	add := call("add_document", map[string]any{"scope": "global", "doc_type": "handoff", "title": "FTS handoff", "content": "original handoff body"})
+	if add.IsError {
+		t.Fatalf("add_document error: %+v", add.Content)
+	}
+	var created knowledgeDoc
+	if err := json.Unmarshal([]byte(text(add)), &created); err != nil {
+		t.Fatal(err)
+	}
+	id := created.Node.ID
+	if id == "" {
+		t.Fatal("add_document returned no node id")
+	}
+
+	// Update it in place.
+	upd := call("update_document", map[string]any{"id": id, "title": "FTS handoff", "content": "revised handoff body"})
+	if upd.IsError {
+		t.Fatalf("update_document error: %+v", upd.Content)
+	}
+	var updated knowledgeDoc
+	if err := json.Unmarshal([]byte(text(upd)), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Node.ID != id {
+		t.Fatalf("update changed the id: %q -> %q", id, updated.Node.ID)
+	}
+	if updated.Node.Content != "revised handoff body" {
+		t.Fatalf("content not updated: %q", updated.Node.Content)
+	}
+
+	// Delete it.
+	del := call("delete_document", map[string]any{"id": id})
+	if del.IsError {
+		t.Fatalf("delete_document error: %+v", del.Content)
+	}
+	// Re-delete is a tool error (not found).
+	if again := call("delete_document", map[string]any{"id": id}); !again.IsError {
+		t.Fatal("expected re-delete of a gone document to error")
+	}
+}
+
+// knowledgeDoc mirrors the fields of knowledge.Document we assert on.
+type knowledgeDoc struct {
+	Node struct {
+		ID      string `json:"id"`
+		Content string `json:"content"`
+	} `json:"node"`
 }
 
 func TestReadDocumentResolvesByIDOrQuery(t *testing.T) {

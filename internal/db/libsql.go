@@ -137,6 +137,7 @@ type GraphStore interface {
 	SaveWebCorpus(ctx context.Context, corpus WebCorpus) error
 	SaveWebCrawlVersion(ctx context.Context, version WebCrawlVersion) error
 	DeleteNodeByID(ctx context.Context, id string) error
+	DeleteDocumentNode(ctx context.Context, nodeID string) error
 	DeleteFileNodes(ctx context.Context, workspace string, relativePath string) error
 	DeleteWorkspace(ctx context.Context, workspace string) error
 	ClearAll(ctx context.Context) error
@@ -1767,6 +1768,62 @@ func (s *LibSQLStore) DeleteMemoryNode(ctx context.Context, nodeID string) error
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, nodeID); err != nil {
 			return err
+		}
+		return nil
+	})
+}
+
+// DeleteDocumentNode deletes the document identified by nodeID only if it is
+// currently a doc node, along with its chunk children — all in one write
+// transaction. Like DeleteMemoryNode, the type check and delete are atomic
+// (BEGIN IMMEDIATE), so a concurrent rewrite can't repoint the node between a
+// separate check and delete to make this remove an arbitrary graph node.
+// Returns sql.ErrNoRows when nodeID is not a document.
+func (s *LibSQLStore) DeleteDocumentNode(ctx context.Context, nodeID string) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		var exists int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT 1 FROM nodes WHERE id = ? AND type = 'doc' LIMIT 1`,
+			nodeID,
+		).Scan(&exists); err != nil {
+			if err == sql.ErrNoRows {
+				return sql.ErrNoRows
+			}
+			return err
+		}
+		// The doc plus its chunk children (linked by properties_json.doc_id).
+		ids := []string{nodeID}
+		rows, err := tx.QueryContext(ctx,
+			`SELECT id FROM nodes WHERE type = 'doc_chunk' AND json_extract(COALESCE(properties_json, '{}'), '$.doc_id') = ?`,
+			nodeID,
+		)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		_ = rows.Close()
+
+		for _, id := range ids {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM edges WHERE source_id = ? OR target_id = ?`, id, id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, id); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

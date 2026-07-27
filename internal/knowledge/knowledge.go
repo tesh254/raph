@@ -8,6 +8,7 @@ package knowledge
 import (
 	"context"
 	"crypto/sha1"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -217,6 +218,75 @@ type ListFilter struct {
 	Status    string
 	Query     string
 	Limit     int
+}
+
+// UpdateInput edits an existing document in place, keyed by its node id.
+type UpdateInput struct {
+	ID      string
+	Title   string
+	Content string
+	Tags    []string // nil keeps the document's current tags
+}
+
+// Update rewrites a document's title/content/tags while preserving its
+// identity (workspace + key), doc_type, source, writer, and lifecycle metadata
+// (status/used_at/used_by/freshness). Returns sql.ErrNoRows when the id is
+// unknown.
+func Update(ctx context.Context, store db.GraphStore, cfg *config.Config, in UpdateInput) (Document, error) {
+	node, err := store.GetNodeByID(ctx, strings.TrimSpace(in.ID))
+	if err != nil {
+		return Document{}, err
+	}
+	// Only documents are updatable through this path — mirrors the delete guard.
+	// Without it, editing a chunk or other node would create a bogus document
+	// under a key derived from its URL. sql.ErrNoRows so callers map to 404.
+	if node.Type != TypeDoc {
+		return Document{}, sql.ErrNoRows
+	}
+	// A doc's stable key lives in its URL: knowledge://<workspace>/<key>.
+	key := strings.TrimPrefix(node.URL, "knowledge://"+node.Workspace+"/")
+	if key == "" || key == node.URL {
+		return Document{}, fmt.Errorf("cannot resolve document key for %s", in.ID)
+	}
+	// Match Add's default so a content-only edit of an untyped document doesn't
+	// silently reclassify it as a handoff.
+	docType := node.Prop("doc_type")
+	if docType == "" {
+		docType = DocNote
+	}
+	// Carry over all existing properties so lifecycle metadata survives the edit.
+	props := make(map[string]string, len(node.Properties))
+	for k, v := range node.Properties {
+		props[k] = v
+	}
+	// Tags: nil means "keep current"; a non-nil (possibly empty) slice replaces
+	// them — an explicit empty slice clears the tags, so drop the carried-over
+	// property (Add won't re-set it for an empty list).
+	tags := in.Tags
+	if in.Tags == nil {
+		if existing := strings.TrimSpace(node.Prop("tags")); existing != "" {
+			tags = strings.Split(existing, ",")
+		}
+	} else if len(in.Tags) == 0 {
+		delete(props, "tags")
+	}
+	return Add(ctx, store, cfg, AddInput{
+		Workspace:  node.Workspace,
+		Key:        key,
+		Title:      in.Title,
+		Content:    in.Content,
+		DocType:    docType,
+		Source:     node.Prop("source"),
+		WriterID:   node.Prop("writer_id"),
+		Tags:       tags,
+		Properties: props,
+	})
+}
+
+// Delete removes a document and its chunk children atomically. Returns
+// sql.ErrNoRows when the id is not a document.
+func Delete(ctx context.Context, store db.GraphStore, id string) error {
+	return store.DeleteDocumentNode(ctx, strings.TrimSpace(id))
 }
 
 func List(ctx context.Context, store db.GraphStore, f ListFilter) ([]db.Node, error) {
