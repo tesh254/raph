@@ -1,0 +1,22 @@
+internal/knowledge/knowledge.go
+  s_a57d653f4a07a1::t_f74909e9dbd305 11
+  s_a57d653f4a07a1::t_eb7e60cd30d0ee 240-245,251-252,255-260,262-264,266,270-271
+internal/knowledge/knowledge_test.go
+  s_a57d653f4a07a1::t_04700b3b5aa971 5-6,129-189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "0bb954469f00923cea69c774084427593bc0b891",
+  "prompts": {},
+  "sessions": {
+    "s_a57d653f4a07a1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "428b4258-1ebc-4b78-b6d9-14553fd3a686",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
