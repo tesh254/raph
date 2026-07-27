@@ -2,6 +2,8 @@ package knowledge
 
 import (
 	"context"
+	"database/sql"
+	"strings"
 	"testing"
 
 	"raph/internal/db"
@@ -122,5 +124,66 @@ func TestListFiltersByType(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Prop("doc_type") != DocHandoff {
 		t.Fatalf("type filter failed: %+v", got)
+	}
+}
+
+func TestUpdateGuardsTypeTagsAndDocType(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+
+	doc, err := Add(ctx, store, nil, AddInput{
+		Workspace: "ws", Key: "k", Title: "T", Content: "body one",
+		DocType: DocArchitecture, Tags: []string{"a", "b"}, NoEmbed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := doc.Node.ID
+
+	// nil tags keeps existing tags and preserves doc_type.
+	d1, err := Update(ctx, store, nil, UpdateInput{ID: id, Title: "T", Content: "body two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d1.Node.Prop("tags") != "a,b" {
+		t.Fatalf("nil tags should keep existing, got %q", d1.Node.Prop("tags"))
+	}
+	if d1.Node.Prop("doc_type") != DocArchitecture {
+		t.Fatalf("doc_type should be preserved, got %q", d1.Node.Prop("doc_type"))
+	}
+
+	// Explicit empty tags clears them.
+	d2, err := Update(ctx, store, nil, UpdateInput{ID: id, Title: "T", Content: "body three", Tags: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(d2.Node.Prop("tags")) != "" {
+		t.Fatalf("explicit empty tags should clear, got %q", d2.Node.Prop("tags"))
+	}
+
+	// A document with no doc_type defaults to note (not handoff) on update.
+	if err := store.SaveNode(ctx, db.Node{
+		ID: "doc:untyped", Workspace: "ws", Domain: DomainKnowledge, Type: TypeDoc,
+		Name: "U", Content: "c", URL: "knowledge://ws/untyped",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d3, err := Update(ctx, store, nil, UpdateInput{ID: "doc:untyped", Content: "new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d3.Node.Prop("doc_type") != DocNote {
+		t.Fatalf("untyped doc should default to note, got %q", d3.Node.Prop("doc_type"))
+	}
+
+	// Non-document nodes are refused.
+	if err := store.SaveNode(ctx, db.Node{
+		ID: "func:x", Workspace: "ws", Domain: "code", Type: "func",
+		Name: "F", Content: "c", URL: "knowledge://ws/whatever",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Update(ctx, store, nil, UpdateInput{ID: "func:x", Content: "x"}); err != sql.ErrNoRows {
+		t.Fatalf("expected ErrNoRows updating a non-document, got %v", err)
 	}
 }

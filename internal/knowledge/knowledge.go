@@ -8,6 +8,7 @@ package knowledge
 import (
 	"context"
 	"crypto/sha1"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -236,26 +237,38 @@ func Update(ctx context.Context, store db.GraphStore, cfg *config.Config, in Upd
 	if err != nil {
 		return Document{}, err
 	}
+	// Only documents are updatable through this path — mirrors the delete guard.
+	// Without it, editing a chunk or other node would create a bogus document
+	// under a key derived from its URL. sql.ErrNoRows so callers map to 404.
+	if node.Type != TypeDoc {
+		return Document{}, sql.ErrNoRows
+	}
 	// A doc's stable key lives in its URL: knowledge://<workspace>/<key>.
 	key := strings.TrimPrefix(node.URL, "knowledge://"+node.Workspace+"/")
 	if key == "" || key == node.URL {
 		return Document{}, fmt.Errorf("cannot resolve document key for %s", in.ID)
 	}
+	// Match Add's default so a content-only edit of an untyped document doesn't
+	// silently reclassify it as a handoff.
 	docType := node.Prop("doc_type")
 	if docType == "" {
-		docType = DocHandoff
+		docType = DocNote
 	}
-	tags := in.Tags
-	if len(tags) == 0 {
-		if existing := strings.TrimSpace(node.Prop("tags")); existing != "" {
-			tags = strings.Split(existing, ",")
-		}
-	}
-	// Carry over all existing properties so lifecycle metadata survives the
-	// edit; Add overrides the fields it manages.
+	// Carry over all existing properties so lifecycle metadata survives the edit.
 	props := make(map[string]string, len(node.Properties))
 	for k, v := range node.Properties {
 		props[k] = v
+	}
+	// Tags: nil means "keep current"; a non-nil (possibly empty) slice replaces
+	// them — an explicit empty slice clears the tags, so drop the carried-over
+	// property (Add won't re-set it for an empty list).
+	tags := in.Tags
+	if in.Tags == nil {
+		if existing := strings.TrimSpace(node.Prop("tags")); existing != "" {
+			tags = strings.Split(existing, ",")
+		}
+	} else if len(in.Tags) == 0 {
+		delete(props, "tags")
 	}
 	return Add(ctx, store, cfg, AddInput{
 		Workspace:  node.Workspace,
