@@ -661,6 +661,40 @@ func (s *LibSQLStore) withTx(ctx context.Context, fn func(tx *sql.Tx) error) (er
 	return tx.Commit()
 }
 
+// queryContexter is satisfied by both *sql.DB and *sql.Tx, so a query helper can
+// run standalone or inside a transaction's snapshot.
+type queryContexter interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// withReadTx runs fn inside a DEFERRED (read-only) transaction. Unlike withTx —
+// whose IMMEDIATE mode (DSN _txlock=immediate) grabs the write lock at BEGIN for
+// race-free writes — a read-only transaction begins deferred (modernc issues a
+// plain BEGIN for ReadOnly), so it takes only a shared read lock: it gives fn a
+// single consistent WAL snapshot across multiple queries WITHOUT blocking
+// concurrent writers or waiting on busy_timeout. Use it for multi-query reads
+// that must be internally consistent (e.g. studio aggregates) but must never
+// stall an indexing/memory write.
+func (s *LibSQLStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) (err error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if err = fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *LibSQLStore) VectorSearch(ctx context.Context, queryVector []float32, limit int) ([]Node, error) {
 	return s.vectorSearch(ctx, "", queryVector, limit)
 }
@@ -684,87 +718,101 @@ func (s *LibSQLStore) vectorSearch(ctx context.Context, workspace string, queryV
 	// search over a big corpus no longer pulls every embedded node's full text
 	// into memory only to discard all but a handful. The result set — the same
 	// nodes, in the same order — is unchanged.
-	query := `SELECT id, embedding_json FROM nodes WHERE embedding_json IS NOT NULL AND embedding_json <> '' AND embedding_json <> '[]'`
-	var rows *sql.Rows
-	var err error
-	if workspace == "" {
-		rows, err = s.db.QueryContext(ctx, query)
-	} else {
-		rows, err = s.db.QueryContext(ctx, query+` AND workspace = ?`, workspace)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	//
+	// Both passes run in one read-only snapshot so a node updated between them
+	// can't be returned with content that no longer matches the embedding its
+	// rank was computed from. The snapshot is deferred (read lock), so it never
+	// blocks concurrent indexing/memory writes.
+	var results []Node
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		query := `SELECT id, embedding_json FROM nodes WHERE embedding_json IS NOT NULL AND embedding_json <> '' AND embedding_json <> '[]'`
+		var rows *sql.Rows
+		var err error
+		if workspace == "" {
+			rows, err = tx.QueryContext(ctx, query)
+		} else {
+			rows, err = tx.QueryContext(ctx, query+` AND workspace = ?`, workspace)
+		}
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
 
-	type ranked struct {
-		id    string
-		score float64
-	}
+		type ranked struct {
+			id    string
+			score float64
+		}
 
-	var scored []ranked
-	var embedding []float32
-	for rows.Next() {
-		var id, embeddingJSON string
-		if err := rows.Scan(&id, &embeddingJSON); err != nil {
-			return nil, err
+		var scored []ranked
+		var embedding []float32
+		for rows.Next() {
+			var id, embeddingJSON string
+			if err := rows.Scan(&id, &embeddingJSON); err != nil {
+				return err
+			}
+			// Reuse the backing array across rows: json.Unmarshal into a non-nil
+			// slice overwrites it, so only rows with a longer vector reallocate.
+			embedding = embedding[:0]
+			if err := json.Unmarshal([]byte(embeddingJSON), &embedding); err != nil {
+				continue
+			}
+			if len(embedding) == 0 {
+				continue
+			}
+			score := cosineSimilarity(queryVector, embedding)
+			if math.IsNaN(score) || score <= 0 {
+				continue
+			}
+			scored = append(scored, ranked{id: id, score: score})
 		}
-		// Reuse the backing array across rows: json.Unmarshal into a non-nil
-		// slice overwrites it, so only rows with a longer vector reallocate.
-		embedding = embedding[:0]
-		if err := json.Unmarshal([]byte(embeddingJSON), &embedding); err != nil {
-			continue
+		if err := rows.Err(); err != nil {
+			return err
 		}
-		if len(embedding) == 0 {
-			continue
-		}
-		score := cosineSimilarity(queryVector, embedding)
-		if math.IsNaN(score) || score <= 0 {
-			continue
-		}
-		scored = append(scored, ranked{id: id, score: score})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
+		_ = rows.Close()
 
-	sort.Slice(scored, func(i, j int) bool {
-		if scored[i].score == scored[j].score {
-			return scored[i].id < scored[j].id
+		sort.Slice(scored, func(i, j int) bool {
+			if scored[i].score == scored[j].score {
+				return scored[i].id < scored[j].id
+			}
+			return scored[i].score > scored[j].score
+		})
+		if len(scored) > limit {
+			scored = scored[:limit]
 		}
-		return scored[i].score > scored[j].score
+		if len(scored) == 0 {
+			return nil
+		}
+
+		ids := make([]string, len(scored))
+		for i, r := range scored {
+			ids[i] = r.id
+		}
+		hydrated, err := hydrateVectorNodes(ctx, tx, ids)
+		if err != nil {
+			return err
+		}
+		// Reassemble in ranked order; a node could vanish between passes (a
+		// delete committed before this snapshot took its read lock), so skip any
+		// id the hydrate pass didn't return.
+		results = make([]Node, 0, len(scored))
+		for _, r := range scored {
+			if n, ok := hydrated[r.id]; ok {
+				results = append(results, n)
+			}
+		}
+		return nil
 	})
-	if len(scored) > limit {
-		scored = scored[:limit]
-	}
-	if len(scored) == 0 {
-		return nil, nil
-	}
-
-	ids := make([]string, len(scored))
-	for i, r := range scored {
-		ids[i] = r.id
-	}
-	hydrated, err := s.hydrateVectorNodes(ctx, ids)
 	if err != nil {
 		return nil, err
-	}
-	// Reassemble in ranked order; a node could vanish between passes (concurrent
-	// delete), so skip any id the hydrate pass didn't return.
-	results := make([]Node, 0, len(scored))
-	for _, r := range scored {
-		if n, ok := hydrated[r.id]; ok {
-			results = append(results, n)
-		}
 	}
 	return results, nil
 }
 
 // hydrateVectorNodes loads the display columns for the given node ids (the top
-// vector-search hits). It mirrors the column set the single-pass scan used to
-// return — id/workspace/domain/type/name/content/url/path plus embedding
-// length — so callers see exactly the same fields.
-func (s *LibSQLStore) hydrateVectorNodes(ctx context.Context, ids []string) (map[string]Node, error) {
+// vector-search hits) from q (a *sql.Tx snapshot or the *sql.DB). It mirrors the
+// column set the single-pass scan used to return — id/workspace/domain/type/
+// name/content/url/path plus embedding length — so callers see the same fields.
+func hydrateVectorNodes(ctx context.Context, q queryContexter, ids []string) (map[string]Node, error) {
 	if len(ids) == 0 {
 		return map[string]Node{}, nil
 	}
@@ -774,7 +822,7 @@ func (s *LibSQLStore) hydrateVectorNodes(ctx context.Context, ids []string) (map
 	for i, id := range ids {
 		args[i] = id
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := q.QueryContext(ctx,
 		`SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), COALESCE(embedding_json, '[]') FROM nodes WHERE id IN (`+placeholders+`)`,
 		args...)
 	if err != nil {
@@ -1302,13 +1350,14 @@ type Workspace struct {
 // a codebase root (it also stamps the absolute root onto each node's `path`),
 // which cleanly separates real repos from workspaces that only hold memories or
 // crawled docs. Both grouped queries (each served by idx_nodes_workspace) run in
-// one transaction so the totals and the per-domain breakdown observe a single
-// snapshot — otherwise a concurrent index write could make a repo's by_domain
-// counts disagree with its node total within one response. Same pattern as
-// GraphStats; the aggregates never materialize node rows.
+// one READ-ONLY snapshot so the totals and the per-domain breakdown stay
+// internally consistent — otherwise a concurrent index write could make a repo's
+// by_domain counts disagree with its node total within one response. It uses a
+// deferred read transaction (not withTx's immediate write lock): the studio
+// polls this, and a poll must never block or stall an indexing/memory write.
 func (s *LibSQLStore) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 	workspaces := []Workspace{}
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
 			SELECT workspace,
 			       COALESCE(MAX(NULLIF(path, '')), '') AS root,

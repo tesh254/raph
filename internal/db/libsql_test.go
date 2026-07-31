@@ -5,9 +5,54 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+// TestReadSnapshotDoesNotBlockWrites proves withReadTx uses a deferred read
+// lock (not withTx's immediate write lock): a snapshot held open on one
+// connection must not stall a write from another. Regression for the cubic
+// finding that /api/repos polling could block indexing/memory writes.
+func TestReadSnapshotDoesNotBlockWrites(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	readStore, err := InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readStore.Close()
+	writeStore, err := InitStorage() // separate connection pool — acts like a 2nd process
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writeStore.Close()
+	ctx := context.Background()
+
+	err = readStore.withReadTx(ctx, func(tx *sql.Tx) error {
+		// Acquire the read lock (deferred begins take it on first read).
+		var n int
+		if e := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes`).Scan(&n); e != nil {
+			return e
+		}
+		// A concurrent write on the other connection must complete while this
+		// snapshot is open. Under the old immediate-mode tx it would block until
+		// busy_timeout (5s) and fail.
+		done := make(chan error, 1)
+		go func() {
+			done <- writeStore.SaveNode(ctx, Node{ID: "n1", Workspace: "ws", Domain: "code", Type: "file", Name: "f", Content: "c"})
+		}()
+		select {
+		case e := <-done:
+			return e
+		case <-time.After(3 * time.Second):
+			return fmt.Errorf("write blocked while a read snapshot was open")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCosineSimilarity(t *testing.T) {
 	t.Parallel()
