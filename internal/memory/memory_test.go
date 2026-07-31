@@ -137,31 +137,49 @@ func TestStoreGeneratesAndPersistsEmbedding(t *testing.T) {
 	}
 }
 
+func ids(records []db.MemoryRecord) string {
+	out := make([]string, len(records))
+	for i, r := range records {
+		out[i] = r.Node.ID
+	}
+	return strings.Join(out, ",")
+}
+
 func TestMergeMemoryMatchesUnionsAndDedupes(t *testing.T) {
 	sem := []db.MemoryRecord{{Node: db.Node{ID: "a"}}, {Node: db.Node{ID: "b"}}}
 	kw := []db.MemoryRecord{{Node: db.Node{ID: "b"}}, {Node: db.Node{ID: "c"}}}
 
 	out, mode := mergeMemoryMatches(sem, kw, 10)
-	got := []string{}
-	for _, r := range out {
-		got = append(got, r.Node.ID)
-	}
-	if strings.Join(got, ",") != "a,b,c" {
-		t.Fatalf("expected semantic order then keyword extras deduped, got %v", got)
+	if ids(out) != "a,b,c" {
+		t.Fatalf("expected semantic order then keyword extras deduped, got %v", ids(out))
 	}
 	if mode != "hybrid" {
 		t.Fatalf("both passes contributed, want hybrid mode, got %q", mode)
 	}
 
-	// The limit truncates the union, keeping semantic hits first.
-	capped, _ := mergeMemoryMatches(sem, kw, 2)
-	if len(capped) != 2 || capped[0].Node.ID != "a" || capped[1].Node.ID != "b" {
-		t.Fatalf("limit should keep the first two (semantic-first), got %+v", capped)
-	}
-
 	// Keyword-only still reports the keyword mode.
 	if _, mode := mergeMemoryMatches(nil, kw, 10); mode != "keyword" {
 		t.Fatalf("no semantic pass should be keyword mode, got %q", mode)
+	}
+}
+
+// TestMergeReservesSlotsForKeywordOnly is the regression for the cubic finding:
+// a keyword-only hit (exact/just-written) must survive even when the semantic
+// pass already produced `limit` results. The reserve keeps a slot for it.
+func TestMergeReservesSlotsForKeywordOnly(t *testing.T) {
+	// Semantic fills the whole limit; d is a keyword-only exact hit.
+	sem := []db.MemoryRecord{{Node: db.Node{ID: "a"}}, {Node: db.Node{ID: "b"}}, {Node: db.Node{ID: "c"}}}
+	kw := []db.MemoryRecord{{Node: db.Node{ID: "d"}}}
+
+	out, mode := mergeMemoryMatches(sem, kw, 3)
+	if ids(out) != "a,b,d" {
+		t.Fatalf("keyword-only hit should claim a reserved slot, got %v", ids(out))
+	}
+	if mode != "hybrid" {
+		t.Fatalf("both passes contributed, want hybrid, got %q", mode)
+	}
+	if len(out) != 3 {
+		t.Fatalf("result must respect the limit, got %d", len(out))
 	}
 }
 

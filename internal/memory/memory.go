@@ -238,36 +238,79 @@ func Search(ctx context.Context, store db.GraphStore, cfg *config.Config, input 
 }
 
 // mergeMemoryMatches unions the semantic and keyword result sets, de-duplicated
-// by node id. Semantic hits keep their (by-meaning) ordering and lead; keyword
-// hits the semantic pass missed fill the remainder up to limit. The mode
+// by node id. Semantic hits keep their (by-meaning) ordering and lead. The
+// catch it guards against: a keyword-only hit — an exact-term or just-written
+// memory the vector ranking buried — must not be crowded out just because the
+// semantic pass already filled every slot. So it RESERVES up to a third of the
+// result slots for keyword-only hits before truncating, then fills the rest
+// (and any reserve the keyword pass didn't use) with semantic results. The mode
 // reports which passes actually contributed.
 func mergeMemoryMatches(semantic, keyword []db.MemoryRecord, limit int) ([]db.MemoryRecord, string) {
-	seen := make(map[string]struct{}, len(semantic)+len(keyword))
-	out := make([]db.MemoryRecord, 0, limit)
-	add := func(records []db.MemoryRecord) {
-		for _, r := range records {
-			if len(out) >= limit {
-				return
-			}
-			if _, ok := seen[r.Node.ID]; ok {
-				continue
-			}
-			seen[r.Node.ID] = struct{}{}
-			out = append(out, r)
+	if limit <= 0 {
+		limit = 10
+	}
+	inSemantic := make(map[string]struct{}, len(semantic))
+	for _, r := range semantic {
+		inSemantic[r.Node.ID] = struct{}{}
+	}
+	keywordOnly := make([]db.MemoryRecord, 0, len(keyword))
+	for _, r := range keyword {
+		if _, ok := inSemantic[r.Node.ID]; !ok {
+			keywordOnly = append(keywordOnly, r)
 		}
 	}
-	add(semantic)
-	countBeforeKeyword := len(out)
-	add(keyword)
-	keywordContributed := len(out) > countBeforeKeyword
+
+	// Reserve slots for keyword-only hits (capped at how many there are), so a
+	// full semantic result set still leaves room for them.
+	reserve := 0
+	if len(keywordOnly) > 0 {
+		reserve = (limit + 2) / 3 // ceil(limit/3)
+		if reserve > len(keywordOnly) {
+			reserve = len(keywordOnly)
+		}
+	}
+	semanticSlots := limit - reserve
+
+	seen := make(map[string]struct{}, limit)
+	out := make([]db.MemoryRecord, 0, limit)
+	take := func(r db.MemoryRecord, cap int) bool {
+		if len(out) >= cap {
+			return false
+		}
+		if _, ok := seen[r.Node.ID]; ok {
+			return false
+		}
+		seen[r.Node.ID] = struct{}{}
+		out = append(out, r)
+		return true
+	}
+
+	usedSemantic := false
+	for _, r := range semantic {
+		if take(r, semanticSlots) {
+			usedSemantic = true
+		}
+	}
+	usedKeyword := false
+	for _, r := range keywordOnly {
+		if take(r, limit) {
+			usedKeyword = true
+		}
+	}
+	// Top up any slots the keyword reserve didn't consume with leftover semantic.
+	for _, r := range semantic {
+		if take(r, limit) {
+			usedSemantic = true
+		}
+	}
 
 	switch {
-	case len(semantic) > 0 && keywordContributed:
+	case usedSemantic && usedKeyword:
 		return out, "hybrid"
-	case len(semantic) > 0:
-		return out, "semantic"
-	default:
+	case usedKeyword:
 		return out, "keyword"
+	default:
+		return out, "semantic"
 	}
 }
 

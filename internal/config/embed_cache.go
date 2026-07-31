@@ -73,8 +73,9 @@ var queryEmbedCache = newEmbedCache(queryEmbedCacheCap)
 // storing memories, crawling) deliberately stay on GenerateEmbedding: their
 // text is unique per call, so caching it would only churn this LRU.
 //
-// The cache key folds in the provider and model, so rotating the embedding
-// model never returns a vector produced by the previous one.
+// The cache key folds in the provider, endpoint, and model, so rotating the
+// model — or pointing at a different OpenRouter-compatible base URL — never
+// returns a vector produced by a different embedder.
 func EmbedQuery(ctx context.Context, cfg *Config, query string) ([]float32, error) {
 	if cfg == nil {
 		// Preserve GenerateEmbedding's nil-config error path.
@@ -98,8 +99,10 @@ func EmbedQuery(ctx context.Context, cfg *Config, query string) ([]float32, erro
 func queryCacheKey(cfg *Config, query string) string {
 	provider := cfg.Vector.CurrentProvider
 	model := ""
+	baseURL := ""
 	if provider == "openrouter" {
 		model = cfg.Vector.Providers.OpenRouter.Model
+		baseURL = cfg.Vector.Providers.OpenRouter.BaseURL
 	}
-	return provider + "\x00" + model + "\x00" + query
+	return provider + "\x00" + baseURL + "\x00" + model + "\x00" + query
 }

@@ -684,6 +684,11 @@ func (m *MCPServerWrapper) registerTools() {
 		Name:        "search_memory",
 		Description: "Recall durable memories. Searches ALL scopes (project, shared, global) at once, ranked by relevance — the default way to look something up. You rarely need a scope filter; omit scope_type to search everything. Each match reports its own scope_type/scope_id so you can see where it lives.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchMemoryArgs) (*mcpsdk.CallToolResult, MemorySearchOutput, error) {
+		// A scope_id without a scope_type would match that id across every scope
+		// type — silently broadening a request meant to narrow. Require both.
+		if strings.TrimSpace(args.ScopeID) != "" && strings.TrimSpace(args.ScopeType) == "" {
+			return nil, MemorySearchOutput{}, fmt.Errorf("scope_type is required when scope_id is set")
+		}
 		output, err := memory.Search(ctx, m.store, m.config, memory.SearchInput{
 			Query:         args.Query,
 			ScopeType:     args.ScopeType,

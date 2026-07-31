@@ -1301,69 +1301,75 @@ type Workspace struct {
 // workspace with at least one `file` node — that's what the indexer writes for
 // a codebase root (it also stamps the absolute root onto each node's `path`),
 // which cleanly separates real repos from workspaces that only hold memories or
-// crawled docs. Two grouped queries (both served by idx_nodes_workspace) keep it
-// cheap even when the studio polls it, so it never materializes node rows.
+// crawled docs. Both grouped queries (each served by idx_nodes_workspace) run in
+// one transaction so the totals and the per-domain breakdown observe a single
+// snapshot — otherwise a concurrent index write could make a repo's by_domain
+// counts disagree with its node total within one response. Same pattern as
+// GraphStats; the aggregates never materialize node rows.
 func (s *LibSQLStore) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT workspace,
-		       COALESCE(MAX(NULLIF(path, '')), '') AS root,
-		       COUNT(*) AS nodes,
-		       SUM(CASE WHEN type = 'file' THEN 1 ELSE 0 END) AS files,
-		       COALESCE(MAX(NULLIF(updated_at, '')), '') AS last_indexed
-		FROM nodes
-		WHERE TRIM(workspace) <> ''
-		GROUP BY workspace
-		HAVING SUM(CASE WHEN type = 'file' THEN 1 ELSE 0 END) > 0
-		ORDER BY last_indexed DESC, root ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	workspaces := []Workspace{}
-	byID := map[string]*Workspace{}
-	for rows.Next() {
-		var w Workspace
-		if err := rows.Scan(&w.Workspace, &w.Root, &w.Nodes, &w.Files, &w.LastIndexed); err != nil {
-			return nil, err
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT workspace,
+			       COALESCE(MAX(NULLIF(path, '')), '') AS root,
+			       COUNT(*) AS nodes,
+			       SUM(CASE WHEN type = 'file' THEN 1 ELSE 0 END) AS files,
+			       COALESCE(MAX(NULLIF(updated_at, '')), '') AS last_indexed
+			FROM nodes
+			WHERE TRIM(workspace) <> ''
+			GROUP BY workspace
+			HAVING SUM(CASE WHEN type = 'file' THEN 1 ELSE 0 END) > 0
+			ORDER BY last_indexed DESC, root ASC`)
+		if err != nil {
+			return err
 		}
-		w.ByDomain = map[string]int{}
-		if w.Root != "" {
-			w.Name = filepath.Base(w.Root)
-		} else {
-			w.Name = w.Workspace
-		}
-		workspaces = append(workspaces, w)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// Index by workspace id so the per-domain pass can attach counts. Pointers
-	// into the slice let us mutate in place without a second copy.
-	for i := range workspaces {
-		byID[workspaces[i].Workspace] = &workspaces[i]
-	}
+		defer rows.Close()
 
-	domainRows, err := s.db.QueryContext(ctx, `
-		SELECT workspace, domain, COUNT(*)
-		FROM nodes
-		WHERE TRIM(workspace) <> ''
-		GROUP BY workspace, domain`)
+		for rows.Next() {
+			var w Workspace
+			if err := rows.Scan(&w.Workspace, &w.Root, &w.Nodes, &w.Files, &w.LastIndexed); err != nil {
+				return err
+			}
+			w.ByDomain = map[string]int{}
+			if w.Root != "" {
+				w.Name = filepath.Base(w.Root)
+			} else {
+				w.Name = w.Workspace
+			}
+			workspaces = append(workspaces, w)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		// Index by workspace id so the per-domain pass can attach counts.
+		// Pointers into the slice let us mutate in place without a second copy.
+		byID := make(map[string]*Workspace, len(workspaces))
+		for i := range workspaces {
+			byID[workspaces[i].Workspace] = &workspaces[i]
+		}
+
+		domainRows, err := tx.QueryContext(ctx, `
+			SELECT workspace, domain, COUNT(*)
+			FROM nodes
+			WHERE TRIM(workspace) <> ''
+			GROUP BY workspace, domain`)
+		if err != nil {
+			return err
+		}
+		defer domainRows.Close()
+		for domainRows.Next() {
+			var ws, domain string
+			var n int
+			if err := domainRows.Scan(&ws, &domain, &n); err != nil {
+				return err
+			}
+			if w := byID[ws]; w != nil && strings.TrimSpace(domain) != "" {
+				w.ByDomain[domain] = n
+			}
+		}
+		return domainRows.Err()
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer domainRows.Close()
-	for domainRows.Next() {
-		var ws, domain string
-		var n int
-		if err := domainRows.Scan(&ws, &domain, &n); err != nil {
-			return nil, err
-		}
-		if w := byID[ws]; w != nil && strings.TrimSpace(domain) != "" {
-			w.ByDomain[domain] = n
-		}
-	}
-	if err := domainRows.Err(); err != nil {
 		return nil, err
 	}
 	return workspaces, nil
