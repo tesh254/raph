@@ -1,0 +1,73 @@
+plugins/raph/skills/raph/SKILL.md
+  s_a57d653f4a07a1::t_c9bcf7d4a5e1e0 14,17
+  s_a57d653f4a07a1::t_10613fc1008d84 106-109
+internal/mcp/server.go
+  s_a57d653f4a07a1::t_bb7e6959746561 282-287
+  s_a57d653f4a07a1::t_25a7c47e049375 389-392
+  s_a57d653f4a07a1::t_999d1a0f36be3a 684-701,704
+  s_a57d653f4a07a1::t_325c0d880deb76 368
+  s_a57d653f4a07a1::t_304b8df6933158 86-93
+  s_a57d653f4a07a1::t_ad695ce411aea9 548,1111,1135
+  s_a57d653f4a07a1::t_cf3700fb6ab437 424-425
+  s_a57d653f4a07a1::t_f9b413164bf7f3 315
+  s_a57d653f4a07a1::t_11992865fb99ac 683
+internal/crawler/crawler_test.go
+  s_a57d653f4a07a1::t_4f8c175ba21bc3 79
+internal/indexer/indexer_test.go
+  s_a57d653f4a07a1::t_7bec49a0a32f20 78
+internal/studio/server.go
+  s_a57d653f4a07a1::t_42955f0d09bb43 120
+  s_a57d653f4a07a1::t_aad212f7ead54f 935-951
+  s_a57d653f4a07a1::t_d8ff8a35c2f3eb 295
+internal/db/lazy.go
+  s_a57d653f4a07a1::t_5fecee2bb7288c 182-189
+internal/mcp/server_test.go
+  s_a57d653f4a07a1::t_8c07b17abb4e9e 188
+internal/db/libsql.go
+  s_a57d653f4a07a1::t_bc00e6c82bd82c 680-687,700-701,705-706,708-709,712-715,718,721,725,731-733,735,737-741,744-758,763-795
+  s_a57d653f4a07a1::t_8d3e8ab52485b2 796,1285-1371
+  s_a57d653f4a07a1::t_ffe0d5200161a4 129
+  s_a57d653f4a07a1::t_6eb59e049a6be3 797
+internal/memory/memory_test.go
+  s_a57d653f4a07a1::t_aa1d11e7e3b0f5 173-178
+  s_a57d653f4a07a1::t_e59f6e90c62c2b 9
+  s_a57d653f4a07a1::t_ecd4bfd2d5fae0 95
+  s_a57d653f4a07a1::t_e8dd215ec939d2 140-172,179-206
+internal/memory/memory.go
+  s_a57d653f4a07a1::t_475ed7603755d2 193-196,198-200,202,205-211,221,225-231,235-271
+  s_a57d653f4a07a1::t_3acd5c873a5e24 214
+internal/query/query.go
+  s_a57d653f4a07a1::t_420cb0923bc1ab 82
+cmd/raph/main.go
+  s_a57d653f4a07a1::t_dceab8c52f97c0 173-177
+  s_a57d653f4a07a1::t_e88a79e5d3f072 244
+  s_a57d653f4a07a1::t_ad7cb77a0d3126 58-65
+  s_a57d653f4a07a1::t_67a067d789f975 1447
+  s_a57d653f4a07a1::t_db880ccadb7d56 1465,1468-1473
+  s_a57d653f4a07a1::t_3672b8c342095d 1517
+  s_a57d653f4a07a1::t_380d4e64501af4 1645
+  s_a57d653f4a07a1::t_97cc91c09d5c85 1208-1225,1229-1234,1241
+  s_a57d653f4a07a1::t_4f9457cd9d454a 1705
+  s_a57d653f4a07a1::t_ba1baa59b64105 220
+  s_a57d653f4a07a1::t_18d92baefb204e 316
+  s_a57d653f4a07a1::t_f8e1aafe85783b 1435-1439,1441-1442
+  s_a57d653f4a07a1::t_1c93f77a77d1c3 1587-1589
+internal/config/embed_cache.go
+  s_a57d653f4a07a1::t_f8cde59273044f 1-105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.18",
+  "base_commit_sha": "1bbd5c355deb1ba01c0f505c36a74d76ccdc4ad0",
+  "prompts": {},
+  "sessions": {
+    "s_a57d653f4a07a1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "428b4258-1ebc-4b78-b6d9-14553fd3a686",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
