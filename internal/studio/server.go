@@ -117,6 +117,7 @@ func (s *StudioServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/sqlite", s.handleSQLite)
 	mux.HandleFunc("/api/activity", s.handleActivity)
 	mux.HandleFunc("/api/stats", s.handleStats)
+	mux.HandleFunc("/api/repos", s.handleListRepos)
 	mux.HandleFunc("/api/analytics", s.handleAnalytics)
 	mux.HandleFunc("/api/timeline", s.handleTimeline)
 	mux.HandleFunc("/api/memories", s.handleListMemories)
@@ -291,7 +292,7 @@ func (s *StudioServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	// Try semantic search first if embeddings are configured
 	if s.config != nil && s.config.HasEmbeddingProvider() {
-		vec, err := config.GenerateEmbedding(r.Context(), s.config, query)
+		vec, err := config.EmbedQuery(r.Context(), s.config, query)
 		if err == nil && len(vec) > 0 {
 			nodes, searchErr := s.store.VectorSearch(r.Context(), vec, req.Limit)
 			if searchErr == nil && len(nodes) > 0 {
@@ -929,6 +930,23 @@ func (s *StudioServer) handleStats(w http.ResponseWriter, r *http.Request) {
 		"by_type":    stats.ByType,
 		"by_domain":  stats.ByDomain,
 	})
+}
+
+// handleListRepos lists every indexed codebase so the studio can surface repos
+// as first-class entries instead of leaving them buried among graph nodes. The
+// browser can't group by workspace itself (Node.Workspace is never serialized),
+// so the grouping has to happen here.
+func (s *StudioServer) handleListRepos(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	repos, err := s.store.ListWorkspaces(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": repos})
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

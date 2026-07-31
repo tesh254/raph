@@ -190,43 +190,85 @@ func Deprecate(ctx context.Context, store db.GraphStore, input DeprecateInput) (
 }
 
 func Search(ctx context.Context, store db.GraphStore, cfg *config.Config, input SearchInput) (SearchOutput, error) {
-	filter := db.MemorySearchFilter{
-		ScopeType:       input.ScopeType,
-		ScopeID:         input.ScopeID,
-		KnowledgeType:   input.KnowledgeType,
-		LifecycleStates: []string{lifecycleActive},
-		Limit:           input.Limit,
+	limit := input.Limit
+	if limit <= 0 {
+		limit = 10
 	}
-
-	// Prefer semantic search over the stored embeddings so agents find memories
-	// by meaning, not just literal keywords. This embeds the query via the
-	// configured provider — a network call — so it's bounded by a short timeout
-	// and always falls back to a local keyword search when there's no provider,
-	// the query can't be embedded (offline/unavailable/timeout), or nothing
-	// ranks above zero similarity. A read never hangs on the provider, and
-	// stays fully functional offline.
+	filter := db.MemorySearchFilter{
+		ScopeType:       strings.TrimSpace(input.ScopeType),
+		ScopeID:         strings.TrimSpace(input.ScopeID),
+		KnowledgeType:   strings.TrimSpace(input.KnowledgeType),
+		LifecycleStates: []string{lifecycleActive},
+		Limit:           limit,
+	}
 	query := strings.TrimSpace(input.Query)
+
+	// Semantic pass: rank active memories by meaning, so agents recall by intent
+	// rather than exact wording. It embeds the query via the configured provider
+	// — a network call — so it's bounded by a short timeout and is entirely
+	// optional: no provider, an unembeddable/offline query, or a timeout just
+	// leaves this empty. A read never hangs on the provider.
+	var semantic []db.MemoryRecord
 	if query != "" && cfg != nil && cfg.HasEmbeddingProvider() {
 		embedCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		vec, err := config.GenerateEmbedding(embedCtx, cfg, query)
+		vec, err := config.EmbedQuery(embedCtx, cfg, query)
 		cancel()
 		if err == nil && len(vec) > 0 {
 			matches, err := store.VectorSearchMemoryRecords(ctx, vec, filter)
 			if err != nil {
 				return SearchOutput{}, err
 			}
-			if len(matches) > 0 {
-				return SearchOutput{Mode: "semantic", Matches: matches}, nil
-			}
+			semantic = matches
 		}
 	}
 
-	filter.Query = input.Query
-	matches, err := store.SearchMemoryRecords(ctx, filter)
+	// Keyword pass ALWAYS runs and is merged in — not just used as a fallback
+	// when semantic finds nothing. Otherwise a memory the agent literally named
+	// (or one just written whose exact terms the vectors rank below older,
+	// similar entries) would be crowded out of a full semantic result set and
+	// look "missing". Over the small memory table this second query is cheap.
+	filter.Query = query
+	keyword, err := store.SearchMemoryRecords(ctx, filter)
 	if err != nil {
 		return SearchOutput{}, err
 	}
-	return SearchOutput{Mode: "keyword", Matches: matches}, nil
+
+	matches, mode := mergeMemoryMatches(semantic, keyword, limit)
+	return SearchOutput{Mode: mode, Matches: matches}, nil
+}
+
+// mergeMemoryMatches unions the semantic and keyword result sets, de-duplicated
+// by node id. Semantic hits keep their (by-meaning) ordering and lead; keyword
+// hits the semantic pass missed fill the remainder up to limit. The mode
+// reports which passes actually contributed.
+func mergeMemoryMatches(semantic, keyword []db.MemoryRecord, limit int) ([]db.MemoryRecord, string) {
+	seen := make(map[string]struct{}, len(semantic)+len(keyword))
+	out := make([]db.MemoryRecord, 0, limit)
+	add := func(records []db.MemoryRecord) {
+		for _, r := range records {
+			if len(out) >= limit {
+				return
+			}
+			if _, ok := seen[r.Node.ID]; ok {
+				continue
+			}
+			seen[r.Node.ID] = struct{}{}
+			out = append(out, r)
+		}
+	}
+	add(semantic)
+	countBeforeKeyword := len(out)
+	add(keyword)
+	keywordContributed := len(out) > countBeforeKeyword
+
+	switch {
+	case len(semantic) > 0 && keywordContributed:
+		return out, "hybrid"
+	case len(semantic) > 0:
+		return out, "semantic"
+	default:
+		return out, "keyword"
+	}
 }
 
 func History(ctx context.Context, store db.GraphStore, nodeID string) ([]db.MemoryRevision, error) {

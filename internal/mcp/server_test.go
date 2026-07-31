@@ -185,6 +185,7 @@ func (s *protocolStore) DeleteDocumentNode(_ context.Context, nodeID string) err
 	delete(s.nodes, nodeID)
 	return nil
 }
+func (*protocolStore) ListWorkspaces(context.Context) ([]db.Workspace, error) { return nil, nil }
 func (*protocolStore) DeleteFileNodes(context.Context, string, string) error { return nil }
 func (*protocolStore) DeleteWorkspace(context.Context, string) error         { return nil }
 func (*protocolStore) ClearAll(context.Context) error                        { return nil }

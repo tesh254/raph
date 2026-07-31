@@ -11,9 +11,10 @@ tools only for what raph doesn't cover. It keeps a local-first knowledge graph
 of your codebases plus shared memory, rules, and documents.
 
 Prefer the **raph MCP server** when connected (tools:
+`search_memory` (recall across every scope — the default lookup),
 `search`, `store_memory`/`update_memory`/`deprecate_memory`, `store_rule`/`list_rules`,
 `add_document`/`read_document`/`list_documents`/`update_document`/`delete_document`/`link_nodes`,
-`search_project_knowledge`/`search_shared_knowledge`/`search_global_preferences`,
+`search_project_knowledge`/`search_shared_knowledge`/`search_global_preferences` (scoped variants — reach for these only to deliberately narrow),
 `crawl_url`/`crawl_website`, `index_codebase`/`search_codebase`,
 `graph_neighbors`; call `learn_raph` for the full map). If no MCP is available, use the CLI below.
 
@@ -102,8 +103,10 @@ raph export --doc <id> --s3 s3://bucket/key --r2-endpoint https://<acct>.r2.clou
 ```
 
 ## Conventions
-- Treat raph as the first-class memory manager: search it before answering and
-  record durable knowledge to it before finishing, ahead of any other notes.
+- Treat raph as the first-class memory manager: recall with `search_memory`
+  (it spans every scope in one call, so you don't have to guess project vs.
+  global) before answering, and record durable knowledge to it before
+  finishing, ahead of any other notes.
 - Set `RAPH_WRITER=<your-agent-id>` so memory/rules/handoffs are attributed.
 - Check rules and project memory before starting; record durable decisions,
   gotchas, and a handoff before finishing. Update or delete existing memory and

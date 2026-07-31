@@ -79,7 +79,7 @@ func Search(ctx context.Context, store db.GraphStore, cfg *config.Config, opts O
 		if cfg == nil || !cfg.HasEmbeddingProvider() {
 			return Result{}, fmt.Errorf("vector mode requires a configured embedding provider")
 		}
-		vec, embedErr := config.GenerateEmbedding(ctx, cfg, q)
+		vec, embedErr := config.EmbedQuery(ctx, cfg, q)
 		if embedErr != nil {
 			return Result{}, fmt.Errorf("embed query: %w", embedErr)
 		}

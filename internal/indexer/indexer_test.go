@@ -75,6 +75,7 @@ func (*indexCaptureStore) DeleteDocumentNode(context.Context, string) error     
 func (*indexCaptureStore) DeleteFileNodes(context.Context, string, string) error         { return nil }
 func (*indexCaptureStore) DeleteWorkspace(context.Context, string) error                 { return nil }
 func (*indexCaptureStore) ClearAll(context.Context) error                                { return nil }
+func (*indexCaptureStore) ListWorkspaces(context.Context) ([]db.Workspace, error)        { return nil, nil }
 func (*indexCaptureStore) Close() error                                                  { return nil }
 
 func TestSplitDocumentSections(t *testing.T) {

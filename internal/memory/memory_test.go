@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -91,6 +92,7 @@ func (*captureStore) DeleteDocumentNode(context.Context, string) error          
 func (*captureStore) DeleteFileNodes(context.Context, string, string) error         { return nil }
 func (*captureStore) DeleteWorkspace(context.Context, string) error                 { return nil }
 func (*captureStore) ClearAll(context.Context) error                                { return nil }
+func (*captureStore) ListWorkspaces(context.Context) ([]db.Workspace, error)        { return nil, nil }
 func (*captureStore) Close() error                                                  { return nil }
 
 func TestStoreGeneratesAndPersistsEmbedding(t *testing.T) {
@@ -132,6 +134,73 @@ func TestStoreGeneratesAndPersistsEmbedding(t *testing.T) {
 	}
 	if output.Record.ScopeType != "project" || output.Record.MemoryKey != "project-style" {
 		t.Fatalf("expected scoped record metadata, got %+v", output.Record)
+	}
+}
+
+func TestMergeMemoryMatchesUnionsAndDedupes(t *testing.T) {
+	sem := []db.MemoryRecord{{Node: db.Node{ID: "a"}}, {Node: db.Node{ID: "b"}}}
+	kw := []db.MemoryRecord{{Node: db.Node{ID: "b"}}, {Node: db.Node{ID: "c"}}}
+
+	out, mode := mergeMemoryMatches(sem, kw, 10)
+	got := []string{}
+	for _, r := range out {
+		got = append(got, r.Node.ID)
+	}
+	if strings.Join(got, ",") != "a,b,c" {
+		t.Fatalf("expected semantic order then keyword extras deduped, got %v", got)
+	}
+	if mode != "hybrid" {
+		t.Fatalf("both passes contributed, want hybrid mode, got %q", mode)
+	}
+
+	// The limit truncates the union, keeping semantic hits first.
+	capped, _ := mergeMemoryMatches(sem, kw, 2)
+	if len(capped) != 2 || capped[0].Node.ID != "a" || capped[1].Node.ID != "b" {
+		t.Fatalf("limit should keep the first two (semantic-first), got %+v", capped)
+	}
+
+	// Keyword-only still reports the keyword mode.
+	if _, mode := mergeMemoryMatches(nil, kw, 10); mode != "keyword" {
+		t.Fatalf("no semantic pass should be keyword mode, got %q", mode)
+	}
+}
+
+// TestSearchUnscopedSpansScopes is the regression for the "memory looks missing"
+// report: without a scope filter, Search must return memories from every scope,
+// while an explicit scope still narrows. cfg is nil so this exercises the
+// always-on keyword pass (no embedding provider).
+func TestSearchUnscopedSpansScopes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, scopeID := range []string{"p1", "p2"} {
+		if _, err := Store(ctx, store, nil, StoreInput{
+			ScopeType: "project", ScopeID: scopeID, KnowledgeType: "decision",
+			MemoryKey: "deploy-" + scopeID, Title: "Deploy " + scopeID,
+			Content: "we deploy through CI", Source: "user", WriterID: "agent",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, err := Search(ctx, store, nil, SearchInput{Query: "deploy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all.Matches) != 2 {
+		t.Fatalf("unscoped search should span both scope ids, got %d matches", len(all.Matches))
+	}
+
+	one, err := Search(ctx, store, nil, SearchInput{Query: "deploy", ScopeType: "project", ScopeID: "p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one.Matches) != 1 || one.Matches[0].ScopeID != "p1" {
+		t.Fatalf("explicit scope should still narrow to p1, got %+v", one.Matches)
 	}
 }
 

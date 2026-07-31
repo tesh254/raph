@@ -55,7 +55,14 @@ func resolveWorkspaceID(store db.GraphStore, cfg *config.Config, path string) (s
 }
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	// Install one signal-aware context at the root so Ctrl-C / SIGTERM cancels
+	// whatever command is running. Commands thread cmd.Context() into their
+	// long-running work (index, crawl, sync, serve) so an interrupt unwinds
+	// cleanly — flushing and closing the store — instead of hard-killing a
+	// mid-write process.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := newRootCmd().ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -163,6 +170,11 @@ func newSyncCmd() *cobra.Command {
 		Short: "Keep indexed repositories synchronized in the background",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
+			// A zero or negative interval would busy-spin the scanner; require a
+			// sane floor so a typo can't peg a core.
+			if interval < 100*time.Millisecond {
+				return fmt.Errorf("--interval must be at least 100ms, got %s", interval)
+			}
 			if worker {
 				verbose.Printf("starting sync worker in foreground mode interval=%s", interval)
 				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -205,7 +217,7 @@ func newSyncCmd() *cobra.Command {
 			}
 			if remove {
 				verbose.Printf("removing repository from sync path=%s keepData=%t", scanPath, keepData)
-				if err := syncer.Remove(context.Background(), scanPath, !keepData); err != nil {
+				if err := syncer.Remove(cmd.Context(), scanPath, !keepData); err != nil {
 					return err
 				}
 				fmt.Fprintf(out, "Stopped syncing %s (graph data removed=%t)\n", scanPath, !keepData)
@@ -229,7 +241,7 @@ func newSyncCmd() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(out, "Scanning and indexing files...\n")
-			stats, err := idx.Run(context.Background())
+			stats, err := idx.Run(cmd.Context())
 			_ = store.Close()
 			if err != nil {
 				return err
@@ -301,7 +313,7 @@ func newInitCmd() *cobra.Command {
 			}
 
 			fmt.Fprintf(out, "Scanning and indexing files...\n")
-			stats, err := idx.Run(context.Background())
+			stats, err := idx.Run(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -1193,17 +1205,40 @@ func newDocCmd() *cobra.Command {
 	return docCmd
 }
 
+// maxContentBytes caps how much document content raph reads from a file or
+// stdin, so a runaway pipe or an accidentally huge file can't exhaust memory.
+// 32 MiB is far above any real note, handoff, or document.
+const maxContentBytes = 32 << 20
+
+// readAllLimited reads r fully but refuses more than limit bytes, turning an
+// unbounded stdin/file into a clear error instead of an OOM.
+func readAllLimited(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("input exceeds the %d-byte limit", limit)
+	}
+	return data, nil
+}
+
 // readContent resolves document content from --file, stdin ('-'), or args.
 func readContent(cmd *cobra.Command, file string, args []string) (string, error) {
 	if strings.TrimSpace(file) != "" {
-		data, err := os.ReadFile(file)
+		f, err := os.Open(file)
+		if err != nil {
+			return "", fmt.Errorf("read file: %w", err)
+		}
+		defer f.Close()
+		data, err := readAllLimited(f, maxContentBytes)
 		if err != nil {
 			return "", fmt.Errorf("read file: %w", err)
 		}
 		return string(data), nil
 	}
 	if len(args) == 1 && args[0] == "-" {
-		data, err := io.ReadAll(cmd.InOrStdin())
+		data, err := readAllLimited(cmd.InOrStdin(), maxContentBytes)
 		if err != nil {
 			return "", fmt.Errorf("read stdin: %w", err)
 		}
@@ -1397,13 +1432,19 @@ func brainScopeTypes(scope string) ([]string, error) {
 	}
 }
 
+// maxImportBytes caps a brain bundle read from stdin, a file, or a URL. Bundles
+// are larger than notes, so this ceiling is higher than maxContentBytes while
+// still bounding memory against a hostile or corrupt source.
+const maxImportBytes = 64 << 20
+
 // fetchImportSource resolves an import argument to raw bytes: `-` reads stdin,
-// an existing path reads the file, and an http(s) URL is fetched directly.
+// an existing path reads the file, and an http(s) URL is fetched directly. Every
+// path is bounded by maxImportBytes so an unbounded source can't OOM the CLI.
 func fetchImportSource(ctx context.Context, source string, stdin io.Reader) ([]byte, error) {
 	source = strings.TrimSpace(source)
 	switch {
 	case source == "-":
-		return io.ReadAll(stdin)
+		return readAllLimited(stdin, maxImportBytes)
 	case strings.HasPrefix(source, "http://"), strings.HasPrefix(source, "https://"):
 		if strings.HasPrefix(source, "http://") {
 			fmt.Fprintf(os.Stderr, "raph: warning: importing over plain http is susceptible to tampering; prefer https for %s\n", source)
@@ -1421,10 +1462,15 @@ func fetchImportSource(ctx context.Context, source string, stdin io.Reader) ([]b
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("fetch %s: status %s", source, resp.Status)
 		}
-		return io.ReadAll(io.LimitReader(resp.Body, 64<<20)) // 64MiB ceiling
+		return readAllLimited(resp.Body, maxImportBytes)
 	default:
 		if _, statErr := os.Stat(source); statErr == nil {
-			return os.ReadFile(source)
+			f, err := os.Open(source)
+			if err != nil {
+				return nil, err
+			}
+			defer f.Close()
+			return readAllLimited(f, maxImportBytes)
 		}
 		return nil, fmt.Errorf("%q is not a readable file, http(s) URL, or `-` (stdin)", source)
 	}
@@ -1468,8 +1514,7 @@ func newCrawlCmd() *cobra.Command {
 			}
 
 			fmt.Fprintf(out, "Crawling and indexing pages...\n")
-			ctx := context.Background()
-			if err := docCrawler.Run(ctx); err != nil {
+			if err := docCrawler.Run(cmd.Context()); err != nil {
 				return err
 			}
 
@@ -1539,6 +1584,9 @@ func newStudioCmd() *cobra.Command {
 		Short: "Launch the local graph explorer UI",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("--port must be between 1 and 65535, got %d", port)
+			}
 			fmt.Fprintf(out, "Loading configuration...\n")
 			cfg, err := config.LoadConfigIfPresent()
 			if err != nil {
@@ -1594,7 +1642,7 @@ func newClearCmd() *cobra.Command {
 			defer store.Close()
 
 			verbose.Printf("clearing all nodes, edges, memory records, and web corpora")
-			if err := store.ClearAll(context.Background()); err != nil {
+			if err := store.ClearAll(cmd.Context()); err != nil {
 				return err
 			}
 
@@ -1654,7 +1702,7 @@ func newConfigCmd() *cobra.Command {
 			cfg, err := config.LoadConfig()
 			if err != nil {
 				if errors.Is(err, config.ErrConfigNotFound) {
-					return err
+					return fmt.Errorf("no config found — run `raph config init` to create one: %w", err)
 				}
 				return err
 			}

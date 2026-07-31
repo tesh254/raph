@@ -126,6 +126,7 @@ type GraphStore interface {
 	GetNodeByID(ctx context.Context, id string) (Node, error)
 	GetNeighbors(ctx context.Context, nodeID string) ([]Node, []Edge, error)
 	GetAllGraphElements(ctx context.Context) ([]Node, []Edge, error)
+	ListWorkspaces(ctx context.Context) ([]Workspace, error)
 	UpsertMemoryRecord(ctx context.Context, record MemoryRecord) error
 	GetMemoryRecord(ctx context.Context, nodeID string) (MemoryRecord, error)
 	GetMemoryRecordByKey(ctx context.Context, scopeType string, scopeID string, knowledgeType string, memoryKey string) (MemoryRecord, error)
@@ -676,10 +677,14 @@ func (s *LibSQLStore) vectorSearch(ctx context.Context, workspace string, queryV
 		return nil, nil
 	}
 
-	// Only scan rows that actually carry an embedding — skipping the (often
-	// numerous) embedding-less code nodes at the SQL layer avoids loading their
-	// content and attempting to decode an empty vector for every query.
-	query := `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), embedding_json FROM nodes WHERE embedding_json IS NOT NULL AND embedding_json <> '' AND embedding_json <> '[]'`
+	// Rank in two passes. Pass one scans only id + embedding for every embedded
+	// row (skipping the often-numerous embedding-less code nodes at the SQL
+	// layer) and scores them; pass two hydrates just the top `limit` nodes. This
+	// keeps the (potentially large) content column out of the ranking pass, so a
+	// search over a big corpus no longer pulls every embedded node's full text
+	// into memory only to discard all but a handful. The result set — the same
+	// nodes, in the same order — is unchanged.
+	query := `SELECT id, embedding_json FROM nodes WHERE embedding_json IS NOT NULL AND embedding_json <> '' AND embedding_json <> '[]'`
 	var rows *sql.Rows
 	var err error
 	if workspace == "" {
@@ -692,55 +697,102 @@ func (s *LibSQLStore) vectorSearch(ctx context.Context, workspace string, queryV
 	}
 	defer rows.Close()
 
-	type rankedNode struct {
-		node  Node
+	type ranked struct {
+		id    string
 		score float64
 	}
 
-	var ranked []rankedNode
+	var scored []ranked
+	var embedding []float32
+	for rows.Next() {
+		var id, embeddingJSON string
+		if err := rows.Scan(&id, &embeddingJSON); err != nil {
+			return nil, err
+		}
+		// Reuse the backing array across rows: json.Unmarshal into a non-nil
+		// slice overwrites it, so only rows with a longer vector reallocate.
+		embedding = embedding[:0]
+		if err := json.Unmarshal([]byte(embeddingJSON), &embedding); err != nil {
+			continue
+		}
+		if len(embedding) == 0 {
+			continue
+		}
+		score := cosineSimilarity(queryVector, embedding)
+		if math.IsNaN(score) || score <= 0 {
+			continue
+		}
+		scored = append(scored, ranked{id: id, score: score})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score == scored[j].score {
+			return scored[i].id < scored[j].id
+		}
+		return scored[i].score > scored[j].score
+	})
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+	if len(scored) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]string, len(scored))
+	for i, r := range scored {
+		ids[i] = r.id
+	}
+	hydrated, err := s.hydrateVectorNodes(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	// Reassemble in ranked order; a node could vanish between passes (concurrent
+	// delete), so skip any id the hydrate pass didn't return.
+	results := make([]Node, 0, len(scored))
+	for _, r := range scored {
+		if n, ok := hydrated[r.id]; ok {
+			results = append(results, n)
+		}
+	}
+	return results, nil
+}
+
+// hydrateVectorNodes loads the display columns for the given node ids (the top
+// vector-search hits). It mirrors the column set the single-pass scan used to
+// return — id/workspace/domain/type/name/content/url/path plus embedding
+// length — so callers see exactly the same fields.
+func (s *LibSQLStore) hydrateVectorNodes(ctx context.Context, ids []string) (map[string]Node, error) {
+	if len(ids) == 0 {
+		return map[string]Node{}, nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), COALESCE(embedding_json, '[]') FROM nodes WHERE id IN (`+placeholders+`)`,
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]Node, len(ids))
 	for rows.Next() {
 		var n Node
 		var embeddingJSON string
 		if err := rows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &embeddingJSON); err != nil {
 			return nil, err
 		}
-
-		if err := json.Unmarshal([]byte(embeddingJSON), &n.Embedding); err != nil {
-			continue
-		}
-		if len(n.Embedding) == 0 {
-			continue
-		}
-		n.EmbeddingLength = len(n.Embedding)
-
-		score := cosineSimilarity(queryVector, n.Embedding)
-		if math.IsNaN(score) || score <= 0 {
-			continue
-		}
-		n.Embedding = nil // scored — drop the vector so it doesn't sit in memory
-		ranked = append(ranked, rankedNode{node: n, score: score})
+		n.EmbeddingLength = embeddingLength(embeddingJSON)
+		out[n.ID] = n
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	sort.Slice(ranked, func(i, j int) bool {
-		if ranked[i].score == ranked[j].score {
-			return ranked[i].node.ID < ranked[j].node.ID
-		}
-		return ranked[i].score > ranked[j].score
-	})
-
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
-	}
-
-	results := make([]Node, 0, len(ranked))
-	for _, item := range ranked {
-		item.node.Embedding = nil
-		results = append(results, item.node)
-	}
-	return results, nil
+	return out, rows.Err()
 }
 
 func (s *LibSQLStore) KeywordSearch(ctx context.Context, query string, limit int) ([]Node, error) {
@@ -1228,6 +1280,93 @@ func (s *LibSQLStore) GraphStats(ctx context.Context) (GraphStats, error) {
 		return GraphStats{}, err
 	}
 	return stats, nil
+}
+
+// Workspace summarizes one indexed codebase: the set of nodes sharing a
+// workspace id that the indexer tagged with a filesystem root. Memory- and
+// crawl-only workspaces (which never carry `file` nodes) are excluded, so this
+// lists exactly the repositories that have been indexed — the studio "Repos"
+// view is driven by it.
+type Workspace struct {
+	Workspace   string         `json:"workspace"`
+	Root        string         `json:"root"`
+	Name        string         `json:"name"`
+	Nodes       int            `json:"nodes"`
+	Files       int            `json:"files"`
+	ByDomain    map[string]int `json:"by_domain"`
+	LastIndexed string         `json:"last_indexed,omitempty"`
+}
+
+// ListWorkspaces returns every indexed repository, newest first. A repo is a
+// workspace with at least one `file` node — that's what the indexer writes for
+// a codebase root (it also stamps the absolute root onto each node's `path`),
+// which cleanly separates real repos from workspaces that only hold memories or
+// crawled docs. Two grouped queries (both served by idx_nodes_workspace) keep it
+// cheap even when the studio polls it, so it never materializes node rows.
+func (s *LibSQLStore) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT workspace,
+		       COALESCE(MAX(NULLIF(path, '')), '') AS root,
+		       COUNT(*) AS nodes,
+		       SUM(CASE WHEN type = 'file' THEN 1 ELSE 0 END) AS files,
+		       COALESCE(MAX(NULLIF(updated_at, '')), '') AS last_indexed
+		FROM nodes
+		WHERE TRIM(workspace) <> ''
+		GROUP BY workspace
+		HAVING SUM(CASE WHEN type = 'file' THEN 1 ELSE 0 END) > 0
+		ORDER BY last_indexed DESC, root ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	workspaces := []Workspace{}
+	byID := map[string]*Workspace{}
+	for rows.Next() {
+		var w Workspace
+		if err := rows.Scan(&w.Workspace, &w.Root, &w.Nodes, &w.Files, &w.LastIndexed); err != nil {
+			return nil, err
+		}
+		w.ByDomain = map[string]int{}
+		if w.Root != "" {
+			w.Name = filepath.Base(w.Root)
+		} else {
+			w.Name = w.Workspace
+		}
+		workspaces = append(workspaces, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Index by workspace id so the per-domain pass can attach counts. Pointers
+	// into the slice let us mutate in place without a second copy.
+	for i := range workspaces {
+		byID[workspaces[i].Workspace] = &workspaces[i]
+	}
+
+	domainRows, err := s.db.QueryContext(ctx, `
+		SELECT workspace, domain, COUNT(*)
+		FROM nodes
+		WHERE TRIM(workspace) <> ''
+		GROUP BY workspace, domain`)
+	if err != nil {
+		return nil, err
+	}
+	defer domainRows.Close()
+	for domainRows.Next() {
+		var ws, domain string
+		var n int
+		if err := domainRows.Scan(&ws, &domain, &n); err != nil {
+			return nil, err
+		}
+		if w := byID[ws]; w != nil && strings.TrimSpace(domain) != "" {
+			w.ByDomain[domain] = n
+		}
+	}
+	if err := domainRows.Err(); err != nil {
+		return nil, err
+	}
+	return workspaces, nil
 }
 
 func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, error) {

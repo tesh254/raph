@@ -83,6 +83,14 @@ type SearchKnowledgeArgs struct {
 	Limit         int    `json:"limit,omitempty" jsonschema:"Maximum result count"`
 }
 
+type SearchMemoryArgs struct {
+	Query         string `json:"query" jsonschema:"What to recall — matched by meaning across all your memories"`
+	KnowledgeType string `json:"knowledge_type,omitempty" jsonschema:"Optional: narrow to one knowledge type (decision, preference, incident, workflow, ...)"`
+	ScopeType     string `json:"scope_type,omitempty" jsonschema:"Optional: narrow to a scope (project, shared, global). Omit to search every scope."`
+	ScopeID       string `json:"scope_id,omitempty" jsonschema:"Optional: narrow to a specific scope id, used with scope_type"`
+	Limit         int    `json:"limit,omitempty" jsonschema:"Maximum result count"`
+}
+
 type GetMemoryHistoryArgs struct {
 	NodeID string `json:"node_id" jsonschema:"The memory node ID whose revision history should be returned"`
 }
@@ -271,6 +279,12 @@ type ScopedMemorySearchOutput struct {
 	Matches   []db.MemoryRecord `json:"matches"`
 }
 
+type MemorySearchOutput struct {
+	Query   string            `json:"query"`
+	Mode    string            `json:"mode"`
+	Matches []db.MemoryRecord `json:"matches"`
+}
+
 type MemoryHistoryOutput struct {
 	NodeID    string              `json:"node_id"`
 	Revisions []db.MemoryRevision `json:"revisions"`
@@ -298,7 +312,7 @@ type CrossCorpusNeighborOutput struct {
 const mcpInstructions = `raph is your first-class memory manager — a shared knowledge graph for durable agent memory, rules, docs/handoffs, and code search. Reach for raph before any other note-keeping or ad-hoc search; use other tools only for what raph doesn't cover.
 
 Memory-first workflow:
-- Before answering, search existing knowledge (search_project_knowledge, search_shared_knowledge, search_global_preferences).
+- Before answering, recall what you already know with search_memory — it searches ALL your memories (project, shared, and global) in one call, so you don't have to guess a scope. Reach for the scoped tools (search_project_knowledge, search_shared_knowledge, search_global_preferences) only when you deliberately want to restrict the lookup.
 - Reuse what you find. If a memory is out of date, UPDATE it instead of storing a duplicate: call update_memory with the node_id from the search result (its immutable scope/type/key are resolved for you). Use store_memory only for genuinely new facts.
 - Record durable decisions, setup facts, and gotchas before finishing.
 - get_memory_history shows a memory's revisions; deprecate_memory retires one that no longer applies.
@@ -351,7 +365,7 @@ type learnRaphTool struct {
 }
 
 var learnRaphWorkflow = []string{
-	"Search existing knowledge before answering (search_project_knowledge, search_shared_knowledge, search_global_preferences).",
+	"Recall what you know before answering with search_memory (searches every scope at once); use the scoped search_* tools only to deliberately narrow.",
 	"Reuse what you find; if a memory is out of date, update_memory in place instead of storing a duplicate.",
 	"Record durable decisions, setup facts, and gotchas before finishing (store_memory / store_rule).",
 	"Index a repo (index_codebase) when code context matters; crawl_website for external docs.",
@@ -372,9 +386,10 @@ var learnRaphGroups = []learnRaphGroup{
 		{"graph_neighbors_cross_corpus", "Semantic expansion into other corpora/workspaces."},
 	}},
 	{Title: "Memory (durable knowledge)", Tools: []learnRaphTool{
-		{"search_project_knowledge", "Search this project's active memories — do this first."},
-		{"search_shared_knowledge", "Search a shared scope's memories."},
-		{"search_global_preferences", "Search global preference memories."},
+		{"search_memory", "Recall across ALL scopes at once — the default memory lookup."},
+		{"search_project_knowledge", "Narrow a recall to this project's memories."},
+		{"search_shared_knowledge", "Narrow a recall to a shared scope's memories."},
+		{"search_global_preferences", "Narrow a recall to global preference memories."},
 		{"store_memory", "Create a NEW memory — only for genuinely new facts."},
 		{"update_memory", "Update an existing memory in place (by node_id or coordinates) instead of duplicating."},
 		{"deprecate_memory", "Retire a memory that no longer applies."},
@@ -406,8 +421,8 @@ var learnRaphGroups = []learnRaphGroup{
 // re-storing.
 var learnRaphExamples = []learnRaphExample{
 	{
-		Goal: "Recall project knowledge (semantic — searches by meaning, with keyword fallback)",
-		Call: `search_project_knowledge {"query": "how do we deploy"}`,
+		Goal: "Recall anything you know (searches every scope by meaning, merged with keyword matches)",
+		Call: `search_memory {"query": "how do we deploy"}`,
 	},
 	{
 		Goal: "Update an existing memory in place using the node_id from a search result",
@@ -530,7 +545,7 @@ func (m *MCPServerWrapper) registerTools() {
 			return nil, BestVectorMatchOutput{}, fmt.Errorf("best_vector_match requires a configured embedding provider")
 		}
 
-		vec, err := config.GenerateEmbedding(ctx, m.config, query)
+		vec, err := config.EmbedQuery(ctx, m.config, query)
 		if err != nil {
 			return nil, BestVectorMatchOutput{}, fmt.Errorf("generate query embedding: %w", err)
 		}
@@ -666,8 +681,27 @@ func (m *MCPServerWrapper) registerTools() {
 	})
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
+		Name:        "search_memory",
+		Description: "Recall durable memories. Searches ALL scopes (project, shared, global) at once, ranked by relevance — the default way to look something up. You rarely need a scope filter; omit scope_type to search everything. Each match reports its own scope_type/scope_id so you can see where it lives.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchMemoryArgs) (*mcpsdk.CallToolResult, MemorySearchOutput, error) {
+		output, err := memory.Search(ctx, m.store, m.config, memory.SearchInput{
+			Query:         args.Query,
+			ScopeType:     args.ScopeType,
+			ScopeID:       args.ScopeID,
+			KnowledgeType: args.KnowledgeType,
+			Limit:         searchLimit(args.Limit),
+		})
+		if err != nil {
+			return nil, MemorySearchOutput{}, err
+		}
+		m.recordSearchHits(ctx, args.Query, memoryNodeIDs(output.Matches))
+		out := MemorySearchOutput{Query: strings.TrimSpace(args.Query), Mode: output.Mode, Matches: output.Matches}
+		return textResult(renderJSON(out)), out, nil
+	})
+
+	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
 		Name:        "search_project_knowledge",
-		Description: "Searches active project-scoped knowledge for the current workspace's project identity.",
+		Description: "Searches active project-scoped knowledge for the current workspace's project identity. Use search_memory instead unless you specifically need to restrict to this project.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchKnowledgeArgs) (*mcpsdk.CallToolResult, ScopedMemorySearchOutput, error) {
 		scopeID, err := m.resolveScopeID("project", "")
 		if err != nil {
@@ -1074,7 +1108,7 @@ func (m *MCPServerWrapper) hybridSearch(ctx context.Context, query string, limit
 
 	if m.config != nil && m.config.HasEmbeddingProvider() {
 		verbose.Printf("generating query embedding for semantic search")
-		vec, err := config.GenerateEmbedding(ctx, m.config, query)
+		vec, err := config.EmbedQuery(ctx, m.config, query)
 		if err == nil && len(vec) > 0 {
 			nodes, searchErr := m.store.VectorSearch(ctx, vec, limit)
 			if searchErr == nil && len(nodes) > 0 {
@@ -1098,7 +1132,7 @@ func (m *MCPServerWrapper) hybridSearch(ctx context.Context, query string, limit
 
 func (m *MCPServerWrapper) searchWorkspace(ctx context.Context, workspace string, query string, limit int) (string, []db.Node, error) {
 	if m.config != nil && m.config.HasEmbeddingProvider() {
-		vec, err := config.GenerateEmbedding(ctx, m.config, query)
+		vec, err := config.EmbedQuery(ctx, m.config, query)
 		if err == nil && len(vec) > 0 {
 			nodes, searchErr := m.store.VectorSearchWorkspace(ctx, workspace, vec, limit)
 			if searchErr == nil && len(nodes) > 0 {
