@@ -1,0 +1,29 @@
+internal/db/libsql.go
+  s_a57d653f4a07a1::t_93c1e2f29ec1cc 1304-1308,1311-1324,1326-1348,1351-1357,1359-1368,1370-1372
+internal/config/embed_cache.go
+  s_a57d653f4a07a1::t_12c476ed19f3a1 76-78
+  s_a57d653f4a07a1::t_79357b87d533c2 102,105,107
+internal/memory/memory.go
+  s_a57d653f4a07a1::t_69b4e11ce514f3 241-246,249-274,276-303,308,310,312-313
+internal/mcp/server.go
+  s_a57d653f4a07a1::t_4f04e4607819f6 687-691
+internal/memory/memory_test.go
+  s_a57d653f4a07a1::t_0a6ac09bec55eb 140-147,153-154,166-184
+  s_a57d653f4a07a1::t_420ed0e070f93e 185
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.19",
+  "base_commit_sha": "7287b25c395a4ee78e8d4cd34f7039d7b13432a3",
+  "prompts": {},
+  "sessions": {
+    "s_a57d653f4a07a1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "428b4258-1ebc-4b78-b6d9-14553fd3a686",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
