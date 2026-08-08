@@ -1,0 +1,31 @@
+docs/studio.html
+  s_b616119b05f3cd::t_517c955aae80d0 100
+  s_b616119b05f3cd::t_3192b513faeb06 55-58,79-99,101-148,156
+  s_b616119b05f3cd::t_ed5d967bfb77fc 33
+internal/studio/server.go
+  s_b616119b05f3cd::t_34dc5cd597c22c 121,953-969
+  s_b616119b05f3cd::t_d8c65b7733004f 970-971
+internal/db/libsql.go
+  s_b616119b05f3cd::t_906bee5e49431a 2654-2839
+internal/studio/template.go
+  s_b616119b05f3cd::t_b5fe62fc9256e2 362,365-402,404-416,764,841-848,926-927,1236,1238
+  s_b616119b05f3cd::t_dd54d817fbab25 2083-2135
+internal/studio/server_test.go
+  s_b616119b05f3cd::t_01ee460e8fa3a1 15-17,474-602
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "18d35fca6982db154a46c5da54911bd26c347169",
+  "prompts": {},
+  "sessions": {
+    "s_b616119b05f3cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "88cc8262-7d36-4d42-9a1c-6e2b6c7b31d9",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
