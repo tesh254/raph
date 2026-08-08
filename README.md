@@ -115,7 +115,11 @@ For repo handoff between agents, use project scope and a stable `memory_key`:
 }
 ```
 
-When `scope_type` is `project`, agents may omit `scope_id`; raph resolves it from the current workspace and `project.identity_override` when configured. Agents should call `search_project_knowledge` at the start of work and store or update durable decisions, setup facts, gotchas, commands, and constraints before finishing. Use keys such as `repo/setup`, `release/signing`, `ci/known-issues`, and `agent/constraints`.
+When `scope_type` is `project`, agents may omit `scope_id` and pass `working_directory` instead — the absolute path they are working in. raph resolves it to the enclosing git worktree root (following symlinks) and derives a stable `project:<sha1>` identity, or uses `project.identity_override` when configured. Passing the directory matters: the MCP server's own working directory is wherever the agent launched it, so inferring a project from it files memories under a project nobody will look in.
+
+Recall is a single tool. `search_memory` takes a query and an optional `working_directory`, ranks **every** memory by meaning — this project's, other projects', shared, and global — and boosts the resolved project's memories rather than filtering to them. There is no scope filter to get wrong, and a global preference is never hidden by a project lookup. Agents should call it at the start of work and store or update durable decisions, setup facts, gotchas, commands, and constraints before finishing. Use keys such as `repo/setup`, `release/signing`, `ci/known-issues`, and `agent/constraints`.
+
+Indexed repositories also get a structural spine in the graph: a `project` node contains one `workspace` node per indexed root, which contains `directory` nodes mirroring the tree, which contain the `file` nodes. Directories are created only where indexed files live, so empty and ignored directories never appear. Walking these `CONTAINS` edges with `graph_neighbors` lets an agent navigate from a project down to a path — or from a file back up to the project that owns it.
 
 Every node has a stable unique `id`. Nodes indexed from a local repository also expose the absolute codebase `path`, allowing agents to prefer results from the repository they are currently working in. Re-index existing repositories once to populate `path` on nodes created before this field was added.
 

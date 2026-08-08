@@ -11,10 +11,9 @@ tools only for what raph doesn't cover. It keeps a local-first knowledge graph
 of your codebases plus shared memory, rules, and documents.
 
 Prefer the **raph MCP server** when connected (tools:
-`search_memory` (recall across every scope — the default lookup),
+`search_memory` (THE recall tool — one query ranks every memory you have; pass `working_directory`),
 `search`, `store_memory`/`update_memory`/`deprecate_memory`, `store_rule`/`list_rules`,
 `add_document`/`read_document`/`list_documents`/`update_document`/`delete_document`/`link_nodes`,
-`search_project_knowledge`/`search_shared_knowledge`/`search_global_preferences` (scoped variants — reach for these only to deliberately narrow),
 `crawl_url`/`crawl_website`, `index_codebase`/`search_codebase`,
 `graph_neighbors`; call `learn_raph` for the full map). If no MCP is available, use the CLI below.
 

@@ -186,10 +186,10 @@ func (s *protocolStore) DeleteDocumentNode(_ context.Context, nodeID string) err
 	return nil
 }
 func (*protocolStore) ListWorkspaces(context.Context) ([]db.Workspace, error) { return nil, nil }
-func (*protocolStore) DeleteFileNodes(context.Context, string, string) error { return nil }
-func (*protocolStore) DeleteWorkspace(context.Context, string) error         { return nil }
-func (*protocolStore) ClearAll(context.Context) error                        { return nil }
-func (*protocolStore) Close() error                                          { return nil }
+func (*protocolStore) DeleteFileNodes(context.Context, string, string) error  { return nil }
+func (*protocolStore) DeleteWorkspace(context.Context, string) error          { return nil }
+func (*protocolStore) ClearAll(context.Context) error                         { return nil }
+func (*protocolStore) Close() error                                           { return nil }
 
 func TestMCPProtocolListsAndCallsMemoryTools(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -216,7 +216,7 @@ func TestMCPProtocolListsAndCallsMemoryTools(t *testing.T) {
 	for _, tool := range tools.Tools {
 		names[tool.Name] = true
 	}
-	for _, name := range []string{"hybrid_semantic_search", "multi_query_search", "best_vector_match", "graph_neighbors", "graph_neighbors_cross_corpus", "store_memory", "update_memory", "deprecate_memory", "search_project_knowledge", "search_shared_knowledge", "search_global_preferences", "get_memory_history", "crawl_url", "crawl_website", "index_codebase", "search_codebase"} {
+	for _, name := range []string{"hybrid_semantic_search", "multi_query_search", "best_vector_match", "graph_neighbors", "graph_neighbors_cross_corpus", "store_memory", "update_memory", "deprecate_memory", "search_memory", "get_memory_history", "crawl_url", "crawl_website", "index_codebase", "search_codebase"} {
 		if !names[name] {
 			t.Fatalf("expected MCP tool %q, got %v", name, names)
 		}
@@ -711,4 +711,76 @@ func TestCompactExcerptBoundsReturnedContent(t *testing.T) {
 	if compactResultLimit(100) != 10 || compactExcerptLimit(10_000) != 2_000 {
 		t.Fatal("expected compact response limits to be capped")
 	}
+}
+
+// The scoped recall tools were removed deliberately: agents guessed a scope_id
+// that matched nothing and concluded the memory did not exist. If one is ever
+// reintroduced, that failure mode comes back with it.
+func TestScopedRecallToolsAreNotRegistered(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wrapper := NewMCPServerWrapper(newProtocolStore(), nil)
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	go func() { _ = wrapper.server.Run(ctx, serverTransport) }()
+
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "raph-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools.Tools {
+		switch tool.Name {
+		case "search_project_knowledge", "search_shared_knowledge", "search_global_preferences":
+			t.Fatalf("scoped recall tool %q is registered again", tool.Name)
+		}
+	}
+}
+
+// search_memory must not expose scope filtering: the schema is what stops an
+// agent from narrowing a recall to a scope id it invented.
+func TestSearchMemorySchemaHasNoScopeFilter(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wrapper := NewMCPServerWrapper(newProtocolStore(), nil)
+	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
+	go func() { _ = wrapper.server.Run(ctx, serverTransport) }()
+
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "raph-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools.Tools {
+		if tool.Name != "search_memory" {
+			continue
+		}
+		schema, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, banned := range []string{"scope_type", "scope_id"} {
+			if strings.Contains(string(schema), banned) {
+				t.Fatalf("search_memory schema still exposes %q: %s", banned, schema)
+			}
+		}
+		if !strings.Contains(string(schema), "working_directory") {
+			t.Fatalf("search_memory schema is missing working_directory: %s", schema)
+		}
+		return
+	}
+	t.Fatal("search_memory tool not registered")
 }

@@ -118,6 +118,11 @@ func TestIndexedNodesCarryAbsoluteCodebasePath(t *testing.T) {
 			t.Fatalf("duplicate node ID %q", node.ID)
 		}
 		ids[node.ID] = struct{}{}
+		if node.Type == TypeProject {
+			// The project node describes the project, which may span several
+			// indexed roots, so it carries the resolved project root instead.
+			continue
+		}
 		if node.Path != root {
 			t.Fatalf("expected codebase path %q, got %+v", root, node)
 		}

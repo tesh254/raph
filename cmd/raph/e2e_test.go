@@ -205,22 +205,27 @@ func TestE2EHandshakeToolCallAndPersistence(t *testing.T) {
 	}
 
 	names := toolNames(server.call("tools/list", nil, 10*time.Second))
-	for _, name := range []string{"store_memory", "search_shared_knowledge", "hybrid_semantic_search", "list_rules"} {
+	for _, name := range []string{"store_memory", "search_memory", "hybrid_semantic_search", "list_rules"} {
 		if !names[name] {
 			t.Fatalf("expected tool %q in listing, got %v", name, names)
 		}
 	}
 
+	// The agent's project, which is deliberately NOT the directory this server
+	// process runs in — the case that used to file memories somewhere the agent
+	// could never look.
+	workdir := t.TempDir()
+
 	// First tool call opens ~/.raph/data/brain.db lazily and runs migrations.
 	result := server.callTool("store_memory", map[string]any{
-		"scope_type":     "shared",
-		"scope_id":       "e2e-team",
-		"knowledge_type": "decision",
-		"memory_key":     "opencode-timeout",
-		"title":          "opencode needs a 30s MCP timeout",
-		"content":        "raph start migrations can exceed opencode's 5s default handshake window.",
-		"source":         "user",
-		"writer_id":      "agent:e2e",
+		"scope_type":        "project",
+		"working_directory": workdir,
+		"knowledge_type":    "decision",
+		"memory_key":        "opencode-timeout",
+		"title":             "opencode needs a 30s MCP timeout",
+		"content":           "raph start migrations can exceed opencode's 5s default handshake window.",
+		"source":            "user",
+		"writer_id":         "agent:e2e",
 	}, 30*time.Second)
 	if isError, _ := result["isError"].(bool); isError {
 		t.Fatalf("store_memory failed: %v", result)
@@ -230,20 +235,33 @@ func TestE2EHandshakeToolCallAndPersistence(t *testing.T) {
 	}
 
 	// A fresh process must see the stored memory: proves it was persisted, not
-	// held in process state.
+	// held in process state, and that a write keyed off the agent's working
+	// directory is recallable from that same directory.
 	restarted := startServer(t, home)
 	restarted.handshake(10 * time.Second)
-	// The knowledge query is a literal substring match over title/content.
-	result = restarted.callTool("search_shared_knowledge", map[string]any{
-		"query":    "handshake window",
-		"scope_id": "e2e-team",
+	result = restarted.callTool("search_memory", map[string]any{
+		"query":             "handshake window",
+		"working_directory": workdir,
 	}, 30*time.Second)
 	if isError, _ := result["isError"].(bool); isError {
-		t.Fatalf("search_shared_knowledge failed: %v", result)
+		t.Fatalf("search_memory failed: %v", result)
 	}
 	body, _ := json.Marshal(result)
 	if !strings.Contains(string(body), "opencode-timeout") {
 		t.Fatalf("expected stored memory to survive a restart, got %s", body)
+	}
+
+	// Recall must not depend on naming the project: the same query with no
+	// working directory still finds it, just without the ranking boost.
+	result = restarted.callTool("search_memory", map[string]any{
+		"query": "handshake window",
+	}, 30*time.Second)
+	if isError, _ := result["isError"].(bool); isError {
+		t.Fatalf("unscoped search_memory failed: %v", result)
+	}
+	body, _ = json.Marshal(result)
+	if !strings.Contains(string(body), "opencode-timeout") {
+		t.Fatalf("expected recall without a working directory to still match, got %s", body)
 	}
 }
 

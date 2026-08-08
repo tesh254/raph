@@ -1345,6 +1345,74 @@ type Workspace struct {
 	LastIndexed string         `json:"last_indexed,omitempty"`
 }
 
+// memoryTermMatch tests one term against everything a memory is searchable by.
+// Its four placeholders are filled by likeArgs.
+const memoryTermMatch = `(LOWER(n.name) LIKE ? OR LOWER(n.content) LIKE ? OR LOWER(mr.display_tags_json) LIKE ? OR LOWER(mr.normalized_tags_json) LIKE ?)`
+
+func likeArgs(term string) []any {
+	like := "%" + term + "%"
+	return []any{like, like, like, like}
+}
+
+// memoryQueryStopwords are function words that appear in almost any phrasing of
+// a question. Matching on them would make every memory a hit and let ranking be
+// decided by whichever record happened to contain "the". Content words are
+// deliberately absent: only words that carry no topic are listed.
+var memoryQueryStopwords = map[string]bool{
+	"the": true, "and": true, "for": true, "are": true, "was": true, "were": true,
+	"what": true, "which": true, "that": true, "this": true, "with": true,
+	"from": true, "have": true, "has": true, "had": true, "how": true, "why": true,
+	"when": true, "where": true, "does": true, "did": true, "you": true,
+	"your": true, "our": true, "about": true, "into": true, "can": true,
+	"all": true, "any": true, "its": true, "there": true, "then": true,
+	"them": true, "they": true, "been": true, "being": true, "some": true,
+}
+
+// memorySearchTerms splits a free-text query into the terms the keyword pass
+// matches on: lowercase, punctuation-free, at least three characters, and not a
+// stopword. A query made entirely of stopwords keeps them rather than matching
+// nothing at all.
+func memorySearchTerms(query string) []string {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return nil
+	}
+
+	fields := strings.FieldsFunc(query, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-')
+	})
+
+	seen := make(map[string]bool, len(fields))
+	terms := make([]string, 0, len(fields))
+	fallback := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if len(field) < 3 || seen[field] {
+			continue
+		}
+		seen[field] = true
+		fallback = append(fallback, field)
+		if memoryQueryStopwords[field] {
+			continue
+		}
+		terms = append(terms, field)
+	}
+	if len(terms) == 0 {
+		return fallback
+	}
+	// Bound the term count so a pasted paragraph can't build an enormous query.
+	if len(terms) > 12 {
+		terms = terms[:12]
+	}
+	return terms
+}
+
+// structuralTypeList is the SQL literal list of node types that hold the
+// project -> workspace -> directory spine together (see internal/indexer).
+// Repository statistics exclude them: they describe a repo's shape, not the
+// content indexed from it, so counting them would inflate every node total and
+// add a phantom "structure" domain to the breakdown.
+const structuralTypeList = `'project', 'workspace', 'directory'`
+
 // ListWorkspaces returns every indexed repository, newest first. A repo is a
 // workspace with at least one `file` node — that's what the indexer writes for
 // a codebase root (it also stamps the absolute root onto each node's `path`),
@@ -1365,7 +1433,7 @@ func (s *LibSQLStore) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 			       SUM(CASE WHEN type = 'file' THEN 1 ELSE 0 END) AS files,
 			       COALESCE(MAX(NULLIF(updated_at, '')), '') AS last_indexed
 			FROM nodes
-			WHERE TRIM(workspace) <> ''
+			WHERE TRIM(workspace) <> '' AND type NOT IN (`+structuralTypeList+`)
 			GROUP BY workspace
 			HAVING SUM(CASE WHEN type = 'file' THEN 1 ELSE 0 END) > 0
 			ORDER BY last_indexed DESC, root ASC`)
@@ -1400,7 +1468,7 @@ func (s *LibSQLStore) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 		domainRows, err := tx.QueryContext(ctx, `
 			SELECT workspace, domain, COUNT(*)
 			FROM nodes
-			WHERE TRIM(workspace) <> ''
+			WHERE TRIM(workspace) <> '' AND type NOT IN (`+structuralTypeList+`)
 			GROUP BY workspace, domain`)
 		if err != nil {
 			return err
@@ -1714,15 +1782,44 @@ func (s *LibSQLStore) SearchMemoryRecords(ctx context.Context, filter MemorySear
 			where = append(where, `mr.lifecycle_state IN (`+strings.Join(placeholders, ", ")+`)`)
 		}
 	}
-	if q := strings.TrimSpace(strings.ToLower(filter.Query)); q != "" {
-		where = append(where, `(LOWER(n.name) LIKE ? OR LOWER(n.content) LIKE ? OR LOWER(mr.display_tags_json) LIKE ? OR LOWER(mr.normalized_tags_json) LIKE ?)`)
-		like := "%" + q + "%"
-		args = append(args, like, like, like, like)
+	// Term matching, not phrase matching. Agents ask questions ("what do we know
+	// about deploys?"), and a single LIKE over the whole string matches only a
+	// record that contains that exact sentence — so recall returned nothing for
+	// every natural-language query whenever the semantic pass was unavailable
+	// (no embedding provider, offline, or a timeout). Any term may match; the
+	// ordering below decides which matches are best.
+	var rankExpr string
+	var rankArgs []any
+	if terms := memorySearchTerms(filter.Query); len(terms) > 0 {
+		clauses := make([]string, 0, len(terms))
+		for _, term := range terms {
+			clauses = append(clauses, memoryTermMatch)
+			args = append(args, likeArgs(term)...)
+		}
+		where = append(where, `(`+strings.Join(clauses, ` OR `)+`)`)
+
+		// Rank by how many distinct terms a record matched, with the full phrase
+		// worth an extra point so an exact hit still leads.
+		scores := make([]string, 0, len(terms)+1)
+		for _, term := range terms {
+			scores = append(scores, `(CASE WHEN `+memoryTermMatch+` THEN 1 ELSE 0 END)`)
+			rankArgs = append(rankArgs, likeArgs(term)...)
+		}
+		scores = append(scores, `(CASE WHEN `+memoryTermMatch+` THEN 1 ELSE 0 END)`)
+		rankArgs = append(rankArgs, likeArgs(strings.ToLower(strings.TrimSpace(filter.Query)))...)
+		rankExpr = strings.Join(scores, ` + `)
 	}
+
 	if len(where) > 0 {
 		query += ` WHERE ` + strings.Join(where, ` AND `)
 	}
-	query += ` ORDER BY mr.updated_at DESC, n.id ASC LIMIT ?`
+	// Parameters bind in textual order, so the ranking args follow the WHERE args.
+	if rankExpr != "" {
+		query += ` ORDER BY (` + rankExpr + `) DESC, mr.updated_at DESC, n.id ASC LIMIT ?`
+		args = append(args, rankArgs...)
+	} else {
+		query += ` ORDER BY mr.updated_at DESC, n.id ASC LIMIT ?`
+	}
 	args = append(args, limit)
 	if filter.Offset > 0 {
 		query += ` OFFSET ?`

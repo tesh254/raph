@@ -12,13 +12,13 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
 	"raph/internal/config"
 	"raph/internal/db"
+	"raph/internal/project"
 	"raph/internal/verbose"
 )
 
@@ -48,9 +48,14 @@ type Indexer struct {
 	store          db.GraphStore
 	cfg            *config.Config
 	root           string
+	projectRoot    string
 	workspaceID    string
 	projectID      string
 	skipEmbeddings bool
+
+	// dirNodes memoizes relative directory path -> node id for the structural
+	// hierarchy (see hierarchy.go). Keyed "" for the workspace root.
+	dirNodes map[string]string
 
 	// SCIP tier state (set per full index run).
 	scipCovered map[string]bool     // gotreesitter grammar names a SCIP tool will resolve
@@ -65,19 +70,29 @@ func New(store db.GraphStore, cfg *config.Config, root string, skipEmbeddings bo
 		return nil, fmt.Errorf("resolve root path: %w", err)
 	}
 
-	projectID, err := ResolveProjectIdentity(cfg, absRoot)
+	identity, err := project.Resolve(cfg, absRoot)
 	if err != nil {
 		return nil, err
 	}
-	verbose.Printf("resolved project identity=%s workspace=%s", projectID, workspaceID(absRoot))
+	// An identity override names the project instead of hashing a location, so
+	// it can leave the root empty; fall back to the indexed root for display.
+	projectRoot := identity.Root
+	if projectRoot == "" {
+		projectRoot = absRoot
+	}
+	verbose.Printf("resolved project identity=%s root=%s workspace=%s", identity.ID, projectRoot, workspaceID(absRoot))
 
 	return &Indexer{
 		store:          store,
 		cfg:            cfg,
 		root:           absRoot,
+		projectRoot:    projectRoot,
 		workspaceID:    workspaceID(absRoot),
-		projectID:      projectID,
+		projectID:      identity.ID,
 		skipEmbeddings: skipEmbeddings,
+		// Initialized here, not in Run: the single-file sync path calls
+		// indexFile without ever going through Run.
+		dirNodes: map[string]string{},
 	}, nil
 }
 
@@ -95,6 +110,13 @@ func (i *Indexer) Run(ctx context.Context) (Stats, error) {
 	verbose.Printf("clearing existing workspace graph workspace=%s", i.workspaceID)
 	if err := i.store.DeleteWorkspace(ctx, i.workspaceID); err != nil {
 		return stats, fmt.Errorf("clear existing workspace graph: %w", err)
+	}
+
+	// The clear above removed this workspace's structural nodes along with its
+	// content, so the spine is rebuilt before any file hangs off it.
+	i.dirNodes = map[string]string{}
+	if err := i.ensureProjectAndWorkspace(ctx); err != nil {
+		return stats, fmt.Errorf("write project hierarchy: %w", err)
 	}
 
 	verbose.Printf("walking directory tree root=%s", i.root)
@@ -329,6 +351,18 @@ func (i *Indexer) indexFile(ctx context.Context, path string, stats *Stats) erro
 	}
 	stats.FilesIndexed++
 	stats.NodesSaved++
+
+	// Hang the file off its directory so a path can be walked down from the
+	// project, and the owning project can be walked up from the file.
+	if parentID := i.ensureDirChain(ctx, relPath); parentID != "" {
+		if err := i.store.SaveEdge(ctx, db.Edge{
+			SourceID: parentID,
+			TargetID: fileNode.ID,
+			Type:     RelContains,
+		}); err != nil {
+			verbose.Printf("directory edge save failed file=%s: %v", relPath, err)
+		}
+	}
 
 	ext := strings.ToLower(filepath.Ext(relPath))
 	beforeNodes := stats.NodesSaved
@@ -595,31 +629,11 @@ func workspaceID(root string) string {
 	return "ws:" + hex.EncodeToString(h[:])
 }
 
+// ResolveProjectIdentity returns the project identity for a directory. The
+// derivation lives in internal/project so the MCP read and write paths resolve
+// the identical id from the working directory an agent supplies.
 func ResolveProjectIdentity(cfg *config.Config, root string) (string, error) {
-	if cfg != nil && strings.TrimSpace(cfg.Project.IdentityOverride) != "" {
-		return "project:" + strings.TrimSpace(cfg.Project.IdentityOverride), nil
-	}
-	gitTopLevel, err := gitRoot(root)
-	if err == nil && gitTopLevel != "" {
-		sum := sha1.Sum([]byte(gitTopLevel))
-		return "project:" + hex.EncodeToString(sum[:]), nil
-	}
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return "", fmt.Errorf("resolve project identity root: %w", err)
-	}
-	sum := sha1.Sum([]byte(absRoot))
-	return "project:" + hex.EncodeToString(sum[:]), nil
-}
-
-func gitRoot(root string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	cmd.Dir = root
-	output, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(output)), nil
+	return project.ID(cfg, root)
 }
 
 // ShouldSkipDir reports whether a directory name should be excluded from

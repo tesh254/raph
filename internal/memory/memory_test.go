@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -383,5 +384,124 @@ func TestConcurrentUpdatesAssignUniqueRevisions(t *testing.T) {
 			t.Fatalf("duplicate revision number %d in history (lost-update race)", r.Revision)
 		}
 		seen[r.Revision] = true
+	}
+}
+
+func affinityRecord(id, scopeID string) db.MemoryRecord {
+	return db.MemoryRecord{Node: db.Node{ID: id}, ScopeType: "project", ScopeID: scopeID}
+}
+
+func affinityIDs(records []db.MemoryRecord) []string {
+	out := make([]string, 0, len(records))
+	for _, r := range records {
+		out = append(out, r.Node.ID)
+	}
+	return out
+}
+
+func TestApplyProjectAffinityLiftsProjectMemories(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("other-1", "project:other"),
+		affinityRecord("other-2", "project:other"),
+		affinityRecord("mine-1", "project:mine"),
+		affinityRecord("other-3", "project:other"),
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, "project:mine"))
+	want := []string{"mine-1", "other-1", "other-2", "other-3"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected the project memory boosted past nearby matches, got %v", got)
+	}
+}
+
+// The boost is worth exactly affinityBoostPositions places, and relevance wins
+// ties: a project memory that far behind draws level with the leader and lands
+// just after it. Pinning the boundary keeps the constant honest — if someone
+// raises it, this is where the change shows up.
+func TestApplyProjectAffinityBoundaryTieKeepsRelevanceFirst(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("other-1", "project:other"),
+		affinityRecord("other-2", "project:other"),
+		affinityRecord("other-3", "project:other"),
+		affinityRecord("mine-1", "project:mine"),
+	}
+	if affinityBoostPositions != 3 {
+		t.Skipf("boundary fixture assumes a boost of 3, got %d", affinityBoostPositions)
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, "project:mine"))
+	want := []string{"other-1", "mine-1", "other-2", "other-3"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected a tie at the boundary to keep the stronger match first, got %v", got)
+	}
+}
+
+// The boost is bounded on purpose: a much better match from another scope must
+// still win, otherwise this is a scope filter wearing a different hat.
+func TestApplyProjectAffinityDoesNotOutrankAFarBetterMatch(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("global-best", "global"),
+		affinityRecord("other-1", "project:other"),
+		affinityRecord("other-2", "project:other"),
+		affinityRecord("other-3", "project:other"),
+		affinityRecord("other-4", "project:other"),
+		affinityRecord("mine-far-down", "project:mine"),
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, "project:mine"))
+	if got[0] != "global-best" {
+		t.Fatalf("a far stronger match was buried by the affinity boost: %v", got)
+	}
+	if !slices.Contains(got, "mine-far-down") {
+		t.Fatalf("affinity dropped a record instead of re-ranking it: %v", got)
+	}
+}
+
+func TestApplyProjectAffinityNeverDropsRecords(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("a", "project:mine"),
+		affinityRecord("b", "global"),
+		affinityRecord("c", "shared:team"),
+		affinityRecord("d", "project:other"),
+	}
+
+	got := applyProjectAffinity(records, "project:mine")
+	if len(got) != len(records) {
+		t.Fatalf("expected all %d records retained, got %d", len(records), len(got))
+	}
+	seen := map[string]bool{}
+	for _, r := range got {
+		seen[r.Node.ID] = true
+	}
+	for _, r := range records {
+		if !seen[r.Node.ID] {
+			t.Fatalf("record %s lost during affinity re-ranking", r.Node.ID)
+		}
+	}
+}
+
+func TestApplyProjectAffinityIsStableWithinGroups(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("mine-1", "project:mine"),
+		affinityRecord("mine-2", "project:mine"),
+		affinityRecord("mine-3", "project:mine"),
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, "project:mine"))
+	want := []string{"mine-1", "mine-2", "mine-3"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected relevance order preserved when every record is boosted, got %v", got)
+	}
+}
+
+func TestApplyProjectAffinityNoProjectIsIdentity(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("a", "project:one"),
+		affinityRecord("b", "project:two"),
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, ""))
+	if !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("expected untouched ordering without a project, got %v", got)
 	}
 }

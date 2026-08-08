@@ -89,7 +89,17 @@ func TestSyncOnceUpdatesAndRemovesChangedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(nodes) != 0 {
-		t.Fatalf("expected deleted file nodes to be cleaned, got %d", len(nodes))
+	// Every node describing the deleted file must be gone. The structural spine
+	// (project/workspace/directory) is not file content — the repository still
+	// exists and is still registered for sync — so it legitimately remains.
+	structural := map[string]bool{
+		indexer.TypeProject:   true,
+		indexer.TypeWorkspace: true,
+		indexer.TypeDirectory: true,
+	}
+	for _, node := range nodes {
+		if !structural[node.Type] {
+			t.Fatalf("expected deleted file nodes to be cleaned, found %s node %q", node.Type, node.ID)
+		}
 	}
 }

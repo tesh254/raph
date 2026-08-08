@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -643,5 +645,119 @@ func TestDeleteDocumentNodeRemovesDocAndChunks(t *testing.T) {
 	// Second delete is a no-op 404.
 	if err := store.DeleteDocumentNode(ctx, "doc:h"); err != sql.ErrNoRows {
 		t.Fatalf("expected ErrNoRows on re-delete, got %v", err)
+	}
+}
+
+func TestMemorySearchTerms(t *testing.T) {
+	cases := []struct {
+		query string
+		want  []string
+	}{
+		{"what do I know about this project", []string{"know", "project"}},
+		{"How do I create a merge request?", []string{"create", "merge", "request"}},
+		{"deploy", []string{"deploy"}},
+		{"  ", nil},
+		// Duplicates collapse, and case is normalized.
+		{"Deploy deploy DEPLOY", []string{"deploy"}},
+		// An all-stopword query keeps its terms rather than matching nothing.
+		{"what about this", []string{"what", "about", "this"}},
+		// Punctuation splits; short fragments are dropped.
+		{"ci/cd is a p1 issue", []string{"issue"}},
+	}
+	for _, tc := range cases {
+		got := memorySearchTerms(tc.query)
+		if !slices.Equal(got, tc.want) {
+			t.Fatalf("memorySearchTerms(%q) = %v, want %v", tc.query, got, tc.want)
+		}
+	}
+}
+
+func TestMemorySearchTermsCapsTermCount(t *testing.T) {
+	var words []string
+	for i := 0; i < 40; i++ {
+		words = append(words, fmt.Sprintf("term%02d", i))
+	}
+	if got := memorySearchTerms(strings.Join(words, " ")); len(got) != 12 {
+		t.Fatalf("expected the term list capped at 12, got %d", len(got))
+	}
+}
+
+// A natural-language question must recall a memory that shares only some of its
+// words. Before term matching this returned nothing, so an agent whose
+// embedding provider was unavailable concluded the memory did not exist.
+func TestSearchMemoryRecordsMatchesNaturalLanguageQuery(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	seed := func(id, title, content string) {
+		if err := store.SaveNode(ctx, Node{
+			ID: id, Workspace: "ws", Domain: "memory", Type: "memory", Name: title, Content: content,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertMemoryRecord(ctx, MemoryRecord{
+			Node: Node{ID: id}, ScopeType: "project", ScopeID: "project:one", LifecycleState: "active",
+			KnowledgeType: "decision", Source: "user", WriterID: "w", MemoryKey: id,
+			CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z", Revision: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("m1", "Local Development Database Access", "Use the tenant API to reach the local database.")
+	seed("m2", "Release signing", "Minisign keys live in the release workflow.")
+
+	matches, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{
+		Query:           "how do I get database access for local development",
+		LifecycleStates: []string{"active"},
+		Limit:           10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("expected a natural-language query to match a memory sharing its terms")
+	}
+	if matches[0].Node.ID != "m1" {
+		t.Fatalf("expected the record matching the most terms first, got %s", matches[0].Node.ID)
+	}
+}
+
+// Ranking must favor the record matching more query terms, not the most
+// recently updated one.
+func TestSearchMemoryRecordsRanksByTermCoverage(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	seed := func(id, title, content, updated string) {
+		if err := store.SaveNode(ctx, Node{
+			ID: id, Workspace: "ws", Domain: "memory", Type: "memory", Name: title, Content: content,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertMemoryRecord(ctx, MemoryRecord{
+			Node: Node{ID: id}, ScopeType: "project", ScopeID: "project:one", LifecycleState: "active",
+			KnowledgeType: "decision", Source: "user", WriterID: "w", MemoryKey: id,
+			CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: updated, Revision: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The weaker match is newer, so recency alone would put it first.
+	seed("weak", "Deployment notes", "deployment only", "2026-06-01T00:00:00Z")
+	seed("strong", "Staging deployment rollback", "deployment rollback for staging", "2026-01-01T00:00:00Z")
+
+	matches, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{
+		Query:           "staging deployment rollback",
+		LifecycleStates: []string{"active"},
+		Limit:           10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("expected both records to match at least one term, got %d", len(matches))
+	}
+	if matches[0].Node.ID != "strong" {
+		t.Fatalf("expected the record covering more terms first, got %s", matches[0].Node.ID)
 	}
 }

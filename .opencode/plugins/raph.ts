@@ -50,7 +50,8 @@ export const RaphPlugin: Plugin = async ({ client, directory, worktree }) => {
         async execute() {
           return [
             "Use Raph memory first.",
-            "Search project or shared knowledge before answering.",
+            "Recall before answering with search_memory: one call ranks every memory you have — there is no scope to guess.",
+            "Always pass working_directory (the absolute path you are working in) so raph resolves the right project; the server's own directory is not yours.",
             "Store durable repo decisions, setup facts, and gotchas before finishing.",
             "Use Raph indexing when a repo or docs context may matter.",
           ].join("\n")

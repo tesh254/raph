@@ -66,7 +66,7 @@ args: ["start"]</code></pre>
               <li><code>store_memory</code> writes scoped memory with lifecycle metadata, source, writer, revision, tags, and timestamps.</li>
               <li><code>update_memory</code> keeps stable keys current while preserving previous revisions.</li>
               <li><code>deprecate_memory</code> retires stale records instead of deleting unrelated graph nodes.</li>
-              <li><code>search_project_knowledge</code>, <code>search_shared_knowledge</code>, and <code>search_global_preferences</code> retrieve scoped memory directly.</li>
+              <li><code>search_memory</code> is the single recall tool: it ranks every memory by meaning across all scopes and boosts the project resolved from <code>working_directory</code>, so no lookup depends on guessing a scope id.</li>
               <li><code>hybrid_semantic_search</code>, <code>multi_query_search</code>, and <code>best_vector_match</code> search memory, code, and docs.</li>
             </ul>
           </article>
@@ -91,9 +91,10 @@ args: ["start"]</code></pre>
           <article class="card">
             <h3>Start-of-task lookup</h3>
             <pre><code>{
-  "tool": "search_project_knowledge",
+  "tool": "search_memory",
   "arguments": {
     "query": "release signing CI setup gotchas",
+    "working_directory": "/abs/path/to/repo",
     "limit": 5
   }
 }</code></pre>

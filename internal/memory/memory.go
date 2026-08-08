@@ -56,7 +56,10 @@ type SearchInput struct {
 	ScopeType     string
 	ScopeID       string
 	KnowledgeType string
-	Limit         int
+	// ProjectID biases ranking toward memories belonging to one project
+	// without filtering anything out. Empty means no bias.
+	ProjectID string
+	Limit     int
 }
 
 type StoreOutput struct {
@@ -234,7 +237,55 @@ func Search(ctx context.Context, store db.GraphStore, cfg *config.Config, input 
 	}
 
 	matches, mode := mergeMemoryMatches(semantic, keyword, limit)
+	matches = applyProjectAffinity(matches, strings.TrimSpace(input.ProjectID))
 	return SearchOutput{Mode: mode, Matches: matches}, nil
+}
+
+// affinityBoostPositions is what belonging to the caller's project is worth,
+// measured in rank positions. It is deliberately small: a boost, not a tier.
+// A memory from this project climbs a few places, so it beats a comparably
+// ranked memory from elsewhere — but a global preference or a shared decision
+// that the query matched far more strongly still wins. Making this large enough
+// to always float project memories to the top would reintroduce, as an ordering
+// bias, exactly the scope filter this replaced.
+const affinityBoostPositions = 3
+
+// applyProjectAffinity re-ranks merged matches so memories scoped to projectID
+// move up by affinityBoostPositions. It never drops a record: the caller asked
+// for the best matches across every scope, and a project-local memory is a
+// better default answer only when relevance is close.
+func applyProjectAffinity(records []db.MemoryRecord, projectID string) []db.MemoryRecord {
+	if projectID == "" || len(records) < 2 {
+		return records
+	}
+
+	type ranked struct {
+		record db.MemoryRecord
+		score  float64
+	}
+	scored := make([]ranked, 0, len(records))
+	boosted := false
+	for i, record := range records {
+		score := float64(i)
+		if record.ScopeID == projectID {
+			score -= affinityBoostPositions
+			boosted = true
+		}
+		scored = append(scored, ranked{record: record, score: score})
+	}
+	if !boosted {
+		return records
+	}
+
+	// Stable so records that tie after the boost keep their merged relevance
+	// order, which is the only signal distinguishing them.
+	sort.SliceStable(scored, func(a, b int) bool { return scored[a].score < scored[b].score })
+
+	out := make([]db.MemoryRecord, 0, len(scored))
+	for _, r := range scored {
+		out = append(out, r.record)
+	}
+	return out
 }
 
 // mergeMemoryMatches unions the semantic and keyword result sets, de-duplicated
