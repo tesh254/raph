@@ -1,0 +1,79 @@
+internal/memory/memory.go
+  s_b616119b05f3cd::t_d8d8ddb5294f0d 240,244-288
+  s_b616119b05f3cd::t_da91d23618e3b1 289-290
+  s_b616119b05f3cd::t_651cb3dbbde984 59-62
+internal/indexer/hierarchy.go
+  s_b616119b05f3cd::t_1f7087a5d78896 97-110
+  s_b616119b05f3cd::t_02cedd71ca156c 1-96,111-164
+internal/syncer/syncer_test.go
+  s_b616119b05f3cd::t_30f0ff2caf3a68 92-103
+internal/project/project_test.go
+  s_b616119b05f3cd::t_98a05328bec6fd 1-183
+internal/indexer/hierarchy_test.go
+  s_b616119b05f3cd::t_9b44351864fa67 1-244
+internal/db/libsql.go
+  s_b616119b05f3cd::t_8cebb741ecf692 1409-1415,1436,1471
+  s_b616119b05f3cd::t_d3d4d3266bdac6 1785-1810,1812,1816-1822
+  s_b616119b05f3cd::t_9d72f4586e8c47 1348-1408
+plugins/raph/skills/raph/SKILL.md
+  s_b616119b05f3cd::t_8cdbe9541879d6 14
+internal/db/libsql_test.go
+  s_b616119b05f3cd::t_8530cc5f4d78a2 10-11,650-763
+.opencode/plugins/raph.ts
+  s_b616119b05f3cd::t_8cdbe9541879d6 53-54
+internal/indexer/indexer.go
+  s_b616119b05f3cd::t_395206ef764af4 115-121
+  s_b616119b05f3cd::t_c6f2bfdaeb9c7c 355-366
+  s_b616119b05f3cd::t_6dffd9a54ed87a 21
+  s_b616119b05f3cd::t_ecfe219001892b 632-634,636
+  s_b616119b05f3cd::t_ca22e141417f8d 73,77-83,89,91,93-95
+  s_b616119b05f3cd::t_042d346ec92e9f 51,56-58
+  s_b616119b05f3cd::t_b332a22302cd16 59
+internal/agentsetup/opencode_plugin.ts
+  s_b616119b05f3cd::t_8cdbe9541879d6 53-54
+README.md
+  s_b616119b05f3cd::t_7eaead43b63aae 118-122
+internal/mcp/server_test.go
+  s_b616119b05f3cd::t_db0a90c837ee52 189-192,219,715-786
+internal/mcp/server.go
+  s_b616119b05f3cd::t_bdd67a16643658 49-50,52-58,62-64,66-72,101-107,111-114,118-127,131-136,144-150,614,665,755,781,796,818
+  s_b616119b05f3cd::t_1cd617e4cd7e83 90-93
+  s_b616119b05f3cd::t_87526839ef8b28 328-329,331
+  s_b616119b05f3cd::t_6093bccc01c577 1148,1151,1160-1162,1171
+  s_b616119b05f3cd::t_00575302bf313f 283-285
+  s_b616119b05f3cd::t_6bdf94e5d66529 293-298
+  s_b616119b05f3cd::t_f27e1767ab6f6a 406
+  s_b616119b05f3cd::t_54cac96168815c 854
+  s_b616119b05f3cd::t_99af3aa83a3390 51,65
+  s_b616119b05f3cd::t_4aee928bb71072 1208-1214,1226
+  s_b616119b05f3cd::t_fe8c4d346b21b6 384-385,438-439,447
+  s_b616119b05f3cd::t_05c749e8cb19bc 17
+  s_b616119b05f3cd::t_f15d221f6341c0 698-703,705-717,722,729-733,735
+internal/project/project.go
+  s_b616119b05f3cd::t_08e102c905f821 1-120
+internal/memory/memory_test.go
+  s_b616119b05f3cd::t_8bc423d1f47bac 9,389-406,408-411,434,436-507
+  s_b616119b05f3cd::t_009077fbcfc0dc 407,412-433,435
+cmd/raph/e2e_test.go
+  s_b616119b05f3cd::t_7fb258c975a47a 208,214-218,221-228,238-239,242-244,247,253-265
+internal/indexer/indexer_test.go
+  s_b616119b05f3cd::t_e96dd5ea2bea2e 121-125
+docs/mcp-agents.html
+  s_b616119b05f3cd::t_8cdbe9541879d6 69,94,97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "67440188d91a3bb55e92ec27b6cc9b2afd811c32",
+  "prompts": {},
+  "sessions": {
+    "s_b616119b05f3cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "88cc8262-7d36-4d42-9a1c-6e2b6c7b31d9",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
