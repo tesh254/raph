@@ -1,0 +1,42 @@
+internal/knowledge/knowledge.go
+  s_b616119b05f3cd::t_789401d9d89ffb 468-488,495,497,501-506,511-516,518-530,534,546-547,549,563,567-572,586-589,597,600-604
+  s_b616119b05f3cd::t_ddf7898af0475f 14,489-494,496,498-500,507-510,517,532-533,535-545,548,550-562,564-566,573-585
+  s_b616119b05f3cd::t_e52852d3e696fc 20,605-671
+  s_b616119b05f3cd::t_13245046b37851 531,590-596,598-599
+internal/mcp/server.go
+  s_b616119b05f3cd::t_554a58ebf41d22 1154-1158,1162-1166
+cmd/raph/main.go
+  s_b616119b05f3cd::t_15281e3d559618 967-970,974-978
+  s_b616119b05f3cd::t_73232a00580207 28
+  s_b616119b05f3cd::t_02439349e60f9e 1984-2006
+internal/knowledge/knowledge_test.go
+  s_b616119b05f3cd::t_628559c4351747 279-282,288-289
+  s_b616119b05f3cd::t_7393755b6665e4 10,208,320,339
+  s_b616119b05f3cd::t_9d7a7ab41add4b 191-207,209-278,283-287,290-319,321-338,340-382
+internal/db/libsql.go
+  s_b616119b05f3cd::t_2d169e885efc18 1005-1006,1024,1081,2594-2652
+  s_b616119b05f3cd::t_db31c9d121c156 2653
+internal/mcp/documents_scope_test.go
+  s_b616119b05f3cd::t_a73f10c286c64b 77
+  s_b616119b05f3cd::t_8b687d8bcb2126 1-5,7-76,78-95,103-149
+  s_b616119b05f3cd::t_abcd519126cf9b 96-102
+  s_b616119b05f3cd::t_33ed5aa36f7c79 6
+README.md
+  s_b616119b05f3cd::t_4d45cc55bbadea 122-124,185
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "56086500d4264f608455854dbdc889114f10fa84",
+  "prompts": {},
+  "sessions": {
+    "s_b616119b05f3cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "88cc8262-7d36-4d42-9a1c-6e2b6c7b31d9",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
