@@ -12,6 +12,9 @@ import (
 	"testing"
 
 	"raph/internal/db"
+	"raph/internal/indexer"
+	"raph/internal/knowledge"
+	"raph/internal/memory"
 )
 
 func TestStudioInitAndClearActions(t *testing.T) {
@@ -466,5 +469,134 @@ func TestStudioDeleteMemoryEndpoint(t *testing.T) {
 	srv.handleDeleteMemory(getRec, getReq)
 	if getRec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 for GET, got %d", getRec.Code)
+	}
+}
+
+// The projects endpoint is what the Studio's Projects view renders. It must
+// group repositories under the project that owns them and report the project id
+// memories and documents are scoped by — a repository listing alone cannot
+// explain which knowledge applies in a directory.
+func TestHandleListProjects(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for rel, body := range map[string]string{
+		"README.md":    "# project readme",
+		"pkg/notes.md": "# package notes",
+	} {
+		if err := os.WriteFile(filepath.Join(repo, filepath.FromSlash(rel)), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	idx, err := indexer.New(store, nil, repo, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// One memory and one document scoped to the same project.
+	if _, err := memory.Store(ctx, store, nil, memory.StoreInput{
+		ScopeType: "project", ScopeID: idx.ProjectID(), KnowledgeType: "decision",
+		Title: "Decision", Content: "Recorded for this project.", Source: "user",
+		WriterID: "agent:test", MemoryKey: "decision/one",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := knowledge.Add(ctx, store, nil, knowledge.AddInput{
+		Workspace: knowledge.ProjectWorkspace(idx.ProjectID()),
+		Key:       "handoff/one", Title: "Handoff", Content: "Work in progress.",
+		DocType: knowledge.DocHandoff, Source: "user", NoEmbed: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewStudioServer(store, "", 0)
+	rec := httptest.NewRecorder()
+	srv.handleListProjects(rec, httptest.NewRequest(http.MethodGet, "/api/projects", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []db.Project `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("expected one project, got %d: %+v", len(payload.Items), payload.Items)
+	}
+	project := payload.Items[0]
+	if project.ID != idx.ProjectID() {
+		t.Fatalf("expected the project scope id %s, got %s", idx.ProjectID(), project.ID)
+	}
+	if len(project.Workspaces) != 1 || project.Workspaces[0].Workspace != idx.WorkspaceID() {
+		t.Fatalf("expected the indexed repository grouped under the project, got %+v", project.Workspaces)
+	}
+	if project.Files != 2 {
+		t.Fatalf("expected 2 files, got %d", project.Files)
+	}
+	if project.Directories != 1 {
+		t.Fatalf("expected the pkg directory counted, got %d", project.Directories)
+	}
+	if project.Memories != 1 {
+		t.Fatalf("expected 1 memory attributed to the project, got %d", project.Memories)
+	}
+	if project.Documents != 1 {
+		t.Fatalf("expected 1 document attributed to the project, got %d", project.Documents)
+	}
+}
+
+func TestHandleListProjectsRejectsNonGet(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	srv := NewStudioServer(store, "", 0)
+	rec := httptest.NewRecorder()
+	srv.handleListProjects(rec, httptest.NewRequest(http.MethodPost, "/api/projects", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+// An empty graph must render as "no projects", not fail.
+func TestHandleListProjectsEmptyGraph(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	srv := NewStudioServer(store, "", 0)
+	rec := httptest.NewRecorder()
+	srv.handleListProjects(rec, httptest.NewRequest(http.MethodGet, "/api/projects", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var payload struct {
+		Items []db.Project `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 0 {
+		t.Fatalf("expected no projects, got %d", len(payload.Items))
 	}
 }

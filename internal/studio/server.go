@@ -118,6 +118,7 @@ func (s *StudioServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/api/activity", s.handleActivity)
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/repos", s.handleListRepos)
+	mux.HandleFunc("/api/projects", s.handleListProjects)
 	mux.HandleFunc("/api/analytics", s.handleAnalytics)
 	mux.HandleFunc("/api/timeline", s.handleTimeline)
 	mux.HandleFunc("/api/memories", s.handleListMemories)
@@ -947,6 +948,25 @@ func (s *StudioServer) handleListRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": repos})
+}
+
+// handleListProjects returns the project view of the graph: each project with
+// the repositories indexed under it and how much durable knowledge it holds.
+// Repositories alone cannot answer "which memories apply here", because memory
+// and documents are scoped by project identity, not by indexed root.
+func (s *StudioServer) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// The document bucket naming lives in the knowledge package; passing the
+	// prefix keeps that knowledge in one place.
+	projects, err := s.store.ListProjects(r.Context(), knowledge.ProjectWorkspace(""))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": projects})
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

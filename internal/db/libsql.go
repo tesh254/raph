@@ -2651,3 +2651,189 @@ func (s *LibSQLStore) RelocateNode(ctx context.Context, oldID, newID, newWorkspa
 		return err
 	})
 }
+
+// Project is one project and everything indexed or remembered under it.
+//
+// A project is the unit an agent actually works in: memories and documents are
+// scoped to it, and it may hold several indexed roots (a monorepo's packages).
+// The id doubles as the memory scope id, which is why it is surfaced — it is the
+// value that explains why one repository's recall differs from another's.
+type Project struct {
+	ID          string      `json:"id"`
+	Name        string      `json:"name"`
+	Root        string      `json:"root"`
+	Workspaces  []Workspace `json:"workspaces"`
+	Files       int         `json:"files"`
+	Directories int         `json:"directories"`
+	Memories    int         `json:"memories"`
+	Documents   int         `json:"documents"`
+	LastIndexed string      `json:"last_indexed,omitempty"`
+}
+
+// ListProjects returns every project node with its repositories and knowledge
+// counts, newest-indexed first.
+//
+// docWorkspacePrefix is how document buckets are named for a project
+// (knowledge.ProjectWorkspace); it is passed in so this layer does not have to
+// know the knowledge package's naming, which would duplicate it.
+//
+// Like ListWorkspaces this runs in one deferred read snapshot: the studio polls
+// it, so it must never block a write, and the counts must agree with each other.
+func (s *LibSQLStore) ListProjects(ctx context.Context, docWorkspacePrefix string) ([]Project, error) {
+	workspaces, err := s.ListWorkspaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byWorkspaceID := make(map[string]Workspace, len(workspaces))
+	for _, ws := range workspaces {
+		byWorkspaceID[ws.Workspace] = ws
+	}
+
+	projects := []Project{}
+	err = s.withReadTx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT id, name, COALESCE(path, '')
+			FROM nodes WHERE type = 'project' ORDER BY name ASC`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p Project
+			if err := rows.Scan(&p.ID, &p.Name, &p.Root); err != nil {
+				return err
+			}
+			p.Workspaces = []Workspace{}
+			projects = append(projects, p)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(projects) == 0 {
+			return nil
+		}
+
+		byID := make(map[string]*Project, len(projects))
+		for i := range projects {
+			byID[projects[i].ID] = &projects[i]
+		}
+
+		// Attach repositories through the structural CONTAINS edges.
+		edgeRows, err := tx.QueryContext(ctx, `
+			SELECT e.source_id, e.target_id
+			FROM edges e JOIN nodes n ON n.id = e.target_id
+			WHERE e.type = 'CONTAINS' AND n.type = 'workspace'`)
+		if err != nil {
+			return err
+		}
+		defer edgeRows.Close()
+		for edgeRows.Next() {
+			var projectID, workspaceID string
+			if err := edgeRows.Scan(&projectID, &workspaceID); err != nil {
+				return err
+			}
+			p := byID[projectID]
+			if p == nil {
+				continue
+			}
+			// A workspace with no file nodes is not a repository (memory- or
+			// crawl-only), so it is absent from the listing and skipped here.
+			if ws, ok := byWorkspaceID[workspaceID]; ok {
+				p.Workspaces = append(p.Workspaces, ws)
+				p.Files += ws.Files
+				if ws.LastIndexed > p.LastIndexed {
+					p.LastIndexed = ws.LastIndexed
+				}
+			}
+		}
+		if err := edgeRows.Err(); err != nil {
+			return err
+		}
+
+		// Directory counts come from the structural nodes themselves.
+		dirRows, err := tx.QueryContext(ctx, `
+			SELECT workspace, COUNT(*) FROM nodes WHERE type = 'directory' GROUP BY workspace`)
+		if err != nil {
+			return err
+		}
+		defer dirRows.Close()
+		dirsByWorkspace := map[string]int{}
+		for dirRows.Next() {
+			var ws string
+			var n int
+			if err := dirRows.Scan(&ws, &n); err != nil {
+				return err
+			}
+			dirsByWorkspace[ws] = n
+		}
+		if err := dirRows.Err(); err != nil {
+			return err
+		}
+		for i := range projects {
+			for _, ws := range projects[i].Workspaces {
+				projects[i].Directories += dirsByWorkspace[ws.Workspace]
+			}
+		}
+
+		// Active memories are scoped by the project id directly.
+		memRows, err := tx.QueryContext(ctx, `
+			SELECT scope_id, COUNT(*) FROM memory_records
+			WHERE lifecycle_state = 'active' GROUP BY scope_id`)
+		if err != nil {
+			return err
+		}
+		defer memRows.Close()
+		for memRows.Next() {
+			var scopeID string
+			var n int
+			if err := memRows.Scan(&scopeID, &n); err != nil {
+				return err
+			}
+			if p := byID[scopeID]; p != nil {
+				p.Memories = n
+			}
+		}
+		if err := memRows.Err(); err != nil {
+			return err
+		}
+
+		// Documents live in a per-project bucket named by the caller's prefix.
+		if strings.TrimSpace(docWorkspacePrefix) != "" {
+			docRows, err := tx.QueryContext(ctx, `
+				SELECT workspace, COUNT(*) FROM nodes WHERE type = 'doc' GROUP BY workspace`)
+			if err != nil {
+				return err
+			}
+			defer docRows.Close()
+			for docRows.Next() {
+				var workspace string
+				var n int
+				if err := docRows.Scan(&workspace, &n); err != nil {
+					return err
+				}
+				projectID, ok := strings.CutPrefix(workspace, docWorkspacePrefix)
+				if !ok {
+					continue
+				}
+				if p := byID[projectID]; p != nil {
+					p.Documents = n
+				}
+			}
+			if err := docRows.Err(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.SliceStable(projects, func(a, b int) bool {
+		if projects[a].LastIndexed != projects[b].LastIndexed {
+			return projects[a].LastIndexed > projects[b].LastIndexed
+		}
+		return projects[a].Name < projects[b].Name
+	})
+	return projects, nil
+}
