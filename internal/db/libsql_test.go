@@ -761,3 +761,56 @@ func TestSearchMemoryRecordsRanksByTermCoverage(t *testing.T) {
 		t.Fatalf("expected the record covering more terms first, got %s", matches[0].Node.ID)
 	}
 }
+
+// A query that tokenizes to nothing must still constrain the result set.
+// Returning every active memory ordered by recency would present unrelated
+// records as matches — worse than the empty result it was meant to fix.
+func TestSearchMemoryRecordsUntokenizableQueryStillFilters(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	seed := func(id, title, content string) {
+		if err := store.SaveNode(ctx, Node{
+			ID: id, Workspace: "ws", Domain: "memory", Type: "memory", Name: title, Content: content,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertMemoryRecord(ctx, MemoryRecord{
+			Node: Node{ID: id}, ScopeType: "project", ScopeID: "project:one", LifecycleState: "active",
+			KnowledgeType: "decision", Source: "user", WriterID: "w", MemoryKey: id,
+			CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z", Revision: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("ci", "CI CD pipeline", "the ci cd pipeline runs on push")
+	seed("unrelated", "Database access", "tenant API notes")
+	seed("cjk", "データベース", "データベース接続の設定")
+
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{"ci cd", "ci"},   // every fragment shorter than the minimum
+		{"データベース", "cjk"}, // a script the tokenizer does not split
+	} {
+		matches, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{
+			Query:           tc.query,
+			LifecycleStates: []string{"active"},
+			Limit:           10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) != 1 {
+			ids := make([]string, 0, len(matches))
+			for _, m := range matches {
+				ids = append(ids, m.Node.ID)
+			}
+			t.Fatalf("query %q returned %d records (%v); expected only the matching one", tc.query, len(matches), ids)
+		}
+		if matches[0].Node.ID != tc.want {
+			t.Fatalf("query %q matched %s, want %s", tc.query, matches[0].Node.ID, tc.want)
+		}
+	}
+}

@@ -1007,6 +1007,11 @@ type NodeFilter struct {
 	// index) that never touch the heavy columns, to avoid pulling every node's
 	// content and embedding JSON into memory.
 	Lean bool
+	// Offset skips the first N rows of an otherwise identical listing, so a
+	// caller that must visit every node (the hierarchy backfill) can page
+	// through instead of guessing a limit large enough to avoid silently
+	// truncating a big repository.
+	Offset int
 }
 
 func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node, error) {
@@ -1055,8 +1060,14 @@ func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node,
 	if len(where) > 0 {
 		sqlQuery += ` WHERE ` + strings.Join(where, ` AND `)
 	}
+	// Ordering by id after updated_at keeps paging stable when rows share a
+	// timestamp, which is the norm for nodes written by one indexing run.
 	sqlQuery += ` ORDER BY updated_at DESC, id ASC LIMIT ?`
 	args = append(args, limit)
+	if filter.Offset > 0 {
+		sqlQuery += ` OFFSET ?`
+		args = append(args, filter.Offset)
+	}
 
 	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {
@@ -1790,7 +1801,17 @@ func (s *LibSQLStore) SearchMemoryRecords(ctx context.Context, filter MemorySear
 	// ordering below decides which matches are best.
 	var rankExpr string
 	var rankArgs []any
-	if terms := memorySearchTerms(filter.Query); len(terms) > 0 {
+	if rawQuery := strings.TrimSpace(strings.ToLower(filter.Query)); rawQuery != "" {
+		terms := memorySearchTerms(filter.Query)
+		if len(terms) == 0 {
+			// A query that yields no terms — all fragments shorter than the
+			// minimum ("ci cd"), or a script this tokenizer doesn't split on
+			// (CJK, Cyrillic) — must still constrain the result set. Falling
+			// through with no predicate would return every active memory ordered
+			// by recency and present them as matches. Match the whole string
+			// instead, which is what a caller typing a short query means anyway.
+			terms = []string{rawQuery}
+		}
 		clauses := make([]string, 0, len(terms))
 		for _, term := range terms {
 			clauses = append(clauses, memoryTermMatch)

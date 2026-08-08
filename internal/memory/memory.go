@@ -197,12 +197,24 @@ func Search(ctx context.Context, store db.GraphStore, cfg *config.Config, input 
 	if limit <= 0 {
 		limit = 10
 	}
+	projectID := strings.TrimSpace(input.ProjectID)
+
+	// Both passes fetch beyond the caller's limit when a project boost applies.
+	// The boost re-ranks what was retrieved, so a project memory that sits just
+	// outside the page could never be lifted into it — the candidate pool has to
+	// be deep enough for the boost to reach. Widening by the boost's own size is
+	// exactly that depth: no memory the boost could promote is left unfetched.
+	candidateLimit := limit
+	if projectID != "" {
+		candidateLimit = limit + affinityBoostPositions
+	}
+
 	filter := db.MemorySearchFilter{
 		ScopeType:       strings.TrimSpace(input.ScopeType),
 		ScopeID:         strings.TrimSpace(input.ScopeID),
 		KnowledgeType:   strings.TrimSpace(input.KnowledgeType),
 		LifecycleStates: []string{lifecycleActive},
-		Limit:           limit,
+		Limit:           candidateLimit,
 	}
 	query := strings.TrimSpace(input.Query)
 
@@ -236,8 +248,20 @@ func Search(ctx context.Context, store db.GraphStore, cfg *config.Config, input 
 		return SearchOutput{}, err
 	}
 
-	matches, mode := mergeMemoryMatches(semantic, keyword, limit)
-	matches = applyProjectAffinity(matches, strings.TrimSpace(input.ProjectID))
+	// Merge over the widened pool, re-rank, and only then cut to the page the
+	// caller asked for.
+	matches, mode := mergeMemoryMatches(semantic, keyword, candidateLimit)
+	matches = applyProjectAffinity(matches, projectID)
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
+	if len(matches) == 0 {
+		// Reporting a pass that found nothing (or never ran, when no embedding
+		// provider is configured) as the mode tells an agent the lookup was
+		// semantic when it wasn't — the signal it uses to decide a memory
+		// doesn't exist.
+		mode = "none"
+	}
 	return SearchOutput{Mode: mode, Matches: matches}, nil
 }
 

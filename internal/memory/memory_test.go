@@ -505,3 +505,82 @@ func TestApplyProjectAffinityNoProjectIsIdentity(t *testing.T) {
 		t.Fatalf("expected untouched ordering without a project, got %v", got)
 	}
 }
+
+// affinityStore returns records in a fixed order and records the limit it was
+// asked for, so tests can see whether Search widened the candidate pool.
+type affinityStore struct {
+	db.GraphStore
+	records    []db.MemoryRecord
+	seenLimits []int
+}
+
+func (s *affinityStore) SearchMemoryRecords(_ context.Context, filter db.MemorySearchFilter) ([]db.MemoryRecord, error) {
+	s.seenLimits = append(s.seenLimits, filter.Limit)
+	if filter.Limit > 0 && filter.Limit < len(s.records) {
+		return s.records[:filter.Limit], nil
+	}
+	return s.records, nil
+}
+
+// The boost must be able to pull a project memory INTO the page, not merely
+// reorder a page it was already in. Ranked 6th globally with a limit of 5, the
+// project memory is outside the page until the candidate pool is widened.
+func TestSearchWidensCandidatePoolSoAffinityCanPromote(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("other-1", "project:other"),
+		affinityRecord("other-2", "project:other"),
+		affinityRecord("other-3", "project:other"),
+		affinityRecord("other-4", "project:other"),
+		affinityRecord("other-5", "project:other"),
+		affinityRecord("mine", "project:mine"),
+	}
+	store := &affinityStore{records: records}
+
+	out, err := Search(context.Background(), store, nil, SearchInput{
+		Query:     "anything",
+		ProjectID: "project:mine",
+		Limit:     5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Matches) != 5 {
+		t.Fatalf("expected the caller's limit honored, got %d", len(out.Matches))
+	}
+	if !slices.Contains(affinityIDs(out.Matches), "mine") {
+		t.Fatalf("project memory ranked just outside the page was never promoted: %v", affinityIDs(out.Matches))
+	}
+	for _, limit := range store.seenLimits {
+		if limit <= 5 {
+			t.Fatalf("expected a widened candidate fetch, store saw limit %d", limit)
+		}
+	}
+}
+
+func TestSearchWithoutProjectDoesNotOverfetch(t *testing.T) {
+	store := &affinityStore{records: []db.MemoryRecord{affinityRecord("a", "project:other")}}
+	if _, err := Search(context.Background(), store, nil, SearchInput{Query: "anything", Limit: 5}); err != nil {
+		t.Fatal(err)
+	}
+	for _, limit := range store.seenLimits {
+		if limit != 5 {
+			t.Fatalf("expected the plain limit without a project boost, got %d", limit)
+		}
+	}
+}
+
+// An empty result must not claim a semantic lookup happened — that is the
+// signal an agent uses to decide a memory does not exist.
+func TestSearchReportsNoneWhenNothingMatched(t *testing.T) {
+	store := &affinityStore{}
+	out, err := Search(context.Background(), store, nil, SearchInput{Query: "nothing here", Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Matches) != 0 {
+		t.Fatalf("expected no matches, got %d", len(out.Matches))
+	}
+	if out.Mode != "none" {
+		t.Fatalf("expected mode \"none\" for an empty result, got %q", out.Mode)
+	}
+}

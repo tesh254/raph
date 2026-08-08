@@ -280,6 +280,12 @@ type NeighborOutput struct {
 	Edges []db.Edge `json:"edges"`
 }
 
+// GlobalScopeID is the single bucket global memory lives in. Global scope
+// exists to share knowledge across every project and every agent, which only
+// holds if all of them write to the same id — so it is derived here rather than
+// supplied by the caller. Rules already use it (see resolveRuleScope).
+const GlobalScopeID = "global"
+
 // ScopedMemorySearchOutput is the shape for deliberately scope-bound lookups.
 // Only rule listing uses it: "which rules apply to this codebase" is a question
 // about one scope, unlike recall, which ranks across all of them.
@@ -330,7 +336,7 @@ Always pass working_directory — the absolute path you are working in — to th
 Memory-first workflow:
 - Before answering, recall what you already know with search_memory. It is the ONLY recall tool: one query searches every memory you have — this project's, other projects', shared, and global — ranked by meaning, with this project's memories boosted. There is no scope filter to get wrong; just ask.
 - Reuse what you find. If a memory is out of date, UPDATE it instead of storing a duplicate: call update_memory with the node_id from the search result (its immutable scope/type/key are resolved for you). Use store_memory only for genuinely new facts.
-- Record durable decisions, setup facts, and gotchas before finishing.
+- Record durable decisions, setup facts, and gotchas before finishing. Use scope_type=project for facts about one codebase and scope_type=global for anything that should follow you across every project and agent (preferences, conventions, how you like work done) — global memory needs no scope_id.
 - get_memory_history shows a memory's revisions; deprecate_memory retires one that no longer applies.
 
 Handoffs & documents:
@@ -1166,7 +1172,7 @@ func (m *MCPServerWrapper) resolveRuleScope(scope string, workingDir string) (st
 	}
 	switch scope {
 	case "global":
-		return "global", "global", nil
+		return "global", GlobalScopeID, nil
 	case "project":
 		id, err := m.resolveScopeID("project", "", workingDir)
 		if err != nil {
@@ -1220,10 +1226,18 @@ func (m *MCPServerWrapper) resolveScopeID(scopeType string, provided string, wor
 	if provided != "" {
 		return provided, nil
 	}
-	if scopeType != "project" {
-		return "", fmt.Errorf("scope_id is required for %s scope", scopeType)
+	switch scopeType {
+	case "project":
+		return project.ID(m.config, workingDir)
+	case "global":
+		// Global memory is the cross-project, cross-agent bucket, so it only
+		// works if every writer lands on the same id. Left to invent one, two
+		// agents choose differently, update_memory-by-coordinates misses, and
+		// the same preference is stored twice instead of revised once.
+		return GlobalScopeID, nil
+	default:
+		return "", fmt.Errorf("scope_id is required for %s scope (it names the group sharing the memory, e.g. a team)", scopeType)
 	}
-	return project.ID(m.config, workingDir)
 }
 
 func (m *MCPServerWrapper) searchKnowledge(ctx context.Context, scopeType string, scopeID string, knowledgeType string, query string, limit int) (ScopedMemorySearchOutput, error) {

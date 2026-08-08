@@ -119,6 +119,8 @@ When `scope_type` is `project`, agents may omit `scope_id` and pass `working_dir
 
 Recall is a single tool. `search_memory` takes a query and an optional `working_directory`, ranks **every** memory by meaning — this project's, other projects', shared, and global — and boosts the resolved project's memories rather than filtering to them. There is no scope filter to get wrong, and a global preference is never hidden by a project lookup. Agents should call it at the start of work and store or update durable decisions, setup facts, gotchas, commands, and constraints before finishing. Use keys such as `repo/setup`, `release/signing`, `ci/known-issues`, and `agent/constraints`.
 
+Repositories indexed before the hierarchy existed do not need re-indexing. `raph backfill` rebuilds the spine from what the graph already stores — a file node records its workspace, the root it was indexed from, and its relative path, which is the whole tree. Nothing is read from disk and nothing is re-embedded, so it costs seconds instead of a full re-index, and it is safe to re-run because every write is an upsert.
+
 Indexed repositories also get a structural spine in the graph: a `project` node contains one `workspace` node per indexed root, which contains `directory` nodes mirroring the tree, which contain the `file` nodes. Directories are created only where indexed files live, so empty and ignored directories never appear. Walking these `CONTAINS` edges with `graph_neighbors` lets an agent navigate from a project down to a path — or from a file back up to the project that owns it.
 
 Every node has a stable unique `id`. Nodes indexed from a local repository also expose the absolute codebase `path`, allowing agents to prefer results from the repository they are currently working in. Re-index existing repositories once to populate `path` on nodes created before this field was added.
@@ -178,6 +180,7 @@ raph init            Scan a workspace and build graph relationships
 raph start           Start the MCP server over stdio
 raph studio          Launch the local graph explorer UI
 raph agents mcp setup Install or refresh MCP config (global or project scope)
+raph backfill        Rebuild the project/workspace/directory graph for indexed repos
 raph sync            Index and continuously synchronize a repository
 raph sync --status   Show the worker and registered repositories
 raph sync --remove   Unregister a repository and clean its graph data

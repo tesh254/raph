@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -240,5 +241,167 @@ func TestListWorkspacesIgnoresStructuralNodes(t *testing.T) {
 	}
 	if found.Nodes >= len(all) {
 		t.Fatalf("expected structural nodes excluded from the node count: reported %d of %d stored", found.Nodes, len(all))
+	}
+}
+
+// The backfill exists so an existing graph does not have to be re-indexed (and
+// re-embedded) to gain the hierarchy. It must reconstruct the same spine a full
+// index would, using only what the stored file nodes already carry.
+func TestBackfillHierarchyRebuildsSpineWithoutReindexing(t *testing.T) {
+	store := hierarchyStore(t)
+	root := t.TempDir()
+	writeFile(t, root, "top.md", "# top")
+	writeFile(t, root, "internal/deep/nested.md", "# nested")
+	ctx := context.Background()
+
+	idx, err := New(store, nil, root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a graph indexed before the hierarchy existed: drop every
+	// structural node, leaving the file nodes untouched.
+	for _, nodeType := range StructuralTypes {
+		nodes, err := store.ListNodes(ctx, db.NodeFilter{Types: []string{nodeType}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range nodes {
+			if err := store.DeleteNodeByID(ctx, n.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if children := childrenOf(t, store, idx.WorkspaceID()); len(children) != 0 {
+		t.Fatalf("expected the spine removed before backfill, got %+v", children)
+	}
+
+	stats, err := BackfillHierarchy(ctx, store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Projects != 1 || stats.Workspaces != 1 {
+		t.Fatalf("expected 1 project and 1 workspace, got %+v", stats)
+	}
+	if stats.Files != 2 {
+		t.Fatalf("expected both files linked to a directory, got %+v", stats)
+	}
+	if stats.Directories != 2 {
+		t.Fatalf("expected internal and internal/deep rebuilt, got %+v", stats)
+	}
+
+	// The rebuilt spine must be walkable exactly like a freshly indexed one.
+	projectChildren := childrenOf(t, store, idx.ProjectID())
+	if len(projectChildren[TypeWorkspace]) != 1 {
+		t.Fatalf("project does not contain its workspace after backfill: %+v", projectChildren)
+	}
+	wsChildren := childrenOf(t, store, idx.WorkspaceID())
+	if len(wsChildren["file"]) != 1 || wsChildren["file"][0].Name != "top.md" {
+		t.Fatalf("expected top.md under the workspace, got %+v", wsChildren["file"])
+	}
+	if len(wsChildren[TypeDirectory]) != 1 || wsChildren[TypeDirectory][0].Name != "internal" {
+		t.Fatalf("expected internal/ under the workspace, got %+v", wsChildren[TypeDirectory])
+	}
+	deep := childrenOf(t, store, wsChildren[TypeDirectory][0].ID)
+	if len(deep[TypeDirectory]) != 1 || deep[TypeDirectory][0].Name != "internal/deep" {
+		t.Fatalf("expected internal/deep rebuilt, got %+v", deep)
+	}
+}
+
+func TestBackfillHierarchyIsIdempotent(t *testing.T) {
+	store := hierarchyStore(t)
+	root := t.TempDir()
+	writeFile(t, root, "pkg/a.md", "# a")
+	ctx := context.Background()
+
+	idx, err := New(store, nil, root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := BackfillHierarchy(ctx, store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodesBefore, edgesBefore, err := store.GetAllGraphElements(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := BackfillHierarchy(ctx, store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("expected a repeat backfill to report the same result: %+v then %+v", first, second)
+	}
+	nodesAfter, edgesAfter, err := store.GetAllGraphElements(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodesBefore) != len(nodesAfter) || len(edgesBefore) != len(edgesAfter) {
+		t.Fatalf("repeat backfill changed the graph: nodes %d->%d, edges %d->%d",
+			len(nodesBefore), len(nodesAfter), len(edgesBefore), len(edgesAfter))
+	}
+}
+
+// A graph with no indexed repositories (memories only) must be a clean no-op.
+func TestBackfillHierarchyWithoutIndexedRepositories(t *testing.T) {
+	store := hierarchyStore(t)
+	stats, err := BackfillHierarchy(context.Background(), store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Workspaces != 0 || stats.Projects != 0 {
+		t.Fatalf("expected nothing to backfill, got %+v", stats)
+	}
+}
+
+// A repository with more files than one listing page must be fully linked.
+// ListNodes caps an unspecified limit at a small default, so an unpaged
+// backfill silently linked only the first page and still reported success.
+func TestBackfillHierarchyLinksEveryFileAcrossPages(t *testing.T) {
+	store := hierarchyStore(t)
+	root := t.TempDir()
+	const files = backfillPageSize + 37
+	for i := 0; i < files; i++ {
+		writeFile(t, root, fmt.Sprintf("pkg%02d/file%04d.md", i%7, i), fmt.Sprintf("# doc %d", i))
+	}
+	ctx := context.Background()
+
+	idx, err := New(store, nil, root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, nodeType := range StructuralTypes {
+		nodes, err := store.ListNodes(ctx, db.NodeFilter{Types: []string{nodeType}, Limit: 10_000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range nodes {
+			if err := store.DeleteNodeByID(ctx, n.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	stats, err := BackfillHierarchy(ctx, store, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Files != files {
+		t.Fatalf("expected all %d files linked, got %d", files, stats.Files)
+	}
+	if stats.Directories != 7 {
+		t.Fatalf("expected 7 package directories, got %d", stats.Directories)
 	}
 }

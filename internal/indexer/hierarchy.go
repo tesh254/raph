@@ -2,9 +2,11 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 
+	"raph/internal/config"
 	"raph/internal/db"
 	"raph/internal/verbose"
 )
@@ -161,4 +163,129 @@ func (i *Indexer) ensureDirChain(ctx context.Context, relPath string) string {
 		parentID = node.ID
 	}
 	return parentID
+}
+
+// backfillPageSize bounds how many file nodes are held in memory at once while
+// paging through a repository.
+const backfillPageSize = 500
+
+// BackfillStats reports what a hierarchy backfill wrote.
+type BackfillStats struct {
+	Projects    int `json:"projects"`
+	Workspaces  int `json:"workspaces"`
+	Directories int `json:"directories"`
+	Files       int `json:"files"`
+}
+
+// BackfillHierarchy rebuilds the structural spine for repositories that were
+// indexed before it existed.
+//
+// It reads nothing from disk and embeds nothing: a file node already carries
+// the workspace it belongs to, the absolute root it was indexed from, and its
+// path relative to that root, which is the whole hierarchy. That makes this a
+// cheap, resumable alternative to re-indexing — re-indexing a large graph would
+// re-embed every file and spend real money to reproduce content it already has.
+//
+// Every write is an upsert, so running it twice changes nothing and running it
+// on an already-current graph is a no-op.
+func BackfillHierarchy(ctx context.Context, store db.GraphStore, cfg *config.Config) (BackfillStats, error) {
+	var stats BackfillStats
+
+	lister, ok := store.(interface {
+		ListWorkspaces(context.Context) ([]db.Workspace, error)
+	})
+	if !ok {
+		return stats, fmt.Errorf("store does not support listing indexed repositories")
+	}
+	workspaces, err := lister.ListWorkspaces(ctx)
+	if err != nil {
+		return stats, fmt.Errorf("list indexed repositories: %w", err)
+	}
+
+	projects := map[string]bool{}
+	for _, ws := range workspaces {
+		if strings.TrimSpace(ws.Root) == "" {
+			// Without a root there is nothing to derive a project or a directory
+			// tree from; the workspace holds memories or crawled docs, not code.
+			verbose.Printf("backfill: skipping workspace without a root workspace=%s", ws.Workspace)
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+
+		idx, err := New(store, cfg, ws.Root, true)
+		if err != nil {
+			return stats, fmt.Errorf("resolve %s: %w", ws.Root, err)
+		}
+		// Attach to the workspace id already on the stored nodes rather than the
+		// one recomputed from the root. They normally agree, but a root that has
+		// since become a symlink (or moved) would otherwise build a second,
+		// disconnected spine next to the real one.
+		idx.workspaceID = ws.Workspace
+		idx.dirNodes = map[string]string{}
+
+		if err := idx.ensureProjectAndWorkspace(ctx); err != nil {
+			return stats, fmt.Errorf("write hierarchy for %s: %w", ws.Root, err)
+		}
+		stats.Workspaces++
+		if !projects[idx.projectID] {
+			projects[idx.projectID] = true
+			stats.Projects++
+		}
+
+		// Page explicitly rather than passing one big limit: ListNodes caps an
+		// unspecified limit at a small default, and a repository larger than any
+		// number picked here would be silently half-linked — the backfill would
+		// report success having skipped most of the tree.
+		linked := 0
+		for offset := 0; ; offset += backfillPageSize {
+			if err := ctx.Err(); err != nil {
+				return stats, err
+			}
+			// Lean: only id/type/name/url are needed, so this never pulls file
+			// contents or embeddings into memory.
+			files, err := store.ListNodes(ctx, db.NodeFilter{
+				Workspace: ws.Workspace,
+				Types:     []string{"file"},
+				Lean:      true,
+				Limit:     backfillPageSize,
+				Offset:    offset,
+			})
+			if err != nil {
+				return stats, fmt.Errorf("list files for %s: %w", ws.Root, err)
+			}
+			for _, file := range files {
+				relPath := strings.TrimSpace(file.URL)
+				if relPath == "" {
+					relPath = strings.TrimSpace(file.Name)
+				}
+				if relPath == "" {
+					continue
+				}
+				parentID := idx.ensureDirChain(ctx, relPath)
+				if parentID == "" {
+					continue
+				}
+				if err := store.SaveEdge(ctx, db.Edge{
+					SourceID: parentID,
+					TargetID: file.ID,
+					Type:     RelContains,
+				}); err != nil {
+					verbose.Printf("backfill: edge for %s failed: %v", relPath, err)
+					continue
+				}
+				linked++
+			}
+			if len(files) < backfillPageSize {
+				break
+			}
+		}
+		stats.Files += linked
+		// dirNodes holds the workspace root under "" as well, so discount it.
+		stats.Directories += len(idx.dirNodes) - 1
+		verbose.Printf("backfill: workspace=%s root=%s files=%d dirs=%d", ws.Workspace, ws.Root, linked, len(idx.dirNodes)-1)
+	}
+
+	return stats, nil
 }

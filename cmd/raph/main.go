@@ -114,6 +114,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newStudioCmd())
 	rootCmd.AddCommand(newSyncCmd())
 	rootCmd.AddCommand(newAgentsCmd())
+	rootCmd.AddCommand(newBackfillCmd())
 	rootCmd.AddCommand(newClearCmd())
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newUpdateCmd())
@@ -1933,4 +1934,47 @@ func newReleaseCmd() *cobra.Command {
 	releaseCmd.AddCommand(verifyCmd)
 	releaseCmd.AddCommand(publicKeyCmd)
 	return releaseCmd
+}
+
+func newBackfillCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "backfill",
+		Short: "Rebuild the project/workspace/directory graph for already-indexed repositories",
+		Long: "Rebuild the structural spine (project -> workspace -> directory -> file) for repositories\n" +
+			"indexed before it existed.\n\n" +
+			"Nothing is read from disk and nothing is re-embedded: a file node already records the\n" +
+			"workspace it belongs to, the root it was indexed from, and its relative path, which is\n" +
+			"the whole hierarchy. Re-indexing would reproduce the same structure at the cost of\n" +
+			"re-embedding every file. Safe to re-run — every write is an upsert.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+
+			fmt.Fprintf(out, "Initializing local storage...\n")
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			fmt.Fprintf(out, "Rebuilding project hierarchy for indexed repositories...\n")
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+
+			stats, err := indexer.BackfillHierarchy(ctx, store, cfg)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "Backfill complete: %d projects, %d workspaces, %d directories, %d files linked\n",
+				stats.Projects, stats.Workspaces, stats.Directories, stats.Files)
+			if stats.Workspaces == 0 {
+				fmt.Fprintf(out, "No indexed repositories found. Run `raph init --path .` to index one.\n")
+			}
+			return nil
+		},
+	}
 }
