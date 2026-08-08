@@ -25,6 +25,7 @@ import (
 	serverpkg "raph/internal/mcp"
 	"raph/internal/memory"
 	"raph/internal/output"
+	"raph/internal/project"
 	"raph/internal/query"
 	"raph/internal/signing"
 	"raph/internal/studio"
@@ -963,12 +964,18 @@ func newRulesCmd() *cobra.Command {
 	return rulesCmd
 }
 
-// resolveDocWorkspace maps a doc scope to a workspace id (project workspace or
-// the shared global-knowledge bucket).
+// resolveDocWorkspace maps a doc scope to a workspace id (the project's
+// document bucket or the shared global-knowledge bucket). It must agree with
+// the MCP server's resolution, or the CLI and agents would read different
+// buckets for the same repository.
 func resolveDocWorkspace(store db.GraphStore, cfg *config.Config, scope, path string) (string, error) {
 	switch strings.TrimSpace(scope) {
 	case "", "project":
-		return resolveWorkspaceID(store, cfg, path)
+		projectID, err := project.ID(cfg, path)
+		if err != nil {
+			return "", err
+		}
+		return knowledge.ProjectWorkspace(projectID), nil
 	case "global":
 		return knowledge.GlobalWorkspace, nil
 	default:
@@ -1973,6 +1980,29 @@ func newBackfillCmd() *cobra.Command {
 				stats.Projects, stats.Workspaces, stats.Directories, stats.Files)
 			if stats.Workspaces == 0 {
 				fmt.Fprintf(out, "No indexed repositories found. Run `raph init --path .` to index one.\n")
+			}
+
+			// Documents written before they had their own bucket sit under the
+			// indexer's workspace id, where an index run would delete them and
+			// where the new project-scoped lookup will not find them.
+			workspaces, err := store.ListWorkspaces(ctx)
+			if err != nil {
+				return err
+			}
+			roots := make(map[string]string, len(workspaces))
+			for _, ws := range workspaces {
+				roots[ws.Workspace] = ws.Root
+			}
+			fmt.Fprintf(out, "Relocating documents stored under indexer workspaces...\n")
+			docStats, err := knowledge.MigrateLegacyProjectDocs(ctx, store, cfg, roots)
+			if err != nil {
+				return err
+			}
+			if docStats.Documents == 0 {
+				fmt.Fprintf(out, "No documents needed relocating.\n")
+			} else {
+				fmt.Fprintf(out, "Moved %d document(s) out of %d legacy workspace(s) into project document scopes\n",
+					docStats.Documents, docStats.Workspaces)
 			}
 			return nil
 		},

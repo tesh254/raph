@@ -1151,10 +1151,19 @@ func (m *MCPServerWrapper) searchWorkspace(ctx context.Context, workspace string
 
 // resolveDocWorkspace maps a document scope to a workspace id: the current
 // project's workspace, or the shared global-knowledge bucket.
+// resolveDocWorkspace maps a doc scope to the bucket its documents live in.
+//
+// Project documents are keyed by project identity, not by the indexer's
+// workspace id: sharing that id let a full index run delete them, and tied them
+// to one directory instead of the whole repository.
 func (m *MCPServerWrapper) resolveDocWorkspace(scope string, workingDir string) (string, error) {
 	switch strings.TrimSpace(scope) {
 	case "", "project":
-		return m.resolveWorkspace(workingDir)
+		projectID, err := project.ID(m.config, workingDir)
+		if err != nil {
+			return "", err
+		}
+		return knowledge.ProjectWorkspace(projectID), nil
 	case "global":
 		return knowledge.GlobalWorkspace, nil
 	default:

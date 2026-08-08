@@ -1002,8 +1002,8 @@ type NodeFilter struct {
 	PropertyEquals map[string]string
 	Query          string
 	Limit          int
-	// Lean selects only id/type/name/url and leaves content, properties, and
-	// embeddings empty. Use it for large listings (e.g. the indexer's symbol
+	// Lean selects only the cheap identifying columns (id/workspace/type/name/url)
+	// and leaves content, properties, and embeddings empty. Use it for large listings (e.g. the indexer's symbol
 	// index) that never touch the heavy columns, to avoid pulling every node's
 	// content and embedding JSON into memory.
 	Lean bool
@@ -1021,7 +1021,7 @@ func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node,
 	}
 	selectCols := nodeColumns
 	if filter.Lean {
-		selectCols = `id, type, name, COALESCE(url, '')`
+		selectCols = `id, workspace, type, name, COALESCE(url, '')`
 	}
 	sqlQuery := `SELECT ` + selectCols + ` FROM nodes`
 	var where []string
@@ -1078,7 +1078,7 @@ func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node,
 	for rows.Next() {
 		if filter.Lean {
 			var n Node
-			if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.URL); err != nil {
+			if err := rows.Scan(&n.ID, &n.Workspace, &n.Type, &n.Name, &n.URL); err != nil {
 				return nil, err
 			}
 			results = append(results, n)
@@ -2590,4 +2590,64 @@ func cosineSimilarity(a []float32, b []float32) float64 {
 		return 0
 	}
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
+}
+
+// RelocateNode re-keys a node: it is copied to newID with a new workspace and
+// url, every edge pointing at the original is repointed, and the original row
+// is removed — all in one transaction.
+//
+// It exists because a node's id encodes where it lives, so moving a document
+// between workspaces has to change its id or the next write for that key would
+// mint a second node instead of updating this one. A copy at the SQL level
+// carries content, properties, timestamps, and the embedding across untouched,
+// which a read-modify-write through Go could not: reads deliberately return an
+// embedding's length rather than its vector, so a document moved that way would
+// silently lose its semantic index.
+func (s *LibSQLStore) RelocateNode(ctx context.Context, oldID, newID, newWorkspace, newURL string) error {
+	oldID = strings.TrimSpace(oldID)
+	newID = strings.TrimSpace(newID)
+	if oldID == "" || newID == "" {
+		return fmt.Errorf("relocate node: both ids are required")
+	}
+	if oldID == newID {
+		return nil
+	}
+
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO nodes (id, workspace, domain, type, name, content, url, path, embedding_json, properties_json, created_at, updated_at)
+			SELECT ?, ?, domain, type, name, content, ?, path, embedding_json, properties_json, created_at, updated_at
+			FROM nodes WHERE id = ?`, newID, newWorkspace, newURL, oldID); err != nil {
+			return fmt.Errorf("copy node %s: %w", oldID, err)
+		}
+
+		// Repoint edges before deleting the original, whose removal would
+		// otherwise cascade them away.
+		if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE edges SET source_id = ? WHERE source_id = ?`, newID, oldID); err != nil {
+			return fmt.Errorf("repoint outgoing edges of %s: %w", oldID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE edges SET target_id = ? WHERE target_id = ?`, newID, oldID); err != nil {
+			return fmt.Errorf("repoint incoming edges of %s: %w", oldID, err)
+		}
+
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, oldID); err != nil {
+			return fmt.Errorf("clear search index for %s: %w", oldID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, oldID); err != nil {
+			return fmt.Errorf("remove relocated node %s: %w", oldID, err)
+		}
+
+		// Re-index the relocated row so search reflects its new workspace.
+		row := tx.QueryRowContext(ctx, `SELECT id, workspace, domain, type, name, content, COALESCE(path, '') FROM nodes WHERE id = ?`, newID)
+		var n Node
+		if err := row.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.Path); err != nil {
+			return fmt.Errorf("reload relocated node %s: %w", newID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, newID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO nodes_fts (node_id, workspace, domain, type, name, content, path)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`, n.ID, n.Workspace, n.Domain, n.Type, n.Name, n.Content, n.Path)
+		return err
+	})
 }

@@ -11,11 +11,13 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"raph/internal/config"
 	"raph/internal/db"
+	"raph/internal/project"
 )
 
 const (
@@ -462,4 +464,208 @@ func preview(value string, limit int) string {
 		return value
 	}
 	return string(runes[:limit]) + "..."
+}
+
+// ProjectWorkspace returns the bucket documents belonging to a project live in.
+//
+// It is deliberately NOT the indexer's workspace id. Those two used to be the
+// same value, which made `raph init` destroy documents: a full index run clears
+// its workspace wholesale, and a handoff is user-authored knowledge that nothing
+// regenerates. Keying off the project identity also means one bucket per
+// project rather than one per directory, so a document written from a
+// subdirectory is visible from the repository root — the rule memory already
+// follows.
+func ProjectWorkspace(projectID string) string {
+	return "knowledge:" + strings.TrimSpace(projectID)
+}
+
+// IsLegacyProjectWorkspace reports whether a workspace id is an indexer
+// workspace that documents were stored under before they got their own bucket.
+func IsLegacyProjectWorkspace(workspace string) bool {
+	workspace = strings.TrimSpace(workspace)
+	return strings.HasPrefix(workspace, "ws:") && workspace != GlobalWorkspace
+}
+
+// nodeRelocator is the store capability a workspace migration needs: re-keying
+// a node so its id matches where it now lives.
+type nodeRelocator interface {
+	RelocateNode(ctx context.Context, oldID, newID, newWorkspace, newURL string) error
+}
+
+// MigrateWorkspace moves every document in oldWorkspace to newWorkspace,
+// preserving content, properties, embeddings, chunks, and relation edges.
+//
+// Documents are re-keyed rather than relabelled because a document's node id is
+// derived from its workspace and key: leaving the id alone would make the next
+// write for that key mint a second node instead of updating this one.
+func MigrateWorkspace(ctx context.Context, store db.GraphStore, oldWorkspace, newWorkspace string) (int, error) {
+	oldWorkspace = strings.TrimSpace(oldWorkspace)
+	newWorkspace = strings.TrimSpace(newWorkspace)
+	if oldWorkspace == "" || newWorkspace == "" || oldWorkspace == newWorkspace {
+		return 0, nil
+	}
+	relocator, ok := store.(nodeRelocator)
+	if !ok {
+		return 0, fmt.Errorf("store cannot relocate nodes")
+	}
+
+	moved := 0
+	for {
+		docs, err := store.ListNodes(ctx, db.NodeFilter{
+			Workspace: oldWorkspace,
+			Types:     []string{TypeDoc},
+			Lean:      true,
+			Limit:     migrationPageSize,
+		})
+		if err != nil {
+			return moved, fmt.Errorf("list documents in %s: %w", oldWorkspace, err)
+		}
+		if len(docs) == 0 {
+			return moved, nil
+		}
+
+		for _, old := range docs {
+			if err := ctx.Err(); err != nil {
+				return moved, err
+			}
+			key := keyFromURL(old.URL, oldWorkspace)
+			if key == "" {
+				return moved, fmt.Errorf("document %s has no recoverable key (url %q)", old.ID, old.URL)
+			}
+			newDocID := nodeID(TypeDoc, newWorkspace+"|"+key)
+			newDocURL := "knowledge://" + newWorkspace + "/" + key
+
+			// Chunks first, while their doc_id property still points at the
+			// original: that property is how they are found.
+			chunks, err := store.ListNodes(ctx, db.NodeFilter{
+				Workspace:      oldWorkspace,
+				Types:          []string{TypeDocChunk},
+				PropertyEquals: map[string]string{"doc_id": old.ID},
+				Lean:           true,
+				Limit:          10000,
+			})
+			if err != nil {
+				return moved, fmt.Errorf("list chunks of %s: %w", old.ID, err)
+			}
+			for _, chunkNode := range chunks {
+				idx := chunkIndexFromURL(chunkNode.URL)
+				if idx < 0 {
+					continue
+				}
+				newChunkID := nodeID(TypeDocChunk, fmt.Sprintf("%s|%s|%d", newWorkspace, key, idx))
+				newChunkURL := newDocURL + fmt.Sprintf("#chunk-%d", idx+1)
+				if err := relocator.RelocateNode(ctx, chunkNode.ID, newChunkID, newWorkspace, newChunkURL); err != nil {
+					return moved, fmt.Errorf("relocate chunk %s: %w", chunkNode.ID, err)
+				}
+				if err := store.SetNodeProperties(ctx, newChunkID, map[string]string{"doc_id": newDocID}); err != nil {
+					return moved, fmt.Errorf("repoint chunk %s at its document: %w", newChunkID, err)
+				}
+			}
+
+			if err := relocator.RelocateNode(ctx, old.ID, newDocID, newWorkspace, newDocURL); err != nil {
+				return moved, fmt.Errorf("relocate document %s: %w", old.ID, err)
+			}
+			moved++
+		}
+	}
+}
+
+// chunkIndexFromURL recovers a chunk's position from its url suffix
+// ("...#chunk-N", 1-based), returning a 0-based index or -1.
+func chunkIndexFromURL(url string) int {
+	const marker = "#chunk-"
+	idx := strings.LastIndex(url, marker)
+	if idx < 0 {
+		return -1
+	}
+	n, err := strconv.Atoi(url[idx+len(marker):])
+	if err != nil || n < 1 {
+		return -1
+	}
+	return n - 1
+}
+
+// keyFromURL recovers a document's stable key from its url
+// ("knowledge://<workspace>/<key>"), which is where Add encodes it.
+//
+// The workspace is required to locate the boundary: keys are routinely
+// path-like ("release/handoff"), so taking the last url segment would silently
+// truncate them — and a truncated key re-keys the document to an id that later
+// writes for the real key never match, duplicating it instead of updating.
+func keyFromURL(url, workspace string) string {
+	prefix := "knowledge://" + strings.TrimSpace(workspace) + "/"
+	url = strings.TrimSpace(url)
+	if rest, ok := strings.CutPrefix(url, prefix); ok {
+		return rest
+	}
+	return ""
+}
+
+const migrationPageSize = 200
+
+// MigrationStats reports what a legacy document migration moved.
+type MigrationStats struct {
+	Workspaces int `json:"workspaces"`
+	Documents  int `json:"documents"`
+}
+
+// MigrateLegacyProjectDocs relocates documents written before project documents
+// got their own bucket, when they shared the indexer's workspace id.
+//
+// workspaceRoots maps an indexer workspace id to the root it was indexed from,
+// which is how a legacy bucket is resolved to a project. A bucket with no known
+// root (documents written for a directory that was never indexed) cannot be
+// un-hashed, so its digest is carried over as-is: that is exactly right when the
+// document was written from the project root — the common case, and the same
+// digest its memories already use — and no worse than the status quo otherwise.
+// Nothing is dropped either way.
+func MigrateLegacyProjectDocs(ctx context.Context, store db.GraphStore, cfg *config.Config, workspaceRoots map[string]string) (MigrationStats, error) {
+	var stats MigrationStats
+
+	legacy := map[string]struct{}{}
+	for offset := 0; ; offset += migrationPageSize {
+		docs, err := store.ListNodes(ctx, db.NodeFilter{
+			Types:  []string{TypeDoc},
+			Lean:   true,
+			Limit:  migrationPageSize,
+			Offset: offset,
+		})
+		if err != nil {
+			return stats, fmt.Errorf("list documents: %w", err)
+		}
+		for _, doc := range docs {
+			if IsLegacyProjectWorkspace(doc.Workspace) {
+				legacy[doc.Workspace] = struct{}{}
+			}
+		}
+		if len(docs) < migrationPageSize {
+			break
+		}
+	}
+
+	for old := range legacy {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		var target string
+		if root, ok := workspaceRoots[old]; ok && strings.TrimSpace(root) != "" {
+			projectID, err := project.ID(cfg, root)
+			if err != nil {
+				return stats, fmt.Errorf("resolve project for %s: %w", root, err)
+			}
+			target = ProjectWorkspace(projectID)
+		} else {
+			target = ProjectWorkspace("project:" + strings.TrimPrefix(old, "ws:"))
+		}
+
+		moved, err := MigrateWorkspace(ctx, store, old, target)
+		if err != nil {
+			return stats, err
+		}
+		if moved > 0 {
+			stats.Workspaces++
+			stats.Documents += moved
+		}
+	}
+	return stats, nil
 }
