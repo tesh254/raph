@@ -237,8 +237,20 @@ func TestMigrateWorkspaceMovesDocumentsIntact(t *testing.T) {
 		t.Fatalf("expected a multi-chunk document, got %d", len(full.Chunks))
 	}
 	for _, c := range full.Chunks {
-		c.Embedding = []float32{0, 1}
-		if err := store.SaveNode(ctx, c); err != nil {
+		// Re-read the chunk before saving: neighbour listings need not carry
+		// properties, and writing one back with an empty property map would
+		// erase its doc_id — the very field the migration finds chunks by. The
+		// migration would then quietly strand them, while this test still saw a
+		// full chunk count through the document's HAS_CHUNK edges.
+		stored, err := store.GetNodeByID(ctx, c.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Prop("doc_id") == "" {
+			t.Fatalf("fixture error: chunk %s lost its doc_id", c.ID)
+		}
+		stored.Embedding = []float32{0, 1}
+		if err := store.SaveNode(ctx, stored); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -283,6 +295,17 @@ func TestMigrateWorkspaceMovesDocumentsIntact(t *testing.T) {
 	}
 	if len(migrated.Chunks) != len(full.Chunks) {
 		t.Fatalf("expected %d chunks, got %d", len(full.Chunks), len(migrated.Chunks))
+	}
+	// Chunk count alone is not proof: the document's edges are repointed, so a
+	// stranded chunk still shows up here. Assert the legacy bucket is empty.
+	stranded, err := store.ListNodes(ctx, db.NodeFilter{
+		Workspace: old, Types: []string{TypeDocChunk}, Lean: true, Limit: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stranded) != 0 {
+		t.Fatalf("%d chunks left behind in the legacy workspace", len(stranded))
 	}
 	for _, c := range migrated.Chunks {
 		if c.EmbeddingLength != 2 {
@@ -378,5 +401,100 @@ func TestMigrateLegacyProjectDocsUsesKnownRootsAndPreservesUnknown(t *testing.T)
 	}
 	if again.Documents != 0 {
 		t.Fatalf("expected a repeat migration to move nothing, got %+v", again)
+	}
+}
+
+// A key already taken in the destination must skip that document, not abort the
+// run — otherwise one collision strands every remaining legacy document.
+func TestMigrateWorkspaceSkipsConflictsAndKeepsGoing(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	const old = "ws:legacy"
+	const target = "knowledge:project:x"
+
+	seedDoc(t, store, old, "clash", "Legacy clash", "legacy content")
+	seedDoc(t, store, target, "clash", "Destination clash", "destination content")
+	seedDoc(t, store, old, "movable", "Movable", "should still move")
+
+	moved, err := MigrateWorkspace(ctx, store, old, target)
+	if err != nil {
+		t.Fatalf("a key collision aborted the migration: %v", err)
+	}
+	if moved != 1 {
+		t.Fatalf("expected the non-conflicting document migrated, got %d", moved)
+	}
+
+	docs, err := List(ctx, store, ListFilter{Workspace: target, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("expected destination to hold its own doc plus the migrated one, got %d", len(docs))
+	}
+	for _, d := range docs {
+		if keyFromURL(d.URL, target) == "clash" && d.Content != "destination content" {
+			t.Fatal("migration overwrote the destination document")
+		}
+	}
+	left, err := List(ctx, store, ListFilter{Workspace: old, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 {
+		t.Fatalf("expected only the conflicting document left behind, got %d", len(left))
+	}
+}
+
+// Documents longer than one chunk page must migrate whole; a fixed cap left the
+// tail in the old bucket, outside project-scoped retrieval.
+func TestMigrateWorkspaceMovesEveryChunk(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	const old = "ws:legacy"
+	const target = "knowledge:project:x"
+
+	// maxChunkRunes is 1800, so this produces well over one page of chunks.
+	big := strings.Repeat("chunked documentation content. ", 20000)
+	doc, err := Add(ctx, store, nil, AddInput{
+		Workspace: old, Key: "large", Title: "Large", Content: big,
+		DocType: DocReference, Source: "user", NoEmbed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := Read(ctx, store, doc.Node.ID, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Chunks) <= migrationPageSize {
+		t.Skipf("fixture produced only %d chunks; needs more than one page of %d", len(full.Chunks), migrationPageSize)
+	}
+
+	if _, err := MigrateWorkspace(ctx, store, old, target); err != nil {
+		t.Fatal(err)
+	}
+
+	stranded, err := store.ListNodes(ctx, db.NodeFilter{
+		Workspace: old, Types: []string{TypeDocChunk}, Lean: true, Limit: 100000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stranded) != 0 {
+		t.Fatalf("%d chunks stranded in the legacy workspace", len(stranded))
+	}
+	migrated, err := List(ctx, store, ListFilter{Workspace: target, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(migrated) != 1 {
+		t.Fatalf("expected the document under the new workspace, got %d", len(migrated))
+	}
+	after, err := Read(ctx, store, migrated[0].ID, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Chunks) != len(full.Chunks) {
+		t.Fatalf("expected %d chunks after migration, got %d", len(full.Chunks), len(after.Chunks))
 	}
 }

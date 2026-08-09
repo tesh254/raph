@@ -2105,15 +2105,7 @@ func newProjectCmd() *cobra.Command {
 			defer store.Close()
 			ctx := cmd.Context()
 
-			memories, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
-				ScopeType: "project", ScopeID: identity.ID, Limit: 10000,
-			})
-			if err != nil {
-				return err
-			}
-			docs, err := knowledge.List(ctx, store, knowledge.ListFilter{
-				Workspace: knowledge.ProjectWorkspace(identity.ID), Limit: 10000,
-			})
+			memories, docs, err := store.CountProjectKnowledge(ctx, identity.ID, knowledge.ProjectWorkspace(identity.ID))
 			if err != nil {
 				return err
 			}
@@ -2121,8 +2113,8 @@ func newProjectCmd() *cobra.Command {
 			if resolveFormat() == output.FormatJSON {
 				return json.NewEncoder(out).Encode(map[string]any{
 					"identity":  identity,
-					"memories":  len(memories),
-					"documents": len(docs),
+					"memories":  memories,
+					"documents": docs,
 				})
 			}
 
@@ -2130,7 +2122,7 @@ func newProjectCmd() *cobra.Command {
 			fmt.Fprintf(out, "Identity:  %s\n", identity.ID)
 			fmt.Fprintf(out, "Anchor:    %s (%s)\n", identity.Anchor, identity.Source)
 			fmt.Fprintf(out, "Root:      %s\n", identity.Root)
-			fmt.Fprintf(out, "Knowledge: %d memories, %d documents\n", len(memories), len(docs))
+			fmt.Fprintf(out, "Knowledge: %d memories, %d documents\n", memories, docs)
 			if identity.Anchor == project.AnchorWorktree || identity.Anchor == project.AnchorDirectory {
 				fmt.Fprintf(out, "\nThis identity is derived from the path, so moving or re-cloning this\n"+
 					"directory starts a new project and leaves its knowledge behind. Add a git\n"+

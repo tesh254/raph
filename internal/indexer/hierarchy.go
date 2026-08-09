@@ -2,7 +2,10 @@ package indexer
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -216,6 +219,17 @@ func BackfillHierarchy(ctx context.Context, store db.GraphStore, cfg *config.Con
 			return stats, err
 		}
 
+		// A root that is no longer on disk cannot be resolved to the project it
+		// belongs to: with the checkout gone there is no git remote to read, so
+		// resolution falls back to hashing the stale path and would attach this
+		// workspace to a project node that nothing else — not its memories, not
+		// its documents — shares. Leaving it unlinked is honest; inventing a
+		// second project is not.
+		if _, statErr := os.Stat(ws.Root); statErr != nil {
+			verbose.Printf("backfill: skipping %s, root is no longer present: %v", ws.Workspace, statErr)
+			continue
+		}
+
 		idx, err := New(store, cfg, ws.Root, true)
 		if err != nil {
 			return stats, fmt.Errorf("resolve %s: %w", ws.Root, err)
@@ -391,7 +405,13 @@ func MigrateProjectIdentities(
 // the graph hierarchy and the memory scope keep sharing one id.
 func relocateProjectNode(ctx context.Context, store db.GraphStore, legacyID string, identity project.Identity) error {
 	if _, err := store.GetNodeByID(ctx, legacyID); err != nil {
-		return nil // never indexed under the old identity
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // never indexed under the old identity: nothing to move
+		}
+		// A database or cancellation error is not "absent". Swallowing it would
+		// report a successful migration while the project node still carries the
+		// old id, leaving the graph and the memory scope disagreeing.
+		return fmt.Errorf("look up legacy project node %s: %w", legacyID, err)
 	}
 	relocator, ok := store.(interface {
 		RelocateNode(ctx context.Context, oldID, newID, newWorkspace, newURL string) error

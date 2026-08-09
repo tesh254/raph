@@ -814,3 +814,94 @@ func TestSearchMemoryRecordsUntokenizableQueryStillFilters(t *testing.T) {
 		}
 	}
 }
+
+// LIKE wildcards in a query must match literally. A search for "100%" once
+// became the pattern "%100%%", and a bare "%" matched every memory in the
+// store — unrelated records returned as hits.
+func TestSearchMemoryRecordsTreatsWildcardsLiterally(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	seed := func(id, title, content string) {
+		if err := store.SaveNode(ctx, Node{
+			ID: id, Workspace: "ws", Domain: "memory", Type: "memory", Name: title, Content: content,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertMemoryRecord(ctx, MemoryRecord{
+			Node: Node{ID: id}, ScopeType: "project", ScopeID: "project:one", LifecycleState: "active",
+			KnowledgeType: "decision", Source: "user", WriterID: "w", MemoryKey: id,
+			CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z", Revision: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("pct", "Coverage target", "we require 100% coverage on the parser")
+	seed("under", "Column naming", "prefer user_id over userid")
+	seed("other", "Unrelated", "nothing to do with either")
+
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{"100%", "pct"},
+		{"user_id", "under"},
+	} {
+		matches, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{
+			Query: tc.query, LifecycleStates: []string{"active"}, Limit: 10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) != 1 || matches[0].Node.ID != tc.want {
+			ids := make([]string, 0, len(matches))
+			for _, m := range matches {
+				ids = append(ids, m.Node.ID)
+			}
+			t.Fatalf("query %q matched %v, want only %s", tc.query, ids, tc.want)
+		}
+	}
+
+	// A query that is nothing but wildcards must not match everything.
+	matches, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{
+		Query: "%%%", LifecycleStates: []string{"active"}, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("a wildcard-only query matched %d records", len(matches))
+	}
+}
+
+// A relocated node's access history must follow it. access_events has no
+// foreign key, so nothing moves these rows automatically; left behind they
+// point at a deleted id and split one node's activity in two.
+func TestRelocateCarriesAccessHistory(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	if err := store.SaveNode(ctx, Node{
+		ID: "old", Workspace: "ws:legacy", Domain: "knowledge", Type: "doc", Name: "Doc", Content: "body",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAccess(ctx, "old", "view", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RelocateNode(ctx, "old", "new", "knowledge:project:x", "knowledge://knowledge:project:x/doc"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stale, moved int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_events WHERE node_id = 'old'`).Scan(&stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_events WHERE node_id = 'new'`).Scan(&moved); err != nil {
+		t.Fatal(err)
+	}
+	if stale != 0 || moved != 1 {
+		t.Fatalf("access history not carried across: %d left on the old id, %d on the new", stale, moved)
+	}
+}

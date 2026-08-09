@@ -18,6 +18,7 @@ import (
 	"raph/internal/config"
 	"raph/internal/db"
 	"raph/internal/project"
+	"raph/internal/verbose"
 )
 
 const (
@@ -510,6 +511,9 @@ func MigrateWorkspace(ctx context.Context, store db.GraphStore, oldWorkspace, ne
 	}
 
 	moved := 0
+	// Documents that cannot move stay in the source workspace, so the same page
+	// would be re-read forever without remembering them.
+	skipped := map[string]bool{}
 	for {
 		docs, err := store.ListNodes(ctx, db.NodeFilter{
 			Workspace: oldWorkspace,
@@ -524,9 +528,13 @@ func MigrateWorkspace(ctx context.Context, store db.GraphStore, oldWorkspace, ne
 			return moved, nil
 		}
 
+		progressed := false
 		for _, old := range docs {
 			if err := ctx.Err(); err != nil {
 				return moved, err
+			}
+			if skipped[old.ID] {
+				continue
 			}
 			key := keyFromURL(old.URL, oldWorkspace)
 			if key == "" {
@@ -535,39 +543,89 @@ func MigrateWorkspace(ctx context.Context, store db.GraphStore, oldWorkspace, ne
 			newDocID := nodeID(TypeDoc, newWorkspace+"|"+key)
 			newDocURL := "knowledge://" + newWorkspace + "/" + key
 
-			// Chunks first, while their doc_id property still points at the
-			// original: that property is how they are found.
-			chunks, err := store.ListNodes(ctx, db.NodeFilter{
-				Workspace:      oldWorkspace,
-				Types:          []string{TypeDocChunk},
-				PropertyEquals: map[string]string{"doc_id": old.ID},
-				Lean:           true,
-				Limit:          10000,
-			})
-			if err != nil {
-				return moved, fmt.Errorf("list chunks of %s: %w", old.ID, err)
+			// Check the destination before moving anything. Chunks relocate
+			// first, so a document whose key is already taken would otherwise
+			// fail partway through — after some chunks had already been moved
+			// under the destination document's id.
+			if _, err := store.GetNodeByID(ctx, newDocID); err == nil {
+				verbose.Printf("skipping document %s: %s already holds key %q", old.ID, newWorkspace, key)
+				skipped[old.ID] = true
+				continue
 			}
-			for _, chunkNode := range chunks {
-				idx := chunkIndexFromURL(chunkNode.URL)
-				if idx < 0 {
-					continue
+
+			// Chunks first, while their doc_id property still points at the
+			// original: that property is how they are found. Paged rather than
+			// capped — a fixed limit would silently strand the tail of a long
+			// document in the old bucket, outside project-scoped retrieval.
+			for {
+				chunks, err := store.ListNodes(ctx, db.NodeFilter{
+					Workspace:      oldWorkspace,
+					Types:          []string{TypeDocChunk},
+					PropertyEquals: map[string]string{"doc_id": old.ID},
+					Lean:           true,
+					Limit:          migrationPageSize,
+				})
+				if err != nil {
+					return moved, fmt.Errorf("list chunks of %s: %w", old.ID, err)
 				}
-				newChunkID := nodeID(TypeDocChunk, fmt.Sprintf("%s|%s|%d", newWorkspace, key, idx))
-				newChunkURL := newDocURL + fmt.Sprintf("#chunk-%d", idx+1)
-				if err := relocator.RelocateNode(ctx, chunkNode.ID, newChunkID, newWorkspace, newChunkURL); err != nil {
-					return moved, fmt.Errorf("relocate chunk %s: %w", chunkNode.ID, err)
+				if len(chunks) == 0 {
+					break
 				}
-				if err := store.SetNodeProperties(ctx, newChunkID, map[string]string{"doc_id": newDocID}); err != nil {
-					return moved, fmt.Errorf("repoint chunk %s at its document: %w", newChunkID, err)
+				relocated := 0
+				for _, chunkNode := range chunks {
+					idx := chunkIndexFromURL(chunkNode.URL)
+					if idx < 0 {
+						continue
+					}
+					newChunkID := nodeID(TypeDocChunk, fmt.Sprintf("%s|%s|%d", newWorkspace, key, idx))
+					newChunkURL := newDocURL + fmt.Sprintf("#chunk-%d", idx+1)
+					if err := relocator.RelocateNode(ctx, chunkNode.ID, newChunkID, newWorkspace, newChunkURL); err != nil {
+						return moved, fmt.Errorf("relocate chunk %s: %w", chunkNode.ID, err)
+					}
+					// Repointed immediately after the move: a run interrupted
+					// between the two would otherwise leave a chunk in the new
+					// bucket still claiming the old document, and the query that
+					// finds chunks (by doc_id, in the OLD workspace) would never
+					// see it again to fix it.
+					if err := store.SetNodeProperties(ctx, newChunkID, map[string]string{"doc_id": newDocID}); err != nil {
+						return moved, fmt.Errorf("repoint chunk %s at its document: %w", newChunkID, err)
+					}
+					relocated++
+				}
+				// Relocated chunks leave this workspace, so the same query
+				// returns the next batch. A page that moved nothing would
+				// otherwise repeat forever.
+				if relocated == 0 {
+					break
 				}
 			}
 
 			if err := relocator.RelocateNode(ctx, old.ID, newDocID, newWorkspace, newDocURL); err != nil {
+				// A document already occupying that key in the destination is a
+				// conflict, not a failure: skip it so the remaining legacy
+				// documents still migrate instead of the whole run aborting on
+				// the first collision.
+				if isDuplicateKeyErr(err) {
+					verbose.Printf("skipping document %s: %s already holds key %q", old.ID, newWorkspace, key)
+					skipped[old.ID] = true
+					continue
+				}
 				return moved, fmt.Errorf("relocate document %s: %w", old.ID, err)
 			}
 			moved++
+			progressed = true
+		}
+		if !progressed {
+			return moved, nil
 		}
 	}
+}
+
+// isDuplicateKeyErr reports whether a write failed because the destination row
+// already exists.
+func isDuplicateKeyErr(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint") || strings.Contains(msg, "primary key")
 }
 
 // chunkIndexFromURL recovers a chunk's position from its url suffix

@@ -735,3 +735,114 @@ func TestMigrateProjectScopeNoOpForSameOrEmptyScope(t *testing.T) {
 		}
 	}
 }
+
+// A page consisting entirely of conflicts must not stop the migration: the
+// movable memories behind it would be abandoned, and re-reading the same page
+// forever would hang.
+func TestMigrateProjectScopePagesPastConflicts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	const oldScope = "project:legacypath"
+	const newScope = "project:remoteanchor"
+
+	// Conflicts: present in both scopes, so they cannot move.
+	for i := 0; i < 3; i++ {
+		key := fmt.Sprintf("conflict/%d", i)
+		for _, scope := range []string{oldScope, newScope} {
+			if _, err := Store(ctx, store, nil, StoreInput{
+				ScopeType: "project", ScopeID: scope, KnowledgeType: "decision",
+				Title: key, Content: "from " + scope, Source: "user",
+				WriterID: "agent:test", MemoryKey: key,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// Movable memories that must still be reached.
+	for i := 0; i < 2; i++ {
+		seedScopedMemory(t, store, oldScope, fmt.Sprintf("movable/%d", i))
+	}
+
+	stats, err := MigrateProjectScope(ctx, store, oldScope, newScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Moved != 2 {
+		t.Fatalf("expected both movable memories migrated past the conflicts, got %+v", stats)
+	}
+	if stats.Conflict != 3 {
+		t.Fatalf("expected 3 conflicts reported, got %+v", stats)
+	}
+	left, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
+		ScopeType: "project", ScopeID: oldScope, Limit: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 3 {
+		t.Fatalf("expected only the conflicts left behind, found %d", len(left))
+	}
+}
+
+func seedScopedMemory(t *testing.T, store db.GraphStore, scopeID, key string) {
+	t.Helper()
+	if _, err := Store(context.Background(), store, nil, StoreInput{
+		ScopeType: "project", ScopeID: scopeID, KnowledgeType: "decision",
+		Title: key, Content: "content " + key, Source: "user",
+		WriterID: "agent:test", MemoryKey: key,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The boost is for the working directory's project. A shared scope that happens
+// to carry the same id string is a different thing entirely.
+func TestApplyProjectAffinityIgnoresMatchingSharedScope(t *testing.T) {
+	records := []db.MemoryRecord{
+		{Node: db.Node{ID: "shared-1"}, ScopeType: "shared", ScopeID: "project:mine"},
+		{Node: db.Node{ID: "other-1"}, ScopeType: "project", ScopeID: "project:other"},
+		{Node: db.Node{ID: "other-2"}, ScopeType: "project", ScopeID: "project:other"},
+		{Node: db.Node{ID: "mine-1"}, ScopeType: "project", ScopeID: "project:mine"},
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, "project:mine"))
+	if got[0] != "shared-1" {
+		t.Fatalf("ordering changed unexpectedly: %v", got)
+	}
+	// Only the genuine project memory should have moved up.
+	if !slices.Equal(got, []string{"shared-1", "mine-1", "other-1", "other-2"}) {
+		t.Fatalf("expected only the project-scoped memory boosted, got %v", got)
+	}
+}
+
+// When both passes contribute, the merge reserves slots for keyword-only hits
+// and truncates the semantic list. A project memory ranked past that cut must
+// still reach the page — otherwise the boost does nothing in exactly the case
+// hybrid search is designed for.
+func TestSearchBoostSurvivesTheKeywordReserve(t *testing.T) {
+	semantic := []db.MemoryRecord{
+		affinityRecord("sem-1", "project:other"),
+		affinityRecord("sem-2", "project:other"),
+		affinityRecord("sem-3", "project:other"),
+		affinityRecord("sem-4", "project:other"),
+		affinityRecord("mine", "project:mine"),
+	}
+	keyword := []db.MemoryRecord{
+		affinityRecord("kw-1", "project:other"),
+		affinityRecord("kw-2", "project:other"),
+	}
+
+	boostedSemantic := applyProjectAffinity(semantic, "project:mine")
+	merged, _ := mergeMemoryMatches(boostedSemantic, applyProjectAffinity(keyword, "project:mine"), 5)
+	merged = applyProjectAffinity(merged, "project:mine")
+
+	if !slices.Contains(affinityIDs(merged), "mine") {
+		t.Fatalf("the project memory was cut by the keyword reserve before the boost applied: %v", affinityIDs(merged))
+	}
+}

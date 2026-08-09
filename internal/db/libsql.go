@@ -1359,11 +1359,21 @@ type Workspace struct {
 
 // memoryTermMatch tests one term against everything a memory is searchable by.
 // Its four placeholders are filled by likeArgs.
-const memoryTermMatch = `(LOWER(n.name) LIKE ? OR LOWER(n.content) LIKE ? OR LOWER(mr.display_tags_json) LIKE ? OR LOWER(mr.normalized_tags_json) LIKE ?)`
+const memoryTermMatch = "(LOWER(n.name) LIKE ? ESCAPE '\\' OR LOWER(n.content) LIKE ? ESCAPE '\\' OR LOWER(mr.display_tags_json) LIKE ? ESCAPE '\\' OR LOWER(mr.normalized_tags_json) LIKE ? ESCAPE '\\')"
 
 func likeArgs(term string) []any {
-	like := "%" + term + "%"
+	like := "%" + escapeLike(term) + "%"
 	return []any{like, like, like, like}
+}
+
+// escapeLike neutralizes LIKE's wildcards so a query term matches literally.
+// Without it, a memory search for "100%" or "user_id" silently becomes a
+// pattern: "%" alone matches every memory, and "_" matches any character, so
+// recall returns unrelated records and presents them as hits. The escape
+// character is declared per-predicate via ESCAPE.
+func escapeLike(term string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`)
+	return replacer.Replace(term)
 }
 
 // memoryQueryStopwords are function words that appear in almost any phrasing of
@@ -1436,9 +1446,25 @@ const structuralTypeList = `'project', 'workspace', 'directory'`
 // deferred read transaction (not withTx's immediate write lock): the studio
 // polls this, and a poll must never block or stall an indexing/memory write.
 func (s *LibSQLStore) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
-	workspaces := []Workspace{}
+	var workspaces []Workspace
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `
+		var err error
+		workspaces, err = listWorkspacesTx(ctx, tx)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return workspaces, nil
+}
+
+// listWorkspacesTx is ListWorkspaces' query, scoped to a caller's transaction so
+// a report that combines repositories with other aggregates (see ListProjects)
+// reads them all from one snapshot instead of two, where a concurrent index run
+// could make the halves disagree.
+func listWorkspacesTx(ctx context.Context, tx *sql.Tx) ([]Workspace, error) {
+	workspaces := []Workspace{}
+	rows, err := tx.QueryContext(ctx, `
 			SELECT workspace,
 			       COALESCE(MAX(NULLIF(path, '')), '') AS root,
 			       COUNT(*) AS nodes,
@@ -1449,56 +1475,54 @@ func (s *LibSQLStore) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
 			GROUP BY workspace
 			HAVING SUM(CASE WHEN type = 'file' THEN 1 ELSE 0 END) > 0
 			ORDER BY last_indexed DESC, root ASC`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 
-		for rows.Next() {
-			var w Workspace
-			if err := rows.Scan(&w.Workspace, &w.Root, &w.Nodes, &w.Files, &w.LastIndexed); err != nil {
-				return err
-			}
-			w.ByDomain = map[string]int{}
-			if w.Root != "" {
-				w.Name = filepath.Base(w.Root)
-			} else {
-				w.Name = w.Workspace
-			}
-			workspaces = append(workspaces, w)
+	for rows.Next() {
+		var w Workspace
+		if err := rows.Scan(&w.Workspace, &w.Root, &w.Nodes, &w.Files, &w.LastIndexed); err != nil {
+			return nil, err
 		}
-		if err := rows.Err(); err != nil {
-			return err
+		w.ByDomain = map[string]int{}
+		if w.Root != "" {
+			w.Name = filepath.Base(w.Root)
+		} else {
+			w.Name = w.Workspace
 		}
-		// Index by workspace id so the per-domain pass can attach counts.
-		// Pointers into the slice let us mutate in place without a second copy.
-		byID := make(map[string]*Workspace, len(workspaces))
-		for i := range workspaces {
-			byID[workspaces[i].Workspace] = &workspaces[i]
-		}
+		workspaces = append(workspaces, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Index by workspace id so the per-domain pass can attach counts.
+	// Pointers into the slice let us mutate in place without a second copy.
+	byID := make(map[string]*Workspace, len(workspaces))
+	for i := range workspaces {
+		byID[workspaces[i].Workspace] = &workspaces[i]
+	}
 
-		domainRows, err := tx.QueryContext(ctx, `
+	domainRows, err := tx.QueryContext(ctx, `
 			SELECT workspace, domain, COUNT(*)
 			FROM nodes
 			WHERE TRIM(workspace) <> '' AND type NOT IN (`+structuralTypeList+`)
 			GROUP BY workspace, domain`)
-		if err != nil {
-			return err
-		}
-		defer domainRows.Close()
-		for domainRows.Next() {
-			var ws, domain string
-			var n int
-			if err := domainRows.Scan(&ws, &domain, &n); err != nil {
-				return err
-			}
-			if w := byID[ws]; w != nil && strings.TrimSpace(domain) != "" {
-				w.ByDomain[domain] = n
-			}
-		}
-		return domainRows.Err()
-	})
 	if err != nil {
+		return nil, err
+	}
+	defer domainRows.Close()
+	for domainRows.Next() {
+		var ws, domain string
+		var n int
+		if err := domainRows.Scan(&ws, &domain, &n); err != nil {
+			return nil, err
+		}
+		if w := byID[ws]; w != nil && strings.TrimSpace(domain) != "" {
+			w.ByDomain[domain] = n
+		}
+	}
+	if err := domainRows.Err(); err != nil {
 		return nil, err
 	}
 	return workspaces, nil
@@ -2710,6 +2734,13 @@ func repointEdgesTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error 
 	if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE edges SET target_id = ? WHERE target_id = ?`, newID, oldID); err != nil {
 		return fmt.Errorf("repoint incoming edges of %s: %w", oldID, err)
 	}
+	// access_events has no foreign key, so nothing would move these with the
+	// node. Left behind, a relocated node's history points at an id that no
+	// longer exists: the studio shows the reads and writes with blank metadata,
+	// and splits one node's activity across two identities.
+	if _, err := tx.ExecContext(ctx, `UPDATE access_events SET node_id = ? WHERE node_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("repoint access history of %s: %w", oldID, err)
+	}
 	return nil
 }
 
@@ -2764,17 +2795,21 @@ type Project struct {
 // Like ListWorkspaces this runs in one deferred read snapshot: the studio polls
 // it, so it must never block a write, and the counts must agree with each other.
 func (s *LibSQLStore) ListProjects(ctx context.Context, docWorkspacePrefix string) ([]Project, error) {
-	workspaces, err := s.ListWorkspaces(ctx)
-	if err != nil {
-		return nil, err
-	}
-	byWorkspaceID := make(map[string]Workspace, len(workspaces))
-	for _, ws := range workspaces {
-		byWorkspaceID[ws.Workspace] = ws
-	}
-
 	projects := []Project{}
-	err = s.withReadTx(ctx, func(tx *sql.Tx) error {
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		// Repositories are read inside this snapshot, not through
+		// ListWorkspaces' own: two snapshots straddling a re-index can report a
+		// project whose file counts and hierarchy counts describe different
+		// moments, which reads as data loss in the dashboard.
+		workspaces, err := listWorkspacesTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		byWorkspaceID := make(map[string]Workspace, len(workspaces))
+		for _, ws := range workspaces {
+			byWorkspaceID[ws.Workspace] = ws
+		}
+
 		rows, err := tx.QueryContext(ctx, `
 			SELECT id, name, COALESCE(path, '')
 			FROM nodes WHERE type = 'project' ORDER BY name ASC`)
@@ -2943,4 +2978,25 @@ func (s *LibSQLStore) ListProjectScopes(ctx context.Context) ([]string, error) {
 		scopes = append(scopes, scope)
 	}
 	return scopes, rows.Err()
+}
+
+// CountProjectKnowledge returns how many active memories and documents a
+// project holds.
+//
+// Counting in SQL rather than listing rows keeps the answer correct past any
+// page size: a listing capped at N reports N for every project bigger than N,
+// which is exactly when the number matters.
+func (s *LibSQLStore) CountProjectKnowledge(ctx context.Context, projectID, docWorkspace string) (memories int, documents int, err error) {
+	err = s.withReadTx(ctx, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM memory_records
+			WHERE scope_type = 'project' AND scope_id = ? AND lifecycle_state = 'active'`,
+			projectID).Scan(&memories); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM nodes WHERE type = 'doc' AND workspace = ?`,
+			docWorkspace).Scan(&documents)
+	})
+	return memories, documents, err
 }

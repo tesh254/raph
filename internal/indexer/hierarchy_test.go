@@ -504,6 +504,15 @@ func TestMigrateProjectIdentitiesMovesKnowledgeOntoRemoteIdentity(t *testing.T) 
 	if len(docs) != 1 {
 		t.Fatalf("expected the document under the remote identity, found %d", len(docs))
 	}
+	// Present in the new bucket is only half the claim; a copy left behind would
+	// be resurrected by any later lookup against the legacy identity.
+	legacyDocs, err := knowledge.List(ctx, store, knowledge.ListFilter{Workspace: knowledge.ProjectWorkspace(legacyID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legacyDocs) != 0 {
+		t.Fatalf("document left behind under the legacy identity: %d", len(legacyDocs))
+	}
 }
 
 // A repository with no remote keeps its path identity, so there is nothing to
@@ -583,5 +592,47 @@ func TestMigrateProjectIdentitiesReportsUnknownScopes(t *testing.T) {
 	}
 	if !slices.Contains(stats.Unresolved, "project:unknownpathhash") {
 		t.Fatalf("expected the stranded scope reported, got %+v", stats.Unresolved)
+	}
+}
+
+// Removing the last indexed file in a directory must take the directory node
+// with it, or the project hierarchy keeps showing folders that hold nothing.
+func TestRemoveFilePrunesEmptyDirectories(t *testing.T) {
+	store := hierarchyStore(t)
+	root := t.TempDir()
+	writeFile(t, root, "keep/stays.md", "# stays")
+	writeFile(t, root, "gone/deep/only.md", "# only")
+	ctx := context.Background()
+
+	idx, err := New(store, nil, root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(filepath.Join(root, "gone", "deep", "only.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.RemoveFile(ctx, "gone/deep/only.md"); err != nil {
+		t.Fatal(err)
+	}
+
+	dirs, err := store.ListNodes(ctx, db.NodeFilter{
+		Workspace: idx.WorkspaceID(), Types: []string{TypeDirectory}, Limit: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := map[string]bool{}
+	for _, d := range dirs {
+		remaining[d.Name] = true
+	}
+	if remaining["gone/deep"] || remaining["gone"] {
+		t.Fatalf("emptied directories were not pruned: %v", remaining)
+	}
+	if !remaining["keep"] {
+		t.Fatalf("a directory that still holds a file was pruned: %v", remaining)
 	}
 }

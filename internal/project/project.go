@@ -200,6 +200,12 @@ func canonicalizeRemoteURL(raw string) (string, bool) {
 		if err != nil || parsed.Host == "" {
 			return "", false
 		}
+		// file:// names a location on disk, exactly like a bare path remote —
+		// "file://localhost/srv/git/x" even carries a host, so it would
+		// otherwise sail through as though it identified a repository.
+		if strings.EqualFold(parsed.Scheme, "file") {
+			return "", false
+		}
 		// Hostname() drops the port; User is discarded entirely so a token
 		// embedded in a remote URL can never end up inside an identity.
 		hostPath = parsed.Hostname() + "/" + strings.TrimPrefix(parsed.Path, "/")
@@ -218,12 +224,13 @@ func canonicalizeRemoteURL(raw string) (string, bool) {
 		hostPath = rest[:colon] + "/" + strings.TrimPrefix(rest[colon+1:], "/")
 	}
 
-	hostPath = strings.TrimSuffix(strings.TrimSpace(hostPath), "/")
+	// Lowercase BEFORE stripping the suffix: hosts are case-insensitive and
+	// forges treat owner/repo that way too, and a remote written ".GIT" would
+	// otherwise keep its suffix and become a second, unrelated project.
+	hostPath = strings.ToLower(strings.TrimSpace(hostPath))
+	hostPath = strings.TrimSuffix(hostPath, "/")
 	hostPath = strings.TrimSuffix(hostPath, ".git")
 	hostPath = strings.Trim(hostPath, "/")
-	// Hosts are case-insensitive and forges treat owner/repo that way too, so
-	// lowercasing keeps two spellings of one repository together.
-	hostPath = strings.ToLower(hostPath)
 
 	// Require host and at least one path segment; a bare host names no project.
 	if !strings.Contains(hostPath, "/") {

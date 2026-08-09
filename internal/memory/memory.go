@@ -249,8 +249,16 @@ func Search(ctx context.Context, store db.GraphStore, cfg *config.Config, input 
 		return SearchOutput{}, err
 	}
 
-	// Merge over the widened pool, re-rank, and only then cut to the page the
-	// caller asked for.
+	// Boost each pass BEFORE merging. The merge reserves part of the page for
+	// keyword-only hits and truncates each list to fit, so a project memory
+	// ranked past that cut would be discarded before any post-merge re-rank
+	// could lift it — the boost would silently do nothing precisely when both
+	// passes contribute. Re-ranking the inputs puts it inside the cut first.
+	semantic = applyProjectAffinity(semantic, projectID)
+	keyword = applyProjectAffinity(keyword, projectID)
+
+	// Merge over the widened pool, re-rank across the two lists, and only then
+	// cut to the page the caller asked for.
 	matches, mode := mergeMemoryMatches(semantic, keyword, candidateLimit)
 	matches = applyProjectAffinity(matches, projectID)
 	if len(matches) > limit {
@@ -292,7 +300,10 @@ func applyProjectAffinity(records []db.MemoryRecord, projectID string) []db.Memo
 	boosted := false
 	for i, record := range records {
 		score := float64(i)
-		if record.ScopeID == projectID {
+		// Scope type matters: a shared scope whose id happens to equal the
+		// project id is not this project's memory, and boosting it would break
+		// the promise that only the working directory's project is favoured.
+		if record.ScopeType == scopeProject && record.ScopeID == projectID {
 			score -= affinityBoostPositions
 			boosted = true
 		}
@@ -623,11 +634,16 @@ func MigrateProjectScope(ctx context.Context, store db.GraphStore, oldScopeID, n
 		return stats, fmt.Errorf("store cannot relocate memories")
 	}
 
+	// Conflicting memories stay in the source scope, so paging has to step over
+	// them. Without an offset a full page of conflicts would be re-read forever;
+	// stopping instead would abandon every movable memory behind that page.
+	offset := 0
 	for {
 		records, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
 			ScopeType: scopeProject,
 			ScopeID:   oldScopeID,
 			Limit:     scopeMigrationPageSize,
+			Offset:    offset,
 		})
 		if err != nil {
 			return stats, fmt.Errorf("list memories in %s: %w", oldScopeID, err)
@@ -636,7 +652,7 @@ func MigrateProjectScope(ctx context.Context, store db.GraphStore, oldScopeID, n
 			return stats, nil
 		}
 
-		progressed := false
+		skipped := 0
 		for _, record := range records {
 			if err := ctx.Err(); err != nil {
 				return stats, err
@@ -649,16 +665,17 @@ func MigrateProjectScope(ctx context.Context, store db.GraphStore, oldScopeID, n
 			switch {
 			case err == nil:
 				stats.Moved++
-				progressed = true
 			case errors.Is(err, db.ErrMemoryExists):
 				stats.Conflict++
+				skipped++
 			default:
 				return stats, fmt.Errorf("relocate memory %s: %w", record.Node.ID, err)
 			}
 		}
-		// Conflicts stay in the source scope, so a page made entirely of them
-		// would otherwise be re-read forever.
-		if !progressed {
+		// Moved records leave the source scope, so only the skipped ones still
+		// occupy the window the next page must start after.
+		offset += skipped
+		if len(records) < scopeMigrationPageSize && skipped == len(records) {
 			return stats, nil
 		}
 	}

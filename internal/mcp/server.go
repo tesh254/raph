@@ -711,12 +711,7 @@ func (m *MCPServerWrapper) registerTools() {
 		// Project resolution is best-effort: it only supplies a ranking bias, so
 		// an unreadable or nonexistent directory must still return matches
 		// rather than failing the recall outright.
-		var identity *project.Identity
-		if resolved, err := project.Resolve(m.config, args.WorkingDirectory); err == nil {
-			identity = &resolved
-		} else {
-			verbose.Printf("search_memory: project affinity unavailable for %q: %v", args.WorkingDirectory, err)
-		}
+		identity := m.projectForRanking(args.WorkingDirectory)
 
 		projectID := ""
 		if identity != nil {
@@ -1159,7 +1154,11 @@ func (m *MCPServerWrapper) searchWorkspace(ctx context.Context, workspace string
 func (m *MCPServerWrapper) resolveDocWorkspace(scope string, workingDir string) (string, error) {
 	switch strings.TrimSpace(scope) {
 	case "", "project":
-		projectID, err := project.ID(m.config, workingDir)
+		dir, err := agentWorkingDir(workingDir)
+		if err != nil {
+			return "", err
+		}
+		projectID, err := project.ID(m.config, dir)
 		if err != nil {
 			return "", err
 		}
@@ -1232,21 +1231,71 @@ func (m *MCPServerWrapper) resolveScopeID(scopeType string, provided string, wor
 	if scopeType == "" {
 		return "", fmt.Errorf("scope_type is required")
 	}
-	if provided != "" {
-		return provided, nil
-	}
+
 	switch scopeType {
-	case "project":
-		return project.ID(m.config, workingDir)
 	case "global":
 		// Global memory is the cross-project, cross-agent bucket, so it only
-		// works if every writer lands on the same id. Left to invent one, two
-		// agents choose differently, update_memory-by-coordinates misses, and
-		// the same preference is stored twice instead of revised once.
+		// works if every writer lands on the same id. A caller-supplied id is
+		// ignored rather than honoured: accepting one splits a single global
+		// fact into per-agent copies that update_memory can never reconcile.
+		if provided != "" && provided != GlobalScopeID {
+			verbose.Printf("ignoring scope_id %q for global scope; global memory uses one shared bucket", provided)
+		}
 		return GlobalScopeID, nil
+	case "project":
+		if provided != "" {
+			return provided, nil
+		}
+		dir, err := agentWorkingDir(workingDir)
+		if err != nil {
+			return "", err
+		}
+		return project.ID(m.config, dir)
 	default:
+		if provided != "" {
+			return provided, nil
+		}
 		return "", fmt.Errorf("scope_id is required for %s scope (it names the group sharing the memory, e.g. a team)", scopeType)
 	}
+}
+
+// agentWorkingDir validates the directory an agent supplied before a project is
+// derived from it.
+//
+// It refuses to fall back to this process's working directory. That directory
+// is wherever the client launched the server — for a stdio MCP server, usually
+// unrelated to the code being worked on — so inferring a project from it files
+// knowledge under a project nobody will ever look in. A relative path is
+// rejected for the same reason: it would be resolved against that same
+// unrelated directory. Failing loudly is recoverable; writing to the wrong
+// project silently is not.
+func agentWorkingDir(workingDir string) (string, error) {
+	dir := strings.TrimSpace(workingDir)
+	if dir == "" {
+		return "", fmt.Errorf("working_directory is required for project scope: pass the absolute path you are working in, since this server's own directory is not yours")
+	}
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("working_directory must be an absolute path (got %q): a relative path would resolve against this server's directory, not yours", dir)
+	}
+	return dir, nil
+}
+
+// projectForRanking resolves a project for read paths, where a missing or
+// unusable working directory must not fail the request. Recall still returns
+// every match; it simply loses the ranking boost, which is strictly better than
+// boosting a project the agent never asked about.
+func (m *MCPServerWrapper) projectForRanking(workingDir string) *project.Identity {
+	dir, err := agentWorkingDir(workingDir)
+	if err != nil {
+		verbose.Printf("project affinity unavailable: %v", err)
+		return nil
+	}
+	identity, err := project.Resolve(m.config, dir)
+	if err != nil {
+		verbose.Printf("project affinity unavailable for %q: %v", dir, err)
+		return nil
+	}
+	return &identity
 }
 
 func (m *MCPServerWrapper) searchKnowledge(ctx context.Context, scopeType string, scopeID string, knowledgeType string, query string, limit int) (ScopedMemorySearchOutput, error) {

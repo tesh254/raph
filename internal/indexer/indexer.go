@@ -251,7 +251,47 @@ func (i *Indexer) SyncFile(ctx context.Context, path string) (Stats, error) {
 }
 
 func (i *Indexer) RemoveFile(ctx context.Context, relativePath string) error {
-	return i.store.DeleteFileNodes(ctx, i.workspaceID, filepath.ToSlash(relativePath))
+	relativePath = filepath.ToSlash(relativePath)
+	if err := i.store.DeleteFileNodes(ctx, i.workspaceID, relativePath); err != nil {
+		return err
+	}
+	// Deleting the last file in a directory leaves an empty directory node
+	// behind, so the project hierarchy keeps showing folders that no longer
+	// hold anything indexed.
+	i.pruneEmptyDirs(ctx, relativePath)
+	return nil
+}
+
+// pruneEmptyDirs removes the directory nodes above a deleted file for as long as
+// they hold nothing else, stopping at the first directory that still has
+// contents (and never touching the workspace node itself).
+func (i *Indexer) pruneEmptyDirs(ctx context.Context, relativePath string) {
+	dir := filepath.ToSlash(filepath.Dir(relativePath))
+	for dir != "" && dir != "." && dir != "/" {
+		id := i.nodeID("dir", dir)
+		nodes, edges, err := i.store.GetNeighbors(ctx, id)
+		if err != nil {
+			return // absent or unreadable: nothing safe to prune
+		}
+		if len(nodes) == 0 && len(edges) == 0 {
+			return
+		}
+		children := 0
+		for _, edge := range edges {
+			if edge.Type == RelContains && edge.SourceID == id {
+				children++
+			}
+		}
+		if children > 0 {
+			return
+		}
+		if err := i.store.DeleteNodeByID(ctx, id); err != nil {
+			verbose.Printf("prune empty directory %s failed: %v", dir, err)
+			return
+		}
+		delete(i.dirNodes, dir)
+		dir = filepath.ToSlash(filepath.Dir(dir))
+	}
 }
 
 func (i *Indexer) WorkspaceID() string {

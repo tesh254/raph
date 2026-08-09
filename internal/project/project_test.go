@@ -196,6 +196,8 @@ func TestCanonicalizeRemoteURL(t *testing.T) {
 		"https://GitHub.com/Tesh254/Raph.git",
 		"git://github.com/tesh254/raph.git",
 		"https://github.com/tesh254/raph/",
+		"https://github.com/tesh254/raph.GIT",
+		"GIT@GITHUB.COM:tesh254/raph.Git",
 		// A token in a remote URL must never reach an identity.
 		"https://tesh254:ghp_secret@github.com/tesh254/raph.git",
 	}
@@ -226,7 +228,11 @@ func TestCanonicalizeRemoteURL(t *testing.T) {
 
 	// Remotes that name a location rather than a project must be rejected, so
 	// the caller falls back to path identity instead of inventing a worse one.
-	for _, raw := range []string{"", "   ", "/srv/git/raph.git", "./mirror.git", "../x", "github.com", "https://github.com"} {
+	for _, raw := range []string{
+		"", "   ", "/srv/git/raph.git", "./mirror.git", "../x", "github.com", "https://github.com",
+		// file:// carries a host but still names a location on disk.
+		"file:///srv/git/raph.git", "file://localhost/srv/git/raph.git", "FILE://localhost/srv/git/raph.git",
+	} {
 		if got, ok := canonicalizeRemoteURL(raw); ok {
 			t.Fatalf("canonicalizeRemoteURL(%q) unexpectedly produced %q", raw, got)
 		}
