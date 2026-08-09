@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -2614,42 +2615,125 @@ func (s *LibSQLStore) RelocateNode(ctx context.Context, oldID, newID, newWorkspa
 	}
 
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO nodes (id, workspace, domain, type, name, content, url, path, embedding_json, properties_json, created_at, updated_at)
-			SELECT ?, ?, domain, type, name, content, ?, path, embedding_json, properties_json, created_at, updated_at
-			FROM nodes WHERE id = ?`, newID, newWorkspace, newURL, oldID); err != nil {
-			return fmt.Errorf("copy node %s: %w", oldID, err)
-		}
-
-		// Repoint edges before deleting the original, whose removal would
-		// otherwise cascade them away.
-		if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE edges SET source_id = ? WHERE source_id = ?`, newID, oldID); err != nil {
-			return fmt.Errorf("repoint outgoing edges of %s: %w", oldID, err)
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE edges SET target_id = ? WHERE target_id = ?`, newID, oldID); err != nil {
-			return fmt.Errorf("repoint incoming edges of %s: %w", oldID, err)
-		}
-
-		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, oldID); err != nil {
-			return fmt.Errorf("clear search index for %s: %w", oldID, err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, oldID); err != nil {
-			return fmt.Errorf("remove relocated node %s: %w", oldID, err)
-		}
-
-		// Re-index the relocated row so search reflects its new workspace.
-		row := tx.QueryRowContext(ctx, `SELECT id, workspace, domain, type, name, content, COALESCE(path, '') FROM nodes WHERE id = ?`, newID)
-		var n Node
-		if err := row.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.Path); err != nil {
-			return fmt.Errorf("reload relocated node %s: %w", newID, err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, newID); err != nil {
+		if err := copyNodeTx(ctx, tx, oldID, newID, newWorkspace, newURL); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO nodes_fts (node_id, workspace, domain, type, name, content, path)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`, n.ID, n.Workspace, n.Domain, n.Type, n.Name, n.Content, n.Path)
-		return err
+		if err := repointEdgesTx(ctx, tx, oldID, newID); err != nil {
+			return err
+		}
+		return dropRelocatedNodeTx(ctx, tx, oldID, newID)
 	})
+}
+
+// ErrMemoryExists reports that a memory already occupies the destination scope.
+// Migrations skip these rather than clobbering knowledge written under the new
+// identity.
+var ErrMemoryExists = errors.New("a memory already exists at the destination scope")
+
+// RelocateMemory re-keys a memory node the way RelocateNode does, and carries
+// its memory_records row and revision history with it.
+//
+// A memory cannot go through RelocateNode: memory_records and memory_revisions
+// reference the node with ON DELETE CASCADE, so removing the original would
+// delete the record and every revision it was supposed to preserve. The record
+// is repointed at the new node before the old one is dropped.
+func (s *LibSQLStore) RelocateMemory(ctx context.Context, oldID, newID, newWorkspace, newURL, newScopeID string) error {
+	oldID = strings.TrimSpace(oldID)
+	newID = strings.TrimSpace(newID)
+	if oldID == "" || newID == "" {
+		return fmt.Errorf("relocate memory: both ids are required")
+	}
+	if oldID == newID {
+		return nil
+	}
+
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		// The natural key is unique, so a memory already stored under the new
+		// scope would collide. Report it and leave both alone.
+		var conflicts int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM memory_records dest
+			JOIN memory_records src ON src.node_id = ?
+			WHERE dest.node_id <> src.node_id
+			  AND dest.scope_type = src.scope_type
+			  AND dest.scope_id = ?
+			  AND dest.knowledge_type = src.knowledge_type
+			  AND dest.memory_key = src.memory_key`, oldID, newScopeID).Scan(&conflicts); err != nil {
+			return fmt.Errorf("check destination scope: %w", err)
+		}
+		if conflicts > 0 {
+			return ErrMemoryExists
+		}
+
+		if err := copyNodeTx(ctx, tx, oldID, newID, newWorkspace, newURL); err != nil {
+			return err
+		}
+		// Repoint the record and its history BEFORE the original is deleted.
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_records SET node_id = ?, scope_id = ? WHERE node_id = ?`,
+			newID, newScopeID, oldID); err != nil {
+			return fmt.Errorf("move memory record %s: %w", oldID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_revisions SET node_id = ? WHERE node_id = ?`, newID, oldID); err != nil {
+			return fmt.Errorf("move memory revisions of %s: %w", oldID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE memory_records SET replaced_by_node_id = ? WHERE replaced_by_node_id = ?`,
+			newID, oldID); err != nil {
+			return fmt.Errorf("repoint replacement links of %s: %w", oldID, err)
+		}
+		if err := repointEdgesTx(ctx, tx, oldID, newID); err != nil {
+			return err
+		}
+		return dropRelocatedNodeTx(ctx, tx, oldID, newID)
+	})
+}
+
+// copyNodeTx duplicates a node row under a new id, workspace, and url, keeping
+// content, properties, timestamps, and the embedding byte-for-byte. Copying in
+// SQL is what preserves the embedding: reads return a vector's length, not the
+// vector, so a Go round-trip would silently drop it.
+func copyNodeTx(ctx context.Context, tx *sql.Tx, oldID, newID, newWorkspace, newURL string) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO nodes (id, workspace, domain, type, name, content, url, path, embedding_json, properties_json, created_at, updated_at)
+		SELECT ?, ?, domain, type, name, content, ?, path, embedding_json, properties_json, created_at, updated_at
+		FROM nodes WHERE id = ?`, newID, newWorkspace, newURL, oldID); err != nil {
+		return fmt.Errorf("copy node %s: %w", oldID, err)
+	}
+	return nil
+}
+
+// repointEdgesTx moves every edge touching oldID onto newID. It runs before the
+// original is deleted, whose removal would otherwise cascade the edges away.
+func repointEdgesTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE edges SET source_id = ? WHERE source_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("repoint outgoing edges of %s: %w", oldID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE edges SET target_id = ? WHERE target_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("repoint incoming edges of %s: %w", oldID, err)
+	}
+	return nil
+}
+
+// dropRelocatedNodeTx removes the original row and rebuilds the search index
+// entry for the relocated one, so search reflects its new workspace.
+func dropRelocatedNodeTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, oldID); err != nil {
+		return fmt.Errorf("clear search index for %s: %w", oldID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, oldID); err != nil {
+		return fmt.Errorf("remove relocated node %s: %w", oldID, err)
+	}
+
+	row := tx.QueryRowContext(ctx, `SELECT id, workspace, domain, type, name, content, COALESCE(path, '') FROM nodes WHERE id = ?`, newID)
+	var n Node
+	if err := row.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.Path); err != nil {
+		return fmt.Errorf("reload relocated node %s: %w", newID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, newID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO nodes_fts (node_id, workspace, domain, type, name, content, path)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, n.ID, n.Workspace, n.Domain, n.Type, n.Name, n.Content, n.Path)
+	return err
 }
 
 // Project is one project and everything indexed or remembered under it.
@@ -2836,4 +2920,27 @@ func (s *LibSQLStore) ListProjects(ctx context.Context, docWorkspacePrefix strin
 		return projects[a].Name < projects[b].Name
 	})
 	return projects, nil
+}
+
+// ListProjectScopes returns the distinct project scope ids that memories are
+// stored under. The identity migration uses it to report what it could not
+// re-home, so nothing goes quietly missing.
+func (s *LibSQLStore) ListProjectScopes(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT scope_id FROM memory_records
+		WHERE scope_type = 'project' AND TRIM(scope_id) <> '' ORDER BY scope_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var scopes []string
+	for rows.Next() {
+		var scope string
+		if err := rows.Scan(&scope); err != nil {
+			return nil, err
+		}
+		scopes = append(scopes, scope)
+	}
+	return scopes, rows.Err()
 }

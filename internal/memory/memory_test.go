@@ -584,3 +584,154 @@ func TestSearchReportsNoneWhenNothingMatched(t *testing.T) {
 		t.Fatalf("expected mode \"none\" for an empty result, got %q", out.Mode)
 	}
 }
+
+// Re-anchoring identity must carry a memory whole: its record, its revision
+// history, and its lifecycle metadata. memory_records and memory_revisions
+// cascade on node delete, so a careless move would silently destroy the history
+// it was meant to preserve.
+func TestMigrateProjectScopeMovesRecordsAndHistory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	const oldScope = "project:legacypath"
+	const newScope = "project:remoteanchor"
+
+	if _, err := Store(ctx, store, nil, StoreInput{
+		ScopeType: "project", ScopeID: oldScope, KnowledgeType: "decision",
+		Title: "Deploy process", Content: "First revision.", Source: "user",
+		WriterID: "agent:test", MemoryKey: "deploy/process",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A second write creates revision history worth preserving.
+	if _, err := Update(ctx, store, nil, UpdateInput{
+		ScopeType: "project", ScopeID: oldScope, KnowledgeType: "decision",
+		Title: "Deploy process", Content: "Second revision.", Source: "user",
+		WriterID: "agent:test", MemoryKey: "deploy/process",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.GetMemoryRecordByKey(ctx, "project", oldScope, "decision", "deploy/process")
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyBefore, err := store.ListMemoryRevisions(ctx, before.Node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(historyBefore) == 0 {
+		t.Fatal("fixture error: expected revision history")
+	}
+
+	stats, err := MigrateProjectScope(ctx, store, oldScope, newScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Moved != 1 || stats.Conflict != 0 {
+		t.Fatalf("expected exactly one memory moved, got %+v", stats)
+	}
+
+	if _, err := store.GetMemoryRecordByKey(ctx, "project", oldScope, "decision", "deploy/process"); err == nil {
+		t.Fatal("memory still present under the legacy scope")
+	}
+	after, err := store.GetMemoryRecordByKey(ctx, "project", newScope, "decision", "deploy/process")
+	if err != nil {
+		t.Fatalf("memory missing under the new scope: %v", err)
+	}
+	if after.Node.Content != "Second revision." || after.Revision != before.Revision {
+		t.Fatalf("memory changed during migration: %+v", after)
+	}
+	historyAfter, err := store.ListMemoryRevisions(ctx, after.Node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(historyAfter) != len(historyBefore) {
+		t.Fatalf("revision history lost: %d before, %d after", len(historyBefore), len(historyAfter))
+	}
+
+	// The re-keyed id must be the one a fresh write for that key computes, or
+	// the next write duplicates instead of updating.
+	if _, err := Put(ctx, store, nil, StoreInput{
+		ScopeType: "project", ScopeID: newScope, KnowledgeType: "decision",
+		Title: "Deploy process", Content: "Third revision.", Source: "user",
+		WriterID: "agent:test", MemoryKey: "deploy/process",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	matches, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
+		ScopeType: "project", ScopeID: newScope, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected the re-write to update the migrated memory, found %d", len(matches))
+	}
+}
+
+// A memory already written under the new identity wins; the legacy one is
+// counted and left alone rather than clobbering deliberate knowledge.
+func TestMigrateProjectScopeSkipsConflicts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	const oldScope = "project:legacypath"
+	const newScope = "project:remoteanchor"
+	for _, scope := range []string{oldScope, newScope} {
+		if _, err := Store(ctx, store, nil, StoreInput{
+			ScopeType: "project", ScopeID: scope, KnowledgeType: "decision",
+			Title: "Same key", Content: "from " + scope, Source: "user",
+			WriterID: "agent:test", MemoryKey: "shared/key",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stats, err := MigrateProjectScope(ctx, store, oldScope, newScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Moved != 0 || stats.Conflict != 1 {
+		t.Fatalf("expected the conflict reported and nothing moved, got %+v", stats)
+	}
+	destination, err := store.GetMemoryRecordByKey(ctx, "project", newScope, "decision", "shared/key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if destination.Node.Content != "from "+newScope {
+		t.Fatalf("migration overwrote the destination memory: %q", destination.Node.Content)
+	}
+	if _, err := store.GetMemoryRecordByKey(ctx, "project", oldScope, "decision", "shared/key"); err != nil {
+		t.Fatal("the conflicting legacy memory was dropped instead of left in place")
+	}
+}
+
+func TestMigrateProjectScopeNoOpForSameOrEmptyScope(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	for _, tc := range [][2]string{{"project:a", "project:a"}, {"", "project:b"}, {"project:a", ""}} {
+		stats, err := MigrateProjectScope(ctx, store, tc[0], tc[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stats.Moved != 0 {
+			t.Fatalf("expected no move for %v, got %+v", tc, stats)
+		}
+	}
+}

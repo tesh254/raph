@@ -4,10 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"raph/internal/db"
+	"raph/internal/knowledge"
+	"raph/internal/memory"
+	"raph/internal/project"
 )
 
 func hierarchyStore(t *testing.T) *db.LibSQLStore {
@@ -403,5 +408,180 @@ func TestBackfillHierarchyLinksEveryFileAcrossPages(t *testing.T) {
 	}
 	if stats.Directories != 7 {
 		t.Fatalf("expected 7 package directories, got %d", stats.Directories)
+	}
+}
+
+func migrateMemoriesFn(ctx context.Context, store db.GraphStore, oldID, newID string) (int, int, error) {
+	stats, err := memory.MigrateProjectScope(ctx, store, oldID, newID)
+	return stats.Moved, stats.Conflict, err
+}
+
+func migrateDocsFn(ctx context.Context, store db.GraphStore, oldID, newID string) (int, error) {
+	return knowledge.MigrateWorkspace(ctx, store,
+		knowledge.ProjectWorkspace(oldID), knowledge.ProjectWorkspace(newID))
+}
+
+func gitRepoWithRemote(t *testing.T, remote string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init"}, {"remote", "add", "origin", remote}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Skipf("git unavailable: %v (%s)", err, out)
+		}
+	}
+	return dir
+}
+
+func seedProjectMemory(t *testing.T, store db.GraphStore, scopeID, key string) {
+	t.Helper()
+	if _, err := memory.Store(context.Background(), store, nil, memory.StoreInput{
+		ScopeType: "project", ScopeID: scopeID, KnowledgeType: "decision",
+		Title: key, Content: "content for " + key, Source: "user",
+		WriterID: "agent:test", MemoryKey: key,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Memories and documents written under the old path-derived identity must move
+// onto the remote-derived one, or re-anchoring would orphan exactly the
+// knowledge it was meant to protect.
+func TestMigrateProjectIdentitiesMovesKnowledgeOntoRemoteIdentity(t *testing.T) {
+	store := hierarchyStore(t)
+	ctx := context.Background()
+	repo := gitRepoWithRemote(t, "git@github.com:acme/widget.git")
+
+	identity, err := project.Resolve(nil, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyID := project.LegacyPathID(identity.Root)
+	if legacyID == identity.ID {
+		t.Fatal("fixture error: expected the remote to change the identity")
+	}
+
+	seedProjectMemory(t, store, legacyID, "deploy/process")
+	if _, err := knowledge.Add(ctx, store, nil, knowledge.AddInput{
+		Workspace: knowledge.ProjectWorkspace(legacyID), Key: "handoff/one",
+		Title: "Handoff", Content: "work in progress", DocType: knowledge.DocHandoff,
+		Source: "user", NoEmbed: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := MigrateProjectIdentities(ctx, store, nil, []string{repo}, migrateMemoriesFn, migrateDocsFn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Projects != 1 || stats.Memories != 1 || stats.Documents != 1 {
+		t.Fatalf("expected one project with its memory and document moved, got %+v", stats)
+	}
+
+	moved, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
+		ScopeType: "project", ScopeID: identity.ID, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(moved) != 1 {
+		t.Fatalf("expected the memory under the remote identity, found %d", len(moved))
+	}
+	stale, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
+		ScopeType: "project", ScopeID: legacyID, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("memory left behind under the legacy identity: %d", len(stale))
+	}
+	docs, err := knowledge.List(ctx, store, knowledge.ListFilter{Workspace: knowledge.ProjectWorkspace(identity.ID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected the document under the remote identity, found %d", len(docs))
+	}
+}
+
+// A repository with no remote keeps its path identity, so there is nothing to
+// migrate and nothing should be touched.
+func TestMigrateProjectIdentitiesLeavesRemotelessReposAlone(t *testing.T) {
+	store := hierarchyStore(t)
+	ctx := context.Background()
+	repo := t.TempDir()
+	cmd := exec.Command("git", "init")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("git unavailable: %v (%s)", err, out)
+	}
+
+	identity, err := project.Resolve(nil, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedProjectMemory(t, store, identity.ID, "kept")
+
+	stats, err := MigrateProjectIdentities(ctx, store, nil, []string{repo}, migrateMemoriesFn, migrateDocsFn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Projects != 0 || stats.Memories != 0 {
+		t.Fatalf("expected nothing to move for a remoteless repo, got %+v", stats)
+	}
+	kept, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
+		ScopeType: "project", ScopeID: identity.ID, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept) != 1 {
+		t.Fatalf("expected the memory untouched, found %d", len(kept))
+	}
+}
+
+// Regression: a project that was just re-anchored, but never indexed, has no
+// project node. Reporting it as "still scoped to a path" would send the operator
+// chasing a migration that already happened.
+func TestMigrateProjectIdentitiesDoesNotReportJustMigratedProjects(t *testing.T) {
+	store := hierarchyStore(t)
+	ctx := context.Background()
+	repo := gitRepoWithRemote(t, "git@github.com:acme/never-indexed.git")
+
+	identity, err := project.Resolve(nil, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedProjectMemory(t, store, project.LegacyPathID(identity.Root), "only/memory")
+
+	stats, err := MigrateProjectIdentities(ctx, store, nil, []string{repo}, migrateMemoriesFn, migrateDocsFn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Memories != 1 {
+		t.Fatalf("expected the memory migrated, got %+v", stats)
+	}
+	for _, scope := range stats.Unresolved {
+		if scope == identity.ID {
+			t.Fatalf("a project migrated in this run was reported as unresolved: %v", stats.Unresolved)
+		}
+	}
+}
+
+// A scope whose path nobody supplied must be reported, not silently ignored —
+// it is the only signal that knowledge is still parked under an old identity.
+func TestMigrateProjectIdentitiesReportsUnknownScopes(t *testing.T) {
+	store := hierarchyStore(t)
+	ctx := context.Background()
+	seedProjectMemory(t, store, "project:unknownpathhash", "stranded")
+
+	stats, err := MigrateProjectIdentities(ctx, store, nil, nil, migrateMemoriesFn, migrateDocsFn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(stats.Unresolved, "project:unknownpathhash") {
+		t.Fatalf("expected the stranded scope reported, got %+v", stats.Unresolved)
 	}
 }

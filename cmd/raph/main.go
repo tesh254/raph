@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -116,6 +117,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newSyncCmd())
 	rootCmd.AddCommand(newAgentsCmd())
 	rootCmd.AddCommand(newBackfillCmd())
+	rootCmd.AddCommand(newProjectCmd())
 	rootCmd.AddCommand(newClearCmd())
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newUpdateCmd())
@@ -1944,7 +1946,8 @@ func newReleaseCmd() *cobra.Command {
 }
 
 func newBackfillCmd() *cobra.Command {
-	return &cobra.Command{
+	var paths []string
+	cmd := &cobra.Command{
 		Use:   "backfill",
 		Short: "Rebuild the project/workspace/directory graph for already-indexed repositories",
 		Long: "Rebuild the structural spine (project -> workspace -> directory -> file) for repositories\n" +
@@ -2004,7 +2007,138 @@ func newBackfillCmd() *cobra.Command {
 				fmt.Fprintf(out, "Moved %d document(s) out of %d legacy workspace(s) into project document scopes\n",
 					docStats.Documents, docStats.Workspaces)
 			}
+
+			// Re-anchor identities last: memories and documents move onto the
+			// remote-derived id, so the graph, memory, and document scopes all
+			// end up agreeing on one project id.
+			fmt.Fprintf(out, "Re-anchoring project identities to repository remotes...\n")
+			identityStats, err := indexer.MigrateProjectIdentities(ctx, store, cfg,
+				backfillRoots(workspaces, paths),
+				func(ctx context.Context, st db.GraphStore, oldID, newID string) (int, int, error) {
+					moved, err := memory.MigrateProjectScope(ctx, st, oldID, newID)
+					return moved.Moved, moved.Conflict, err
+				},
+				func(ctx context.Context, st db.GraphStore, oldID, newID string) (int, error) {
+					return knowledge.MigrateWorkspace(ctx, st,
+						knowledge.ProjectWorkspace(oldID), knowledge.ProjectWorkspace(newID))
+				},
+			)
+			if err != nil {
+				return err
+			}
+			if identityStats.Projects == 0 {
+				fmt.Fprintf(out, "No project identities needed re-anchoring.\n")
+			} else {
+				fmt.Fprintf(out, "Re-anchored %d project(s): %d memories, %d documents moved\n",
+					identityStats.Projects, identityStats.Memories, identityStats.Documents)
+			}
+			if identityStats.Conflicts > 0 {
+				fmt.Fprintf(out, "%d memory/memories already existed under the new identity and were left in place\n", identityStats.Conflicts)
+			}
+			for _, scope := range identityStats.Unresolved {
+				fmt.Fprintf(out, "Still scoped to a path: %s — re-run with --path <that repo> to re-anchor it\n", scope)
+			}
 			return nil
 		},
 	}
+	cmd.Flags().StringSliceVar(&paths, "path", nil,
+		"Extra repository paths to consider when re-anchoring identities. Needed for projects that hold memories but were never indexed, since their old id is a hash of a path the graph does not record.")
+	return cmd
+}
+
+// backfillRoots gathers every directory a project can be resolved from: roots
+// recorded on indexed nodes, repositories registered for sync, and anything the
+// operator named explicitly. A legacy identity is a hash of a path, so a path is
+// the only thing that can recover it.
+func backfillRoots(workspaces []db.Workspace, extra []string) []string {
+	var roots []string
+	for _, ws := range workspaces {
+		if strings.TrimSpace(ws.Root) != "" {
+			roots = append(roots, ws.Root)
+		}
+	}
+	if repos, err := syncer.List(); err == nil {
+		for _, repo := range repos {
+			if strings.TrimSpace(repo.Path) != "" {
+				roots = append(roots, repo.Path)
+			}
+		}
+	}
+	for _, path := range extra {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(path); err == nil {
+			roots = append(roots, abs)
+		}
+	}
+	return roots
+}
+
+func newProjectCmd() *cobra.Command {
+	var path string
+	cmd := &cobra.Command{
+		Use:   "project",
+		Short: "Show which project a directory resolves to",
+		Long: "Show the project identity a directory resolves to, what it was derived from, and how\n" +
+			"much knowledge is stored under it.\n\n" +
+			"Memories and documents are scoped by this identity, so it is the first thing to check\n" +
+			"when an agent cannot recall something it should. An identity anchored to the repository\n" +
+			"remote survives moving or re-cloning the checkout; one anchored to a path does not.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			identity, err := project.Resolve(cfg, path)
+			if err != nil {
+				return err
+			}
+
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			ctx := cmd.Context()
+
+			memories, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
+				ScopeType: "project", ScopeID: identity.ID, Limit: 10000,
+			})
+			if err != nil {
+				return err
+			}
+			docs, err := knowledge.List(ctx, store, knowledge.ListFilter{
+				Workspace: knowledge.ProjectWorkspace(identity.ID), Limit: 10000,
+			})
+			if err != nil {
+				return err
+			}
+
+			if resolveFormat() == output.FormatJSON {
+				return json.NewEncoder(out).Encode(map[string]any{
+					"identity":  identity,
+					"memories":  len(memories),
+					"documents": len(docs),
+				})
+			}
+
+			fmt.Fprintf(out, "Project:   %s\n", identity.Name)
+			fmt.Fprintf(out, "Identity:  %s\n", identity.ID)
+			fmt.Fprintf(out, "Anchor:    %s (%s)\n", identity.Anchor, identity.Source)
+			fmt.Fprintf(out, "Root:      %s\n", identity.Root)
+			fmt.Fprintf(out, "Knowledge: %d memories, %d documents\n", len(memories), len(docs))
+			if identity.Anchor == project.AnchorWorktree || identity.Anchor == project.AnchorDirectory {
+				fmt.Fprintf(out, "\nThis identity is derived from the path, so moving or re-cloning this\n"+
+					"directory starts a new project and leaves its knowledge behind. Add a git\n"+
+					"remote (or set project.identity_override) to anchor it to the repository.\n")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&path, "path", ".", "Directory to resolve")
+	return cmd
 }

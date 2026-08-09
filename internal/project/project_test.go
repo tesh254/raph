@@ -181,3 +181,167 @@ func initRepo(t *testing.T) string {
 	}
 	return dir
 }
+
+// Every clone of one repository must canonicalize to the same string, whatever
+// transport, credentials, port, casing, or .git suffix the remote carries —
+// that equality is the whole point of anchoring identity to the remote.
+func TestCanonicalizeRemoteURL(t *testing.T) {
+	same := []string{
+		"git@github.com:tesh254/raph.git",
+		"git@github.com:tesh254/raph",
+		"https://github.com/tesh254/raph.git",
+		"https://github.com/tesh254/raph",
+		"ssh://git@github.com/tesh254/raph.git",
+		"ssh://git@github.com:2222/tesh254/raph.git",
+		"https://GitHub.com/Tesh254/Raph.git",
+		"git://github.com/tesh254/raph.git",
+		"https://github.com/tesh254/raph/",
+		// A token in a remote URL must never reach an identity.
+		"https://tesh254:ghp_secret@github.com/tesh254/raph.git",
+	}
+	for _, raw := range same {
+		got, ok := canonicalizeRemoteURL(raw)
+		if !ok {
+			t.Fatalf("canonicalizeRemoteURL(%q) reported no remote", raw)
+		}
+		if got != "github.com/tesh254/raph" {
+			t.Fatalf("canonicalizeRemoteURL(%q) = %q, want github.com/tesh254/raph", raw, got)
+		}
+		if strings.Contains(got, "ghp_secret") || strings.Contains(got, "@") {
+			t.Fatalf("credentials leaked into identity source: %q", got)
+		}
+	}
+
+	distinct := map[string]string{
+		"git@github.com:tesh254/other.git":  "github.com/tesh254/other",
+		"git@gitlab.com:tesh254/raph.git":   "gitlab.com/tesh254/raph",
+		"https://git.example.com/a/b/c.git": "git.example.com/a/b/c",
+	}
+	for raw, want := range distinct {
+		got, ok := canonicalizeRemoteURL(raw)
+		if !ok || got != want {
+			t.Fatalf("canonicalizeRemoteURL(%q) = %q (%t), want %q", raw, got, ok, want)
+		}
+	}
+
+	// Remotes that name a location rather than a project must be rejected, so
+	// the caller falls back to path identity instead of inventing a worse one.
+	for _, raw := range []string{"", "   ", "/srv/git/raph.git", "./mirror.git", "../x", "github.com", "https://github.com"} {
+		if got, ok := canonicalizeRemoteURL(raw); ok {
+			t.Fatalf("canonicalizeRemoteURL(%q) unexpectedly produced %q", raw, got)
+		}
+	}
+}
+
+// The point of the change: a repository keeps its identity when it moves.
+func TestResolveIdentitySurvivesMovingTheCheckout(t *testing.T) {
+	first := initRepoWithRemote(t, "git@github.com:acme/widget.git")
+	second := initRepoWithRemote(t, "https://github.com/acme/widget.git")
+
+	a, err := Resolve(nil, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Resolve(nil, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID != b.ID {
+		t.Fatalf("two clones of one repository resolved differently: %s vs %s", a.ID, b.ID)
+	}
+	if a.Anchor != AnchorRemote || a.Source != "github.com/acme/widget" {
+		t.Fatalf("expected a remote-anchored identity, got anchor=%s source=%s", a.Anchor, a.Source)
+	}
+	// The roots genuinely differ — this is the moved-checkout case.
+	if a.Root == b.Root {
+		t.Fatal("fixture error: both checkouts share a root")
+	}
+}
+
+func TestResolveDistinctRemotesAreDistinctProjects(t *testing.T) {
+	a, err := Resolve(nil, initRepoWithRemote(t, "git@github.com:acme/widget.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Resolve(nil, initRepoWithRemote(t, "git@github.com:acme/gadget.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID == b.ID {
+		t.Fatal("different repositories collapsed into one project")
+	}
+}
+
+// A repository with no remote must keep the identity it already had, so
+// existing memories stay attached without any migration.
+func TestResolveWithoutRemoteKeepsLegacyPathIdentity(t *testing.T) {
+	repo := initRepo(t)
+
+	identity, err := Resolve(nil, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Anchor != AnchorWorktree {
+		t.Fatalf("expected a worktree anchor, got %s", identity.Anchor)
+	}
+	if identity.ID != LegacyPathID(identity.Root) {
+		t.Fatalf("a remoteless repository changed identity: %s vs legacy %s", identity.ID, LegacyPathID(identity.Root))
+	}
+}
+
+func TestResolveOutsideGitReportsDirectoryAnchor(t *testing.T) {
+	dir := t.TempDir()
+	identity, err := Resolve(nil, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Anchor != AnchorDirectory {
+		t.Fatalf("expected a directory anchor outside git, got %s", identity.Anchor)
+	}
+	if identity.ID != LegacyPathID(identity.Root) {
+		t.Fatalf("non-git directory changed identity: %s", identity.ID)
+	}
+}
+
+// A subdirectory of a remote-anchored repository still resolves to the repo.
+func TestResolveSubdirectoryOfRemoteAnchoredRepo(t *testing.T) {
+	repo := initRepoWithRemote(t, "git@github.com:acme/widget.git")
+	nested := filepath.Join(repo, "internal", "deep")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	top, err := Resolve(nil, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deep, err := Resolve(nil, nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if top.ID != deep.ID {
+		t.Fatalf("subdirectory resolved to a different project: %s vs %s", deep.ID, top.ID)
+	}
+}
+
+func TestResolveOverrideStillWinsOverRemote(t *testing.T) {
+	cfg := &config.Config{Project: config.ProjectSettings{IdentityOverride: "acme-monolith"}}
+	identity, err := Resolve(cfg, initRepoWithRemote(t, "git@github.com:acme/widget.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.ID != "project:acme-monolith" || identity.Anchor != AnchorOverride {
+		t.Fatalf("override did not win: %+v", identity)
+	}
+}
+
+func initRepoWithRemote(t *testing.T, remote string) string {
+	t.Helper()
+	dir := initRepo(t)
+	cmd := exec.Command("git", "remote", "add", "origin", remote)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v (%s)", err, out)
+	}
+	return dir
+}

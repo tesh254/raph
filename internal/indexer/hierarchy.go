@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"raph/internal/config"
 	"raph/internal/db"
+	"raph/internal/project"
 	"raph/internal/verbose"
 )
 
@@ -288,4 +290,141 @@ func BackfillHierarchy(ctx context.Context, store db.GraphStore, cfg *config.Con
 	}
 
 	return stats, nil
+}
+
+// IdentityMigration reports what re-anchoring project identities moved.
+type IdentityMigration struct {
+	Projects   int      `json:"projects"`
+	Memories   int      `json:"memories"`
+	Documents  int      `json:"documents"`
+	Conflicts  int      `json:"conflicts"`
+	Unresolved []string `json:"unresolved,omitempty"`
+}
+
+// scopeMigrator is the memory-side migration, injected so this package does not
+// import internal/memory (which would be a cycle through db test helpers).
+type scopeMigrator func(ctx context.Context, store db.GraphStore, oldScopeID, newScopeID string) (moved int, conflicts int, err error)
+
+// docMigrator moves a project's documents between buckets.
+type docMigrator func(ctx context.Context, store db.GraphStore, oldProjectID, newProjectID string) (int, error)
+
+// MigrateProjectIdentities re-homes memories, documents, and the project node
+// for every project whose identity changed when identities moved from being
+// hashed over a checkout path to being anchored to the repository's remote.
+//
+// roots are the directories to consider. Only a project that still exists on
+// disk can be migrated: the legacy id is a hash of its path, which cannot be
+// inverted, so the path has to come from somewhere — the graph, the sync
+// registry, or the user. Anything left behind is reported rather than dropped,
+// and stays findable because recall never filters by scope; it simply loses the
+// ranking boost until its path is supplied.
+func MigrateProjectIdentities(
+	ctx context.Context,
+	store db.GraphStore,
+	cfg *config.Config,
+	roots []string,
+	migrateMemories scopeMigrator,
+	migrateDocs docMigrator,
+) (IdentityMigration, error) {
+	var stats IdentityMigration
+
+	seen := map[string]bool{}
+	// Identities this run resolved. A project that is correctly anchored but was
+	// never indexed has no project node, so node presence alone cannot tell a
+	// re-anchored scope apart from a stale one — without this set, a scope that
+	// was just migrated successfully gets reported as still needing migration.
+	resolved := map[string]bool{}
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" || seen[root] {
+			continue
+		}
+		seen[root] = true
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+
+		identity, err := project.Resolve(cfg, root)
+		if err != nil {
+			verbose.Printf("identity migration: cannot resolve %s: %v", root, err)
+			continue
+		}
+		resolved[identity.ID] = true
+		legacyID := project.LegacyPathID(identity.Root)
+		if legacyID == identity.ID {
+			// Anchored to the path already (no remote, or an override): nothing
+			// to move.
+			continue
+		}
+
+		moved, conflicts, err := migrateMemories(ctx, store, legacyID, identity.ID)
+		if err != nil {
+			return stats, fmt.Errorf("migrate memories for %s: %w", identity.Root, err)
+		}
+		docs, err := migrateDocs(ctx, store, legacyID, identity.ID)
+		if err != nil {
+			return stats, fmt.Errorf("migrate documents for %s: %w", identity.Root, err)
+		}
+		if err := relocateProjectNode(ctx, store, legacyID, identity); err != nil {
+			return stats, fmt.Errorf("relocate project node for %s: %w", identity.Root, err)
+		}
+
+		stats.Memories += moved
+		stats.Documents += docs
+		stats.Conflicts += conflicts
+		if moved > 0 || docs > 0 || conflicts > 0 {
+			stats.Projects++
+		}
+		verbose.Printf("identity migration: %s %s -> %s memories=%d docs=%d", identity.Root, legacyID, identity.ID, moved, docs)
+	}
+
+	// Anything still scoped to a path-hash that no supplied root explains.
+	unresolved, err := unresolvedLegacyScopes(ctx, store, resolved)
+	if err != nil {
+		return stats, err
+	}
+	stats.Unresolved = unresolved
+	return stats, nil
+}
+
+// relocateProjectNode moves the structural project node onto the new identity so
+// the graph hierarchy and the memory scope keep sharing one id.
+func relocateProjectNode(ctx context.Context, store db.GraphStore, legacyID string, identity project.Identity) error {
+	if _, err := store.GetNodeByID(ctx, legacyID); err != nil {
+		return nil // never indexed under the old identity
+	}
+	relocator, ok := store.(interface {
+		RelocateNode(ctx context.Context, oldID, newID, newWorkspace, newURL string) error
+	})
+	if !ok {
+		return nil
+	}
+	return relocator.RelocateNode(ctx, legacyID, identity.ID, "", "")
+}
+
+// unresolvedLegacyScopes lists project scopes that still look like a path hash
+// and no longer correspond to a project node, so the operator can see exactly
+// what is left and re-run with the right --path.
+func unresolvedLegacyScopes(ctx context.Context, store db.GraphStore, resolved map[string]bool) ([]string, error) {
+	lister, ok := store.(interface {
+		ListProjectScopes(ctx context.Context) ([]string, error)
+	})
+	if !ok {
+		return nil, nil
+	}
+	scopes, err := lister.ListProjectScopes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, scope := range scopes {
+		if resolved[scope] {
+			continue
+		}
+		if _, err := store.GetNodeByID(ctx, scope); err != nil {
+			out = append(out, scope)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }

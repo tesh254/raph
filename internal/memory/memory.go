@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -587,3 +588,83 @@ func preview(value string, limit int) string {
 	}
 	return string(runes[:limit]) + "..."
 }
+
+// memoryRelocator is the store capability a scope migration needs: re-keying a
+// memory node while carrying its record and revision history.
+type memoryRelocator interface {
+	RelocateMemory(ctx context.Context, oldID, newID, newWorkspace, newURL, newScopeID string) error
+}
+
+// ScopeMigration reports what moving one project scope did.
+type ScopeMigration struct {
+	Moved    int `json:"moved"`
+	Conflict int `json:"conflict"`
+}
+
+// MigrateProjectScope moves every active memory from oldScopeID to newScopeID.
+//
+// A memory's node id, workspace, and url are all derived from its scope, so
+// changing the scope means re-keying the node — not just rewriting a column.
+// Leaving the id alone would make the next write for that key mint a duplicate
+// instead of updating the record.
+//
+// Memories whose key is already taken under the new scope are counted and left
+// where they are: the destination was written deliberately and must win over a
+// migration.
+func MigrateProjectScope(ctx context.Context, store db.GraphStore, oldScopeID, newScopeID string) (ScopeMigration, error) {
+	var stats ScopeMigration
+	oldScopeID = strings.TrimSpace(oldScopeID)
+	newScopeID = strings.TrimSpace(newScopeID)
+	if oldScopeID == "" || newScopeID == "" || oldScopeID == newScopeID {
+		return stats, nil
+	}
+	relocator, ok := store.(memoryRelocator)
+	if !ok {
+		return stats, fmt.Errorf("store cannot relocate memories")
+	}
+
+	for {
+		records, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
+			ScopeType: scopeProject,
+			ScopeID:   oldScopeID,
+			Limit:     scopeMigrationPageSize,
+		})
+		if err != nil {
+			return stats, fmt.Errorf("list memories in %s: %w", oldScopeID, err)
+		}
+		if len(records) == 0 {
+			return stats, nil
+		}
+
+		progressed := false
+		for _, record := range records {
+			if err := ctx.Err(); err != nil {
+				return stats, err
+			}
+			newID := memoryNodeID(record.ScopeType, newScopeID, record.KnowledgeType, record.MemoryKey)
+			err := relocator.RelocateMemory(ctx, record.Node.ID, newID,
+				memoryWorkspace(record.ScopeType, newScopeID),
+				memoryURL(record.ScopeType, newScopeID, record.KnowledgeType, record.MemoryKey),
+				newScopeID)
+			switch {
+			case err == nil:
+				stats.Moved++
+				progressed = true
+			case errors.Is(err, db.ErrMemoryExists):
+				stats.Conflict++
+			default:
+				return stats, fmt.Errorf("relocate memory %s: %w", record.Node.ID, err)
+			}
+		}
+		// Conflicts stay in the source scope, so a page made entirely of them
+		// would otherwise be re-read forever.
+		if !progressed {
+			return stats, nil
+		}
+	}
+}
+
+const (
+	scopeProject           = "project"
+	scopeMigrationPageSize = 200
+)
