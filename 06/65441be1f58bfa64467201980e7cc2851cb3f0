@@ -1,0 +1,45 @@
+internal/db/libsql.go
+  s_b616119b05f3cd::t_dc98ec7f648121 2737,2924-2946
+  s_b616119b05f3cd::t_3f7c1614fc00dd 2618-2619,2621-2622,2624-2648,2650-2669,2671-2674,2676-2677,2679-2683,2686,2690-2736
+  s_b616119b05f3cd::t_46a85505adee22 7
+  s_b616119b05f3cd::t_9f5bbf37ca70f1 2738
+internal/project/project.go
+  s_b616119b05f3cd::t_140ee10b0ee778 11,13,173-268
+  s_b616119b05f3cd::t_8b73f6ebb4d2f4 23,26-42,47-51,77-80,88-110,113-116
+  s_b616119b05f3cd::t_ae9381778c260e 117
+internal/memory/memory.go
+  s_b616119b05f3cd::t_9d925af7b17412 8,591-670
+internal/memory/memory_test.go
+  s_b616119b05f3cd::t_469d06f239fb2e 587-737
+internal/project/project_test.go
+  s_b616119b05f3cd::t_c744e15c18ebbc 184-347
+cmd/raph/main.go
+  s_b616119b05f3cd::t_b00a72947e5911 2044-2076
+  s_b616119b05f3cd::t_cb176842915bb3 6
+  s_b616119b05f3cd::t_4c1e2a6d2834fd 120,2040,2077-2143
+  s_b616119b05f3cd::t_8c6bb80cb4dd7a 2016
+  s_b616119b05f3cd::t_672632803788da 1949-1950,2010-2015,2017-2039
+internal/indexer/hierarchy.go
+  s_b616119b05f3cd::t_b59e82a77f80b5 332-336,352,382,408,421-423
+  s_b616119b05f3cd::t_90aaf29a0623c1 7,12,294-331,337-351,353-381,383-407,409-420,424-430
+internal/indexer/hierarchy_test.go
+  s_b616119b05f3cd::t_9007daf0214577 7,9,13-15,413-587
+README.md
+  s_b616119b05f3cd::t_72e39d6f626b7a 118-120,126-128,189-190
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "0665441be1f58bfa64467201980e7cc2851cb3f0",
+  "prompts": {},
+  "sessions": {
+    "s_b616119b05f3cd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "88cc8262-7d36-4d42-9a1c-6e2b6c7b31d9",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tesh254 <ewachira254@gmail.com>"
+    }
+  }
+}
