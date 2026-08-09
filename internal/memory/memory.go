@@ -249,18 +249,19 @@ func Search(ctx context.Context, store db.GraphStore, cfg *config.Config, input 
 		return SearchOutput{}, err
 	}
 
-	// Boost each pass BEFORE merging. The merge reserves part of the page for
-	// keyword-only hits and truncates each list to fit, so a project memory
-	// ranked past that cut would be discarded before any post-merge re-rank
-	// could lift it — the boost would silently do nothing precisely when both
-	// passes contribute. Re-ranking the inputs puts it inside the cut first.
+	// Boost each pass BEFORE merging, and exactly once. The merge reserves part
+	// of the page for keyword-only hits and truncates each list to fit, so a
+	// project memory ranked past that cut would be discarded before any
+	// post-merge re-rank could lift it — the boost would silently do nothing
+	// precisely when both passes contribute. Re-ranking the inputs puts it
+	// inside the cut first, and the merge preserves each list's order, so the
+	// result stays affinity-ranked without a second pass. Boosting again after
+	// the merge would compound: with no embedding provider the keyword list is
+	// the whole result, and it would move by twice the documented positions.
 	semantic = applyProjectAffinity(semantic, projectID)
 	keyword = applyProjectAffinity(keyword, projectID)
 
-	// Merge over the widened pool, re-rank across the two lists, and only then
-	// cut to the page the caller asked for.
 	matches, mode := mergeMemoryMatches(semantic, keyword, candidateLimit)
-	matches = applyProjectAffinity(matches, projectID)
 	if len(matches) > limit {
 		matches = matches[:limit]
 	}

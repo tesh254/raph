@@ -838,11 +838,41 @@ func TestSearchBoostSurvivesTheKeywordReserve(t *testing.T) {
 		affinityRecord("kw-2", "project:other"),
 	}
 
-	boostedSemantic := applyProjectAffinity(semantic, "project:mine")
-	merged, _ := mergeMemoryMatches(boostedSemantic, applyProjectAffinity(keyword, "project:mine"), 5)
-	merged = applyProjectAffinity(merged, "project:mine")
+	// Mirrors Search: each pass is boosted once, then merged.
+	merged, _ := mergeMemoryMatches(
+		applyProjectAffinity(semantic, "project:mine"),
+		applyProjectAffinity(keyword, "project:mine"), 5)
 
 	if !slices.Contains(affinityIDs(merged), "mine") {
 		t.Fatalf("the project memory was cut by the keyword reserve before the boost applied: %v", affinityIDs(merged))
+	}
+}
+
+// With no embedding provider the keyword pass is the entire result, so a boost
+// applied both before and after the merge would move a project memory by twice
+// the documented positions — a bounded bias quietly becoming a strong one.
+func TestSearchAppliesAffinityExactlyOnce(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("other-1", "project:other"),
+		affinityRecord("other-2", "project:other"),
+		affinityRecord("other-3", "project:other"),
+		affinityRecord("other-4", "project:other"),
+		affinityRecord("mine", "project:mine"),
+	}
+	store := &affinityStore{records: records}
+
+	// cfg is nil, so the semantic pass never runs: keyword only.
+	out, err := Search(context.Background(), store, nil, SearchInput{
+		Query: "anything", ProjectID: "project:mine", Limit: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// One boost of three positions from index 4 ties with index 1, and ties
+	// keep the stronger match first. Two boosts would put "mine" at the front.
+	want := []string{"other-1", "other-2", "mine", "other-3", "other-4"}
+	if got := affinityIDs(out.Matches); !slices.Equal(got, want) {
+		t.Fatalf("affinity applied more than once: got %v, want %v", got, want)
 	}
 }
