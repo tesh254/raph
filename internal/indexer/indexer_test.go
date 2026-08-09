@@ -75,6 +75,7 @@ func (*indexCaptureStore) DeleteDocumentNode(context.Context, string) error     
 func (*indexCaptureStore) DeleteFileNodes(context.Context, string, string) error         { return nil }
 func (*indexCaptureStore) DeleteWorkspace(context.Context, string) error                 { return nil }
 func (*indexCaptureStore) ClearAll(context.Context) error                                { return nil }
+func (*indexCaptureStore) ListWorkspaces(context.Context) ([]db.Workspace, error)        { return nil, nil }
 func (*indexCaptureStore) Close() error                                                  { return nil }
 
 func TestSplitDocumentSections(t *testing.T) {
@@ -117,6 +118,16 @@ func TestIndexedNodesCarryAbsoluteCodebasePath(t *testing.T) {
 			t.Fatalf("duplicate node ID %q", node.ID)
 		}
 		ids[node.ID] = struct{}{}
+		if node.Type == TypeProject {
+			// The project node describes the project, which may span several
+			// indexed roots, so it carries the resolved project root rather than
+			// this workspace's. Assert that explicitly instead of skipping, or
+			// the node's path goes unchecked entirely.
+			if node.Path != idx.projectRoot {
+				t.Fatalf("expected project node path %q, got %+v", idx.projectRoot, node)
+			}
+			continue
+		}
 		if node.Path != root {
 			t.Fatalf("expected codebase path %q, got %+v", root, node)
 		}

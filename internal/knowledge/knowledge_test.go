@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"raph/internal/db"
+	"raph/internal/project"
 )
 
 func newStore(t *testing.T) *db.LibSQLStore {
@@ -185,5 +186,315 @@ func TestUpdateGuardsTypeTagsAndDocType(t *testing.T) {
 	}
 	if _, err := Update(ctx, store, nil, UpdateInput{ID: "func:x", Content: "x"}); err != sql.ErrNoRows {
 		t.Fatalf("expected ErrNoRows updating a non-document, got %v", err)
+	}
+}
+
+func seedDoc(t *testing.T, store db.GraphStore, workspace, key, title, content string) Document {
+	t.Helper()
+	doc, err := Add(context.Background(), store, nil, AddInput{
+		Workspace: workspace, Key: key, Title: title, Content: content,
+		DocType: DocHandoff, Source: "user", WriterID: "agent:test", NoEmbed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc
+}
+
+// Moving a document must preserve it whole: content, lifecycle properties,
+// chunks, relations, and its embedding — a migration that re-embedded would
+// spend real API calls to reproduce vectors the graph already has.
+func TestMigrateWorkspaceMovesDocumentsIntact(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	const old = "ws:legacy"
+	const target = "knowledge:project:abc"
+
+	if err := store.SaveNode(ctx, db.Node{ID: "related", Workspace: "other", Domain: "code", Type: "file", Name: "x.go"}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := Add(ctx, store, nil, AddInput{
+		Workspace: old, Key: "release/handoff", Title: "Release handoff",
+		Content: strings.Repeat("durable handoff content. ", 200),
+		DocType: DocHandoff, Source: "user", WriterID: "agent:test",
+		Tags: []string{"release"}, Links: []string{"related"},
+		Properties: map[string]string{"status": StatusUsed}, NoEmbed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Give the document and its chunks vectors, as a real one would have.
+	stored := doc.Node
+	stored.Embedding = []float32{1, 0}
+	if err := store.SaveNode(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	full, err := Read(ctx, store, doc.Node.ID, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Chunks) < 2 {
+		t.Fatalf("expected a multi-chunk document, got %d", len(full.Chunks))
+	}
+	for _, c := range full.Chunks {
+		// Re-read the chunk before saving: neighbour listings need not carry
+		// properties, and writing one back with an empty property map would
+		// erase its doc_id — the very field the migration finds chunks by. The
+		// migration would then quietly strand them, while this test still saw a
+		// full chunk count through the document's HAS_CHUNK edges.
+		stored, err := store.GetNodeByID(ctx, c.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.Prop("doc_id") == "" {
+			t.Fatalf("fixture error: chunk %s lost its doc_id", c.ID)
+		}
+		stored.Embedding = []float32{0, 1}
+		if err := store.SaveNode(ctx, stored); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	moved, err := MigrateWorkspace(ctx, store, old, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved != 1 {
+		t.Fatalf("expected 1 document moved, got %d", moved)
+	}
+
+	// Gone from the old bucket, present in the new one.
+	if remaining, err := List(ctx, store, ListFilter{Workspace: old}); err != nil || len(remaining) != 0 {
+		t.Fatalf("expected the legacy bucket emptied, got %d (%v)", len(remaining), err)
+	}
+	docs, err := List(ctx, store, ListFilter{Workspace: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected the document in the new bucket, got %d", len(docs))
+	}
+
+	migrated, err := Read(ctx, store, docs[0].ID, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Node.Content != stored.Content {
+		t.Fatal("content changed during migration")
+	}
+	if migrated.Node.Prop("status") != StatusUsed {
+		t.Fatalf("lifecycle metadata lost: %+v", migrated.Node.Properties)
+	}
+	if migrated.Node.Prop("writer_id") != "agent:test" || migrated.Node.Prop("doc_type") != DocHandoff {
+		t.Fatalf("document properties lost: %+v", migrated.Node.Properties)
+	}
+	// Reads report an embedding's length rather than its vector, so that is
+	// what proves the vector survived the move.
+	if migrated.Node.EmbeddingLength != 2 {
+		t.Fatalf("document embedding not carried across: length %d", migrated.Node.EmbeddingLength)
+	}
+	if len(migrated.Chunks) != len(full.Chunks) {
+		t.Fatalf("expected %d chunks, got %d", len(full.Chunks), len(migrated.Chunks))
+	}
+	// Chunk count alone is not proof: the document's edges are repointed, so a
+	// stranded chunk still shows up here. Assert the legacy bucket is empty.
+	stranded, err := store.ListNodes(ctx, db.NodeFilter{
+		Workspace: old, Types: []string{TypeDocChunk}, Lean: true, Limit: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stranded) != 0 {
+		t.Fatalf("%d chunks left behind in the legacy workspace", len(stranded))
+	}
+	for _, c := range migrated.Chunks {
+		if c.EmbeddingLength != 2 {
+			t.Fatalf("chunk embedding not carried across: %s has length %d", c.ID, c.EmbeddingLength)
+		}
+	}
+	related := false
+	for _, rel := range migrated.Related {
+		if rel.ID == "related" {
+			related = true
+		}
+	}
+	if !related {
+		t.Fatalf("relation edge lost during migration: %+v", migrated.Related)
+	}
+
+	// A later write for the same key must update the migrated document rather
+	// than mint a second one — the reason ids are recomputed, not relabelled.
+	if _, err := Add(ctx, store, nil, AddInput{
+		Workspace: target, Key: "release/handoff", Title: "Release handoff",
+		Content: "revised", DocType: DocHandoff, Source: "user", NoEmbed: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	docs, err = List(ctx, store, ListFilter{Workspace: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("expected the re-write to update the migrated document, found %d", len(docs))
+	}
+}
+
+func TestMigrateWorkspaceIsNoOpForSameOrEmptyTarget(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	seedDoc(t, store, "ws:legacy", "k", "T", "content")
+
+	for _, tc := range [][2]string{{"ws:legacy", "ws:legacy"}, {"", "knowledge:project:x"}, {"ws:legacy", ""}} {
+		moved, err := MigrateWorkspace(ctx, store, tc[0], tc[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if moved != 0 {
+			t.Fatalf("expected no move for %v, got %d", tc, moved)
+		}
+	}
+	if docs, err := List(ctx, store, ListFilter{Workspace: "ws:legacy"}); err != nil || len(docs) != 1 {
+		t.Fatalf("expected the document untouched, got %d (%v)", len(docs), err)
+	}
+}
+
+func TestMigrateLegacyProjectDocsUsesKnownRootsAndPreservesUnknown(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	root := t.TempDir()
+
+	known := "ws:known"
+	unknown := "ws:deadbeef"
+	seedDoc(t, store, known, "a", "Known", "content a")
+	seedDoc(t, store, unknown, "b", "Unknown", "content b")
+	// Global documents are not project-scoped and must not be touched.
+	seedDoc(t, store, GlobalWorkspace, "c", "Global", "content c")
+
+	stats, err := MigrateLegacyProjectDocs(ctx, store, nil, map[string]string{known: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Documents != 2 || stats.Workspaces != 2 {
+		t.Fatalf("expected both project documents moved, got %+v", stats)
+	}
+
+	projectID, err := project.ID(nil, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if docs, err := List(ctx, store, ListFilter{Workspace: ProjectWorkspace(projectID)}); err != nil || len(docs) != 1 {
+		t.Fatalf("expected the known-root document under its resolved project, got %d (%v)", len(docs), err)
+	}
+	// An unresolvable bucket keeps its digest so nothing is lost, and lands
+	// where that directory's memories already live.
+	if docs, err := List(ctx, store, ListFilter{Workspace: ProjectWorkspace("project:deadbeef")}); err != nil || len(docs) != 1 {
+		t.Fatalf("expected the unknown-root document preserved by digest, got %d (%v)", len(docs), err)
+	}
+	if docs, err := List(ctx, store, ListFilter{Workspace: GlobalWorkspace}); err != nil || len(docs) != 1 {
+		t.Fatalf("global documents must not be migrated, got %d (%v)", len(docs), err)
+	}
+
+	// Re-running must be a no-op.
+	again, err := MigrateLegacyProjectDocs(ctx, store, nil, map[string]string{known: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Documents != 0 {
+		t.Fatalf("expected a repeat migration to move nothing, got %+v", again)
+	}
+}
+
+// A key already taken in the destination must skip that document, not abort the
+// run — otherwise one collision strands every remaining legacy document.
+func TestMigrateWorkspaceSkipsConflictsAndKeepsGoing(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	const old = "ws:legacy"
+	const target = "knowledge:project:x"
+
+	seedDoc(t, store, old, "clash", "Legacy clash", "legacy content")
+	seedDoc(t, store, target, "clash", "Destination clash", "destination content")
+	seedDoc(t, store, old, "movable", "Movable", "should still move")
+
+	moved, err := MigrateWorkspace(ctx, store, old, target)
+	if err != nil {
+		t.Fatalf("a key collision aborted the migration: %v", err)
+	}
+	if moved != 1 {
+		t.Fatalf("expected the non-conflicting document migrated, got %d", moved)
+	}
+
+	docs, err := List(ctx, store, ListFilter{Workspace: target, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("expected destination to hold its own doc plus the migrated one, got %d", len(docs))
+	}
+	for _, d := range docs {
+		if keyFromURL(d.URL, target) == "clash" && d.Content != "destination content" {
+			t.Fatal("migration overwrote the destination document")
+		}
+	}
+	left, err := List(ctx, store, ListFilter{Workspace: old, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 {
+		t.Fatalf("expected only the conflicting document left behind, got %d", len(left))
+	}
+}
+
+// Documents longer than one chunk page must migrate whole; a fixed cap left the
+// tail in the old bucket, outside project-scoped retrieval.
+func TestMigrateWorkspaceMovesEveryChunk(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	const old = "ws:legacy"
+	const target = "knowledge:project:x"
+
+	// maxChunkRunes is 1800, so this produces well over one page of chunks.
+	big := strings.Repeat("chunked documentation content. ", 20000)
+	doc, err := Add(ctx, store, nil, AddInput{
+		Workspace: old, Key: "large", Title: "Large", Content: big,
+		DocType: DocReference, Source: "user", NoEmbed: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := Read(ctx, store, doc.Node.ID, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Chunks) <= migrationPageSize {
+		t.Skipf("fixture produced only %d chunks; needs more than one page of %d", len(full.Chunks), migrationPageSize)
+	}
+
+	if _, err := MigrateWorkspace(ctx, store, old, target); err != nil {
+		t.Fatal(err)
+	}
+
+	stranded, err := store.ListNodes(ctx, db.NodeFilter{
+		Workspace: old, Types: []string{TypeDocChunk}, Lean: true, Limit: 100000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stranded) != 0 {
+		t.Fatalf("%d chunks stranded in the legacy workspace", len(stranded))
+	}
+	migrated, err := List(ctx, store, ListFilter{Workspace: target, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(migrated) != 1 {
+		t.Fatalf("expected the document under the new workspace, got %d", len(migrated))
+	}
+	after, err := Read(ctx, store, migrated[0].ID, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Chunks) != len(full.Chunks) {
+		t.Fatalf("expected %d chunks after migration, got %d", len(full.Chunks), len(after.Chunks))
 	}
 }

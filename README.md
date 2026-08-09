@@ -115,7 +115,19 @@ For repo handoff between agents, use project scope and a stable `memory_key`:
 }
 ```
 
-When `scope_type` is `project`, agents may omit `scope_id`; raph resolves it from the current workspace and `project.identity_override` when configured. Agents should call `search_project_knowledge` at the start of work and store or update durable decisions, setup facts, gotchas, commands, and constraints before finishing. Use keys such as `repo/setup`, `release/signing`, `ci/known-issues`, and `agent/constraints`.
+When `scope_type` is `project`, agents may omit `scope_id` and pass `working_directory` instead — the absolute path they are working in. raph resolves that directory to a project identity, preferring the repository's **git remote** (`origin`, normalized so ssh/https, credentials, ports, `.git`, and casing all collapse to one value). A repository therefore keeps its memories when it moves, is renamed, or is cloned again somewhere else, and two clones share one project. Repositories without a usable remote fall back to the worktree path, which is what identities always were — so they keep the id their existing memories are stored under. `project.identity_override` still wins over both.
+
+Run `raph project --path .` to see which identity a directory resolves to, what it was derived from, and how much knowledge is stored under it. Passing the directory matters: the MCP server's own working directory is wherever the agent launched it, so inferring a project from it files memories under a project nobody will look in.
+
+Recall is a single tool. `search_memory` takes a query and an optional `working_directory`, ranks **every** memory by meaning — this project's, other projects', shared, and global — and boosts the resolved project's memories rather than filtering to them. There is no scope filter to get wrong, and a global preference is never hidden by a project lookup. Agents should call it at the start of work and store or update durable decisions, setup facts, gotchas, commands, and constraints before finishing. Use keys such as `repo/setup`, `release/signing`, `ci/known-issues`, and `agent/constraints`.
+
+Documents and handoffs are scoped by project identity too, in their own `knowledge:project:<sha1>` bucket rather than the indexer's workspace. Keeping them separate matters: a full index run clears its workspace wholesale, so sharing that id meant `raph init` silently deleted user-authored handoffs. Scoping by project (not by directory) also means a handoff written from a subdirectory is visible from the repository root.
+
+Repositories indexed before the hierarchy existed do not need re-indexing. `raph backfill` rebuilds the spine from what the graph already stores — a file node records its workspace, the root it was indexed from, and its relative path, which is the whole tree. Nothing is read from disk and nothing is re-embedded, so it costs seconds instead of a full re-index, and it is safe to re-run because every write is an upsert. The same command relocates documents still stored under an indexer workspace into their project's document bucket, carrying content, properties, chunks, relations, and embeddings across untouched, and re-anchors project identities from the old path-derived ids onto remote-derived ones — moving memories (with their revision history) and documents onto the new id.
+
+A legacy identity is a hash of a checkout path, which cannot be reversed, so only projects raph can still find on disk are re-anchored: those recorded in the graph or registered for sync. Any scope left over is printed with its id; re-run `raph backfill --path <that repo>` to re-anchor it. Nothing is lost in the meantime — recall never filters by scope, so an un-migrated memory is still found, it just loses the project ranking boost.
+
+Indexed repositories also get a structural spine in the graph: a `project` node contains one `workspace` node per indexed root, which contains `directory` nodes mirroring the tree, which contain the `file` nodes. Directories are created only where indexed files live, so empty and ignored directories never appear. Walking these `CONTAINS` edges with `graph_neighbors` lets an agent navigate from a project down to a path — or from a file back up to the project that owns it.
 
 Every node has a stable unique `id`. Nodes indexed from a local repository also expose the absolute codebase `path`, allowing agents to prefer results from the repository they are currently working in. Re-index existing repositories once to populate `path` on nodes created before this field was added.
 
@@ -174,6 +186,8 @@ raph init            Scan a workspace and build graph relationships
 raph start           Start the MCP server over stdio
 raph studio          Launch the local graph explorer UI
 raph agents mcp setup Install or refresh MCP config (global or project scope)
+raph backfill        Rebuild the project graph, relocate document scopes, re-anchor identities
+raph project         Show which project a directory resolves to
 raph sync            Index and continuously synchronize a repository
 raph sync --status   Show the worker and registered repositories
 raph sync --remove   Unregister a repository and clean its graph data

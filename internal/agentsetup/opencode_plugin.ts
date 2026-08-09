@@ -50,7 +50,8 @@ export const RaphPlugin: Plugin = async ({ client, directory, worktree }) => {
         async execute() {
           return [
             "Raph is your first-class memory manager — use it before any other note-keeping or ad-hoc search, and reach for other tools only for what Raph doesn't cover.",
-            "Search project or shared knowledge before answering.",
+            "Recall before answering with search_memory: one call ranks every memory you have — there is no scope to guess.",
+            "Always pass working_directory (the absolute path you are working in) so raph resolves the right project; the server's own directory is not yours.",
             "If an existing memory is out of date, update it in place (update_memory with the node_id from the search result) instead of storing a duplicate.",
             "Store durable repo decisions, setup facts, and gotchas before finishing.",
             "Handoffs are documents: revise one in place with update_document, remove a done/obsolete one with delete_document, rather than piling up duplicates.",

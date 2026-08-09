@@ -76,6 +76,7 @@ func (*crawlStore) DeleteDocumentNode(context.Context, string) error            
 func (*crawlStore) DeleteFileNodes(context.Context, string, string) error         { return nil }
 func (*crawlStore) DeleteWorkspace(context.Context, string) error                 { return nil }
 func (*crawlStore) ClearAll(context.Context) error                                { return nil }
+func (*crawlStore) ListWorkspaces(context.Context) ([]db.Workspace, error)        { return nil, nil }
 func (*crawlStore) Close() error                                                  { return nil }
 
 func TestSinglePageCrawlerDoesNotFollowLinksAndEmbedsChunks(t *testing.T) {

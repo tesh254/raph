@@ -5,9 +5,56 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 )
+
+// TestReadSnapshotDoesNotBlockWrites proves withReadTx uses a deferred read
+// lock (not withTx's immediate write lock): a snapshot held open on one
+// connection must not stall a write from another. Regression for the cubic
+// finding that /api/repos polling could block indexing/memory writes.
+func TestReadSnapshotDoesNotBlockWrites(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	readStore, err := InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readStore.Close()
+	writeStore, err := InitStorage() // separate connection pool — acts like a 2nd process
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writeStore.Close()
+	ctx := context.Background()
+
+	err = readStore.withReadTx(ctx, func(tx *sql.Tx) error {
+		// Acquire the read lock (deferred begins take it on first read).
+		var n int
+		if e := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes`).Scan(&n); e != nil {
+			return e
+		}
+		// A concurrent write on the other connection must complete while this
+		// snapshot is open. Under the old immediate-mode tx it would block until
+		// busy_timeout (5s) and fail.
+		done := make(chan error, 1)
+		go func() {
+			done <- writeStore.SaveNode(ctx, Node{ID: "n1", Workspace: "ws", Domain: "code", Type: "file", Name: "f", Content: "c"})
+		}()
+		select {
+		case e := <-done:
+			return e
+		case <-time.After(3 * time.Second):
+			return fmt.Errorf("write blocked while a read snapshot was open")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCosineSimilarity(t *testing.T) {
 	t.Parallel()
@@ -598,5 +645,263 @@ func TestDeleteDocumentNodeRemovesDocAndChunks(t *testing.T) {
 	// Second delete is a no-op 404.
 	if err := store.DeleteDocumentNode(ctx, "doc:h"); err != sql.ErrNoRows {
 		t.Fatalf("expected ErrNoRows on re-delete, got %v", err)
+	}
+}
+
+func TestMemorySearchTerms(t *testing.T) {
+	cases := []struct {
+		query string
+		want  []string
+	}{
+		{"what do I know about this project", []string{"know", "project"}},
+		{"How do I create a merge request?", []string{"create", "merge", "request"}},
+		{"deploy", []string{"deploy"}},
+		{"  ", nil},
+		// Duplicates collapse, and case is normalized.
+		{"Deploy deploy DEPLOY", []string{"deploy"}},
+		// An all-stopword query keeps its terms rather than matching nothing.
+		{"what about this", []string{"what", "about", "this"}},
+		// Punctuation splits; short fragments are dropped.
+		{"ci/cd is a p1 issue", []string{"issue"}},
+	}
+	for _, tc := range cases {
+		got := memorySearchTerms(tc.query)
+		if !slices.Equal(got, tc.want) {
+			t.Fatalf("memorySearchTerms(%q) = %v, want %v", tc.query, got, tc.want)
+		}
+	}
+}
+
+func TestMemorySearchTermsCapsTermCount(t *testing.T) {
+	var words []string
+	for i := 0; i < 40; i++ {
+		words = append(words, fmt.Sprintf("term%02d", i))
+	}
+	if got := memorySearchTerms(strings.Join(words, " ")); len(got) != 12 {
+		t.Fatalf("expected the term list capped at 12, got %d", len(got))
+	}
+}
+
+// A natural-language question must recall a memory that shares only some of its
+// words. Before term matching this returned nothing, so an agent whose
+// embedding provider was unavailable concluded the memory did not exist.
+func TestSearchMemoryRecordsMatchesNaturalLanguageQuery(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	seed := func(id, title, content string) {
+		if err := store.SaveNode(ctx, Node{
+			ID: id, Workspace: "ws", Domain: "memory", Type: "memory", Name: title, Content: content,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertMemoryRecord(ctx, MemoryRecord{
+			Node: Node{ID: id}, ScopeType: "project", ScopeID: "project:one", LifecycleState: "active",
+			KnowledgeType: "decision", Source: "user", WriterID: "w", MemoryKey: id,
+			CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z", Revision: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("m1", "Local Development Database Access", "Use the tenant API to reach the local database.")
+	seed("m2", "Release signing", "Minisign keys live in the release workflow.")
+
+	matches, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{
+		Query:           "how do I get database access for local development",
+		LifecycleStates: []string{"active"},
+		Limit:           10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("expected a natural-language query to match a memory sharing its terms")
+	}
+	if matches[0].Node.ID != "m1" {
+		t.Fatalf("expected the record matching the most terms first, got %s", matches[0].Node.ID)
+	}
+}
+
+// Ranking must favor the record matching more query terms, not the most
+// recently updated one.
+func TestSearchMemoryRecordsRanksByTermCoverage(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	seed := func(id, title, content, updated string) {
+		if err := store.SaveNode(ctx, Node{
+			ID: id, Workspace: "ws", Domain: "memory", Type: "memory", Name: title, Content: content,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertMemoryRecord(ctx, MemoryRecord{
+			Node: Node{ID: id}, ScopeType: "project", ScopeID: "project:one", LifecycleState: "active",
+			KnowledgeType: "decision", Source: "user", WriterID: "w", MemoryKey: id,
+			CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: updated, Revision: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The weaker match is newer, so recency alone would put it first.
+	seed("weak", "Deployment notes", "deployment only", "2026-06-01T00:00:00Z")
+	seed("strong", "Staging deployment rollback", "deployment rollback for staging", "2026-01-01T00:00:00Z")
+
+	matches, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{
+		Query:           "staging deployment rollback",
+		LifecycleStates: []string{"active"},
+		Limit:           10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("expected both records to match at least one term, got %d", len(matches))
+	}
+	if matches[0].Node.ID != "strong" {
+		t.Fatalf("expected the record covering more terms first, got %s", matches[0].Node.ID)
+	}
+}
+
+// A query that tokenizes to nothing must still constrain the result set.
+// Returning every active memory ordered by recency would present unrelated
+// records as matches — worse than the empty result it was meant to fix.
+func TestSearchMemoryRecordsUntokenizableQueryStillFilters(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	seed := func(id, title, content string) {
+		if err := store.SaveNode(ctx, Node{
+			ID: id, Workspace: "ws", Domain: "memory", Type: "memory", Name: title, Content: content,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertMemoryRecord(ctx, MemoryRecord{
+			Node: Node{ID: id}, ScopeType: "project", ScopeID: "project:one", LifecycleState: "active",
+			KnowledgeType: "decision", Source: "user", WriterID: "w", MemoryKey: id,
+			CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z", Revision: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("ci", "CI CD pipeline", "the ci cd pipeline runs on push")
+	seed("unrelated", "Database access", "tenant API notes")
+	seed("cjk", "データベース", "データベース接続の設定")
+
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{"ci cd", "ci"},   // every fragment shorter than the minimum
+		{"データベース", "cjk"}, // a script the tokenizer does not split
+	} {
+		matches, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{
+			Query:           tc.query,
+			LifecycleStates: []string{"active"},
+			Limit:           10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) != 1 {
+			ids := make([]string, 0, len(matches))
+			for _, m := range matches {
+				ids = append(ids, m.Node.ID)
+			}
+			t.Fatalf("query %q returned %d records (%v); expected only the matching one", tc.query, len(matches), ids)
+		}
+		if matches[0].Node.ID != tc.want {
+			t.Fatalf("query %q matched %s, want %s", tc.query, matches[0].Node.ID, tc.want)
+		}
+	}
+}
+
+// LIKE wildcards in a query must match literally. A search for "100%" once
+// became the pattern "%100%%", and a bare "%" matched every memory in the
+// store — unrelated records returned as hits.
+func TestSearchMemoryRecordsTreatsWildcardsLiterally(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	seed := func(id, title, content string) {
+		if err := store.SaveNode(ctx, Node{
+			ID: id, Workspace: "ws", Domain: "memory", Type: "memory", Name: title, Content: content,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertMemoryRecord(ctx, MemoryRecord{
+			Node: Node{ID: id}, ScopeType: "project", ScopeID: "project:one", LifecycleState: "active",
+			KnowledgeType: "decision", Source: "user", WriterID: "w", MemoryKey: id,
+			CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z", Revision: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("pct", "Coverage target", "we require 100% coverage on the parser")
+	seed("under", "Column naming", "prefer user_id over userid")
+	seed("other", "Unrelated", "nothing to do with either")
+
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{"100%", "pct"},
+		{"user_id", "under"},
+	} {
+		matches, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{
+			Query: tc.query, LifecycleStates: []string{"active"}, Limit: 10,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) != 1 || matches[0].Node.ID != tc.want {
+			ids := make([]string, 0, len(matches))
+			for _, m := range matches {
+				ids = append(ids, m.Node.ID)
+			}
+			t.Fatalf("query %q matched %v, want only %s", tc.query, ids, tc.want)
+		}
+	}
+
+	// A query that is nothing but wildcards must not match everything.
+	matches, err := store.SearchMemoryRecords(ctx, MemorySearchFilter{
+		Query: "%%%", LifecycleStates: []string{"active"}, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("a wildcard-only query matched %d records", len(matches))
+	}
+}
+
+// A relocated node's access history must follow it. access_events has no
+// foreign key, so nothing moves these rows automatically; left behind they
+// point at a deleted id and split one node's activity in two.
+func TestRelocateCarriesAccessHistory(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	if err := store.SaveNode(ctx, Node{
+		ID: "old", Workspace: "ws:legacy", Domain: "knowledge", Type: "doc", Name: "Doc", Content: "body",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordAccess(ctx, "old", "view", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RelocateNode(ctx, "old", "new", "knowledge:project:x", "knowledge://knowledge:project:x/doc"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stale, moved int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_events WHERE node_id = 'old'`).Scan(&stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_events WHERE node_id = 'new'`).Scan(&moved); err != nil {
+		t.Fatal(err)
+	}
+	if stale != 0 || moved != 1 {
+		t.Fatalf("access history not carried across: %d left on the old id, %d on the new", stale, moved)
 	}
 }

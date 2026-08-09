@@ -14,6 +14,7 @@ import (
 	"raph/internal/indexer"
 	"raph/internal/knowledge"
 	"raph/internal/memory"
+	"raph/internal/project"
 	"raph/internal/query"
 	"raph/internal/verbose"
 
@@ -45,28 +46,30 @@ type NeighborArgs struct {
 }
 
 type StoreMemoryArgs struct {
-	ScopeType     string   `json:"scope_type" jsonschema:"Memory scope type such as project, shared, or global"`
-	ScopeID       string   `json:"scope_id,omitempty" jsonschema:"Stable scope identifier. Project scope can infer this from the current workspace when omitted"`
-	KnowledgeType string   `json:"knowledge_type" jsonschema:"Knowledge category such as decision, workflow, preference, or incident"`
-	Title         string   `json:"title" jsonschema:"Short descriptive title"`
-	Content       string   `json:"content" jsonschema:"Durable information to remember"`
-	Source        string   `json:"source" jsonschema:"Origin of the memory, such as conversation, docs, or user"`
-	WriterID      string   `json:"writer_id" jsonschema:"Stable identifier for the writer updating this memory"`
-	Tags          []string `json:"tags,omitempty" jsonschema:"Optional tags for retrieval and display"`
-	MemoryKey     string   `json:"memory_key" jsonschema:"Stable key within the immutable scope and knowledge type"`
+	ScopeType        string   `json:"scope_type" jsonschema:"Memory scope type such as project, shared, or global"`
+	ScopeID          string   `json:"scope_id,omitempty" jsonschema:"Stable scope identifier. Omit for project scope to derive it from working_directory"`
+	WorkingDirectory string   `json:"working_directory,omitempty" jsonschema:"Absolute path you are working in. Used to resolve the project this belongs to — pass it, since the server's own directory is usually not yours."`
+	KnowledgeType    string   `json:"knowledge_type" jsonschema:"Knowledge category such as decision, workflow, preference, or incident"`
+	Title            string   `json:"title" jsonschema:"Short descriptive title"`
+	Content          string   `json:"content" jsonschema:"Durable information to remember"`
+	Source           string   `json:"source" jsonschema:"Origin of the memory, such as conversation, docs, or user"`
+	WriterID         string   `json:"writer_id" jsonschema:"Stable identifier for the writer updating this memory"`
+	Tags             []string `json:"tags,omitempty" jsonschema:"Optional tags for retrieval and display"`
+	MemoryKey        string   `json:"memory_key" jsonschema:"Stable key within the immutable scope and knowledge type"`
 }
 
 type UpdateMemoryArgs struct {
-	NodeID        string   `json:"node_id,omitempty" jsonschema:"Target a particular memory by its node id (e.g. from a search result). When set, scope_type/knowledge_type/memory_key are resolved from the record and need not be supplied"`
-	ScopeType     string   `json:"scope_type,omitempty" jsonschema:"Immutable memory scope type. Required unless node_id is set"`
-	ScopeID       string   `json:"scope_id,omitempty" jsonschema:"Immutable scope identifier. Project scope can infer this from the current workspace when omitted"`
-	KnowledgeType string   `json:"knowledge_type,omitempty" jsonschema:"Immutable knowledge category. Required unless node_id is set"`
-	Title         string   `json:"title" jsonschema:"Updated short descriptive title"`
-	Content       string   `json:"content" jsonschema:"Updated durable information"`
-	Source        string   `json:"source,omitempty" jsonschema:"Origin of the update. Defaults to the record's current source when omitted"`
-	WriterID      string   `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer updating this memory. Defaults to the record's current writer when omitted"`
-	Tags          []string `json:"tags,omitempty" jsonschema:"Optional replacement tag set"`
-	MemoryKey     string   `json:"memory_key,omitempty" jsonschema:"Stable immutable key used to locate the memory. Required unless node_id is set"`
+	NodeID           string   `json:"node_id,omitempty" jsonschema:"Target a particular memory by its node id (e.g. from a search result). When set, scope_type/knowledge_type/memory_key are resolved from the record and need not be supplied"`
+	ScopeType        string   `json:"scope_type,omitempty" jsonschema:"Immutable memory scope type. Required unless node_id is set"`
+	ScopeID          string   `json:"scope_id,omitempty" jsonschema:"Immutable scope identifier. Omit for project scope to derive it from working_directory"`
+	WorkingDirectory string   `json:"working_directory,omitempty" jsonschema:"Absolute path you are working in. Used to resolve the project this belongs to — pass it, since the server's own directory is usually not yours."`
+	KnowledgeType    string   `json:"knowledge_type,omitempty" jsonschema:"Immutable knowledge category. Required unless node_id is set"`
+	Title            string   `json:"title" jsonschema:"Updated short descriptive title"`
+	Content          string   `json:"content" jsonschema:"Updated durable information"`
+	Source           string   `json:"source,omitempty" jsonschema:"Origin of the update. Defaults to the record's current source when omitted"`
+	WriterID         string   `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer updating this memory. Defaults to the record's current writer when omitted"`
+	Tags             []string `json:"tags,omitempty" jsonschema:"Optional replacement tag set"`
+	MemoryKey        string   `json:"memory_key,omitempty" jsonschema:"Stable immutable key used to locate the memory. Required unless node_id is set"`
 }
 
 type DeprecateMemoryArgs struct {
@@ -83,43 +86,54 @@ type SearchKnowledgeArgs struct {
 	Limit         int    `json:"limit,omitempty" jsonschema:"Maximum result count"`
 }
 
+type SearchMemoryArgs struct {
+	Query            string `json:"query" jsonschema:"What to recall — matched by meaning across every memory"`
+	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"Absolute path you are working in. Memories from that project rank higher; nothing is filtered out. Defaults to the server's directory, which is usually not yours — pass it."`
+	KnowledgeType    string `json:"knowledge_type,omitempty" jsonschema:"Optional: narrow to one knowledge type (decision, preference, incident, workflow, ...)"`
+	Limit            int    `json:"limit,omitempty" jsonschema:"Maximum result count"`
+}
+
 type GetMemoryHistoryArgs struct {
 	NodeID string `json:"node_id" jsonschema:"The memory node ID whose revision history should be returned"`
 }
 
 type StoreRuleArgs struct {
-	Scope    string   `json:"scope" jsonschema:"Rule scope: global (affects all work) or project (this codebase)"`
-	Content  string   `json:"content" jsonschema:"The rule the agent must follow"`
-	Title    string   `json:"title,omitempty" jsonschema:"Short rule title"`
-	Tags     []string `json:"tags,omitempty" jsonschema:"Optional tags"`
-	Key      string   `json:"key,omitempty" jsonschema:"Stable rule key; defaults to a slug of title/content"`
-	WriterID string   `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer"`
+	Scope            string   `json:"scope" jsonschema:"Rule scope: global (affects all work) or project (this codebase)"`
+	WorkingDirectory string   `json:"working_directory,omitempty" jsonschema:"Absolute path you are working in. Resolves which project this belongs to — pass it, since the server's own directory is usually not yours."`
+	Content          string   `json:"content" jsonschema:"The rule the agent must follow"`
+	Title            string   `json:"title,omitempty" jsonschema:"Short rule title"`
+	Tags             []string `json:"tags,omitempty" jsonschema:"Optional tags"`
+	Key              string   `json:"key,omitempty" jsonschema:"Stable rule key; defaults to a slug of title/content"`
+	WriterID         string   `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer"`
 }
 
 type ListRulesArgs struct {
-	Scope string `json:"scope" jsonschema:"Rule scope: global or project"`
-	Query string `json:"query,omitempty" jsonschema:"Optional text filter"`
-	Limit int    `json:"limit,omitempty" jsonschema:"Maximum rules to return"`
+	Scope            string `json:"scope" jsonschema:"Rule scope: global or project"`
+	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"Absolute path you are working in. Resolves which project this belongs to — pass it, since the server's own directory is usually not yours."`
+	Query            string `json:"query,omitempty" jsonschema:"Optional text filter"`
+	Limit            int    `json:"limit,omitempty" jsonschema:"Maximum rules to return"`
 }
 
 type AddDocumentArgs struct {
-	Scope    string   `json:"scope,omitempty" jsonschema:"Scope: project (this codebase) or global. Defaults to project"`
-	Title    string   `json:"title,omitempty" jsonschema:"Document title"`
-	Content  string   `json:"content" jsonschema:"Full document text"`
-	DocType  string   `json:"doc_type,omitempty" jsonschema:"architecture, handoff, reference, or note"`
-	Source   string   `json:"source,omitempty" jsonschema:"Origin such as user, web, or agent"`
-	Tags     []string `json:"tags,omitempty" jsonschema:"Optional tags"`
-	Links    []string `json:"links,omitempty" jsonschema:"Node ids to relate this document to"`
-	Key      string   `json:"key,omitempty" jsonschema:"Stable key; defaults to a slug of the title"`
-	WriterID string   `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer"`
+	Scope            string   `json:"scope,omitempty" jsonschema:"Scope: project (this codebase) or global. Defaults to project"`
+	WorkingDirectory string   `json:"working_directory,omitempty" jsonschema:"Absolute path you are working in. Resolves which project this belongs to — pass it, since the server's own directory is usually not yours."`
+	Title            string   `json:"title,omitempty" jsonschema:"Document title"`
+	Content          string   `json:"content" jsonschema:"Full document text"`
+	DocType          string   `json:"doc_type,omitempty" jsonschema:"architecture, handoff, reference, or note"`
+	Source           string   `json:"source,omitempty" jsonschema:"Origin such as user, web, or agent"`
+	Tags             []string `json:"tags,omitempty" jsonschema:"Optional tags"`
+	Links            []string `json:"links,omitempty" jsonschema:"Node ids to relate this document to"`
+	Key              string   `json:"key,omitempty" jsonschema:"Stable key; defaults to a slug of the title"`
+	WriterID         string   `json:"writer_id,omitempty" jsonschema:"Stable identifier for the writer"`
 }
 
 type ListDocumentsArgs struct {
-	Scope   string `json:"scope,omitempty" jsonschema:"Scope: project or global"`
-	DocType string `json:"doc_type,omitempty" jsonschema:"Filter by doc type"`
-	Status  string `json:"status,omitempty" jsonschema:"Filter by status: fresh, stale, used"`
-	Query   string `json:"query,omitempty" jsonschema:"Optional text filter"`
-	Limit   int    `json:"limit,omitempty" jsonschema:"Maximum documents"`
+	Scope            string `json:"scope,omitempty" jsonschema:"Scope: project or global"`
+	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"Absolute path you are working in. Resolves which project this belongs to — pass it, since the server's own directory is usually not yours."`
+	DocType          string `json:"doc_type,omitempty" jsonschema:"Filter by doc type"`
+	Status           string `json:"status,omitempty" jsonschema:"Filter by status: fresh, stale, used"`
+	Query            string `json:"query,omitempty" jsonschema:"Optional text filter"`
+	Limit            int    `json:"limit,omitempty" jsonschema:"Maximum documents"`
 }
 
 type ListDocumentsOutput struct {
@@ -127,12 +141,13 @@ type ListDocumentsOutput struct {
 }
 
 type ReadDocumentArgs struct {
-	ID       string `json:"id,omitempty" jsonschema:"Document node id. If omitted, provide query to resolve the document by search."`
-	Query    string `json:"query,omitempty" jsonschema:"Resolve the document by text search when the id is unknown. A single match is read (as a peek); multiple matches return candidates to choose from."`
-	DocType  string `json:"doc_type,omitempty" jsonschema:"Optional doc type filter for the query path, e.g. handoff"`
-	Scope    string `json:"scope,omitempty" jsonschema:"Optional scope for the query path: project or global"`
-	MarkUsed *bool  `json:"mark_used,omitempty" jsonschema:"Mark a handoff as used on read. Defaults to true for an id read and false for a query-resolved read (a peek). Set explicitly to override."`
-	ReaderID string `json:"reader_id,omitempty" jsonschema:"Stable identifier for the reading agent"`
+	ID               string `json:"id,omitempty" jsonschema:"Document node id. If omitted, provide query to resolve the document by search."`
+	Query            string `json:"query,omitempty" jsonschema:"Resolve the document by text search when the id is unknown. A single match is read (as a peek); multiple matches return candidates to choose from."`
+	DocType          string `json:"doc_type,omitempty" jsonschema:"Optional doc type filter for the query path, e.g. handoff"`
+	Scope            string `json:"scope,omitempty" jsonschema:"Optional scope for the query path: project or global"`
+	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"Absolute path you are working in. Resolves which project this belongs to — pass it, since the server's own directory is usually not yours."`
+	MarkUsed         *bool  `json:"mark_used,omitempty" jsonschema:"Mark a handoff as used on read. Defaults to true for an id read and false for a query-resolved read (a peek). Set explicitly to override."`
+	ReaderID         string `json:"reader_id,omitempty" jsonschema:"Stable identifier for the reading agent"`
 }
 
 // DocCandidate is a lightweight match returned when a read_document query is
@@ -265,10 +280,29 @@ type NeighborOutput struct {
 	Edges []db.Edge `json:"edges"`
 }
 
+// GlobalScopeID is the single bucket global memory lives in. Global scope
+// exists to share knowledge across every project and every agent, which only
+// holds if all of them write to the same id — so it is derived here rather than
+// supplied by the caller. Rules already use it (see resolveRuleScope).
+const GlobalScopeID = "global"
+
+// ScopedMemorySearchOutput is the shape for deliberately scope-bound lookups.
+// Only rule listing uses it: "which rules apply to this codebase" is a question
+// about one scope, unlike recall, which ranks across all of them.
 type ScopedMemorySearchOutput struct {
 	ScopeType string            `json:"scope_type"`
 	ScopeID   string            `json:"scope_id"`
 	Matches   []db.MemoryRecord `json:"matches"`
+}
+
+type MemorySearchOutput struct {
+	Query string `json:"query"`
+	Mode  string `json:"mode"`
+	// Project reports the identity the working directory resolved to, so the
+	// agent can see which project got the ranking boost — and, when a lookup
+	// surprises it, that the directory it passed was the one raph used.
+	Project *project.Identity `json:"project,omitempty"`
+	Matches []db.MemoryRecord `json:"matches"`
 }
 
 type MemoryHistoryOutput struct {
@@ -297,10 +331,12 @@ type CrossCorpusNeighborOutput struct {
 // should be updated in place rather than re-stored as duplicates.
 const mcpInstructions = `raph is your first-class memory manager — a shared knowledge graph for durable agent memory, rules, docs/handoffs, and code search. Reach for raph before any other note-keeping or ad-hoc search; use other tools only for what raph doesn't cover.
 
+Always pass working_directory — the absolute path you are working in — to the memory tools. raph derives the project identity from it. This server's own working directory is wherever your client launched it, so without working_directory a memory can be filed under, or recalled from, a project that has nothing to do with the code in front of you.
+
 Memory-first workflow:
-- Before answering, search existing knowledge (search_project_knowledge, search_shared_knowledge, search_global_preferences).
+- Before answering, recall what you already know with search_memory. It is the ONLY recall tool: one query searches every memory you have — this project's, other projects', shared, and global — ranked by meaning, with this project's memories boosted. There is no scope filter to get wrong; just ask.
 - Reuse what you find. If a memory is out of date, UPDATE it instead of storing a duplicate: call update_memory with the node_id from the search result (its immutable scope/type/key are resolved for you). Use store_memory only for genuinely new facts.
-- Record durable decisions, setup facts, and gotchas before finishing.
+- Record durable decisions, setup facts, and gotchas before finishing. Use scope_type=project for facts about one codebase and scope_type=global for anything that should follow you across every project and agent (preferences, conventions, how you like work done) — global memory needs no scope_id.
 - get_memory_history shows a memory's revisions; deprecate_memory retires one that no longer applies.
 
 Handoffs & documents:
@@ -351,7 +387,8 @@ type learnRaphTool struct {
 }
 
 var learnRaphWorkflow = []string{
-	"Search existing knowledge before answering (search_project_knowledge, search_shared_knowledge, search_global_preferences).",
+	"Pass working_directory (the absolute path you are working in) to every memory tool — raph derives the project from it, and this server's own directory is not yours.",
+	"Recall what you know before answering with search_memory: one call ranks every memory you have by meaning, boosting this project's. There is no scope filter.",
 	"Reuse what you find; if a memory is out of date, update_memory in place instead of storing a duplicate.",
 	"Record durable decisions, setup facts, and gotchas before finishing (store_memory / store_rule).",
 	"Index a repo (index_codebase) when code context matters; crawl_website for external docs.",
@@ -372,9 +409,7 @@ var learnRaphGroups = []learnRaphGroup{
 		{"graph_neighbors_cross_corpus", "Semantic expansion into other corpora/workspaces."},
 	}},
 	{Title: "Memory (durable knowledge)", Tools: []learnRaphTool{
-		{"search_project_knowledge", "Search this project's active memories — do this first."},
-		{"search_shared_knowledge", "Search a shared scope's memories."},
-		{"search_global_preferences", "Search global preference memories."},
+		{"search_memory", "The only recall tool: ranks every memory by meaning, boosting working_directory's project. No scope filter."},
 		{"store_memory", "Create a NEW memory — only for genuinely new facts."},
 		{"update_memory", "Update an existing memory in place (by node_id or coordinates) instead of duplicating."},
 		{"deprecate_memory", "Retire a memory that no longer applies."},
@@ -406,8 +441,8 @@ var learnRaphGroups = []learnRaphGroup{
 // re-storing.
 var learnRaphExamples = []learnRaphExample{
 	{
-		Goal: "Recall project knowledge (semantic — searches by meaning, with keyword fallback)",
-		Call: `search_project_knowledge {"query": "how do we deploy"}`,
+		Goal: "Recall anything you know (ranks every memory by meaning; this project's rank higher)",
+		Call: `search_memory {"query": "how do we deploy", "working_directory": "/abs/path/to/repo"}`,
 	},
 	{
 		Goal: "Update an existing memory in place using the node_id from a search result",
@@ -415,7 +450,7 @@ var learnRaphExamples = []learnRaphExample{
 	},
 	{
 		Goal: "Store a genuinely new fact (only when nothing existing fits)",
-		Call: `store_memory {"scope_type": "project", "knowledge_type": "decision", "title": "...", "content": "..."}`,
+		Call: `store_memory {"scope_type": "project", "working_directory": "/abs/path/to/repo", "knowledge_type": "decision", "title": "...", "content": "..."}`,
 	},
 	{
 		Goal: "Find a handoff without its id",
@@ -530,7 +565,7 @@ func (m *MCPServerWrapper) registerTools() {
 			return nil, BestVectorMatchOutput{}, fmt.Errorf("best_vector_match requires a configured embedding provider")
 		}
 
-		vec, err := config.GenerateEmbedding(ctx, m.config, query)
+		vec, err := config.EmbedQuery(ctx, m.config, query)
 		if err != nil {
 			return nil, BestVectorMatchOutput{}, fmt.Errorf("generate query embedding: %w", err)
 		}
@@ -582,7 +617,7 @@ func (m *MCPServerWrapper) registerTools() {
 		Name:        "store_memory",
 		Description: "Stores a new scoped memory record. Project scope can infer scope_id from the current workspace.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args StoreMemoryArgs) (*mcpsdk.CallToolResult, memory.StoreOutput, error) {
-		scopeID, err := m.resolveScopeID(args.ScopeType, args.ScopeID)
+		scopeID, err := m.resolveScopeID(args.ScopeType, args.ScopeID, args.WorkingDirectory)
 		if err != nil {
 			return nil, memory.StoreOutput{}, err
 		}
@@ -633,7 +668,7 @@ func (m *MCPServerWrapper) registerTools() {
 				input.WriterID = record.WriterID
 			}
 		} else {
-			scopeID, err := m.resolveScopeID(args.ScopeType, args.ScopeID)
+			scopeID, err := m.resolveScopeID(args.ScopeType, args.ScopeID, args.WorkingDirectory)
 			if err != nil {
 				return nil, memory.StoreOutput{}, err
 			}
@@ -666,44 +701,39 @@ func (m *MCPServerWrapper) registerTools() {
 	})
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
-		Name:        "search_project_knowledge",
-		Description: "Searches active project-scoped knowledge for the current workspace's project identity.",
-	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchKnowledgeArgs) (*mcpsdk.CallToolResult, ScopedMemorySearchOutput, error) {
-		scopeID, err := m.resolveScopeID("project", "")
-		if err != nil {
-			return nil, ScopedMemorySearchOutput{}, err
-		}
-		output, err := m.searchKnowledge(ctx, "project", scopeID, args.KnowledgeType, args.Query, args.Limit)
-		if err != nil {
-			return nil, ScopedMemorySearchOutput{}, err
-		}
-		return textResult(renderJSON(output)), output, nil
-	})
+		Name: "search_memory",
+		Description: "Recall durable memories — the one tool for looking anything up. " +
+			"Searches every memory you have (this project's, other projects', shared, and global) " +
+			"ranked by meaning, and never filters by scope, so a query alone always returns your best matches. " +
+			"Pass working_directory (the absolute path you are working in) to rank this project's memories higher. " +
+			"Each match reports the scope it lives in.",
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchMemoryArgs) (*mcpsdk.CallToolResult, MemorySearchOutput, error) {
+		// Project resolution is best-effort: it only supplies a ranking bias, so
+		// an unreadable or nonexistent directory must still return matches
+		// rather than failing the recall outright.
+		identity := m.projectForRanking(args.WorkingDirectory)
 
-	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
-		Name:        "search_shared_knowledge",
-		Description: "Searches active shared knowledge for an explicit shared scope.",
-	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchKnowledgeArgs) (*mcpsdk.CallToolResult, ScopedMemorySearchOutput, error) {
-		scopeID := strings.TrimSpace(args.ScopeID)
-		if scopeID == "" {
-			return nil, ScopedMemorySearchOutput{}, fmt.Errorf("scope_id is required for shared knowledge")
+		projectID := ""
+		if identity != nil {
+			projectID = identity.ID
 		}
-		output, err := m.searchKnowledge(ctx, "shared", scopeID, args.KnowledgeType, args.Query, args.Limit)
+		output, err := memory.Search(ctx, m.store, m.config, memory.SearchInput{
+			Query:         args.Query,
+			KnowledgeType: args.KnowledgeType,
+			ProjectID:     projectID,
+			Limit:         searchLimit(args.Limit),
+		})
 		if err != nil {
-			return nil, ScopedMemorySearchOutput{}, err
+			return nil, MemorySearchOutput{}, err
 		}
-		return textResult(renderJSON(output)), output, nil
-	})
-
-	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
-		Name:        "search_global_preferences",
-		Description: "Searches active global preference memories.",
-	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args SearchKnowledgeArgs) (*mcpsdk.CallToolResult, ScopedMemorySearchOutput, error) {
-		output, err := m.searchKnowledge(ctx, "global", "preferences", "preference", args.Query, args.Limit)
-		if err != nil {
-			return nil, ScopedMemorySearchOutput{}, err
+		m.recordSearchHits(ctx, args.Query, memoryNodeIDs(output.Matches))
+		out := MemorySearchOutput{
+			Query:   strings.TrimSpace(args.Query),
+			Mode:    output.Mode,
+			Project: identity,
+			Matches: output.Matches,
 		}
-		return textResult(renderJSON(output)), output, nil
+		return textResult(renderJSON(out)), out, nil
 	})
 
 	mcpsdk.AddTool(m.server, &mcpsdk.Tool{
@@ -723,7 +753,7 @@ func (m *MCPServerWrapper) registerTools() {
 		Name:        "store_rule",
 		Description: "Stores or updates a rule the agent must follow, scoped globally (all work) or to the current project (this codebase).",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args StoreRuleArgs) (*mcpsdk.CallToolResult, memory.StoreOutput, error) {
-		scopeType, scopeID, err := m.resolveRuleScope(args.Scope)
+		scopeType, scopeID, err := m.resolveRuleScope(args.Scope, args.WorkingDirectory)
 		if err != nil {
 			return nil, memory.StoreOutput{}, err
 		}
@@ -749,7 +779,7 @@ func (m *MCPServerWrapper) registerTools() {
 		Name:        "list_rules",
 		Description: "Lists active rules for a scope. Use scope=global for rules affecting all work and scope=project for rules specific to the current codebase.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args ListRulesArgs) (*mcpsdk.CallToolResult, ScopedMemorySearchOutput, error) {
-		scopeType, scopeID, err := m.resolveRuleScope(args.Scope)
+		scopeType, scopeID, err := m.resolveRuleScope(args.Scope, args.WorkingDirectory)
 		if err != nil {
 			return nil, ScopedMemorySearchOutput{}, err
 		}
@@ -764,7 +794,7 @@ func (m *MCPServerWrapper) registerTools() {
 		Name:        "add_document",
 		Description: "Attaches a local document to the graph. Set doc_type to architecture (durable design), handoff (work transfer), reference (a fact to confirm against), or note. Chunked and linked so related material is one hop away.",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args AddDocumentArgs) (*mcpsdk.CallToolResult, knowledge.Document, error) {
-		workspace, err := m.resolveDocWorkspace(args.Scope)
+		workspace, err := m.resolveDocWorkspace(args.Scope, args.WorkingDirectory)
 		if err != nil {
 			return nil, knowledge.Document{}, err
 		}
@@ -786,7 +816,7 @@ func (m *MCPServerWrapper) registerTools() {
 		Name:        "list_documents",
 		Description: "Lists local documents in a scope, optionally filtered by doc_type (architecture, handoff, reference, note) or status (fresh, stale, used).",
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, args ListDocumentsArgs) (*mcpsdk.CallToolResult, ListDocumentsOutput, error) {
-		workspace, err := m.resolveDocWorkspace(args.Scope)
+		workspace, err := m.resolveDocWorkspace(args.Scope, args.WorkingDirectory)
 		if err != nil {
 			return nil, ListDocumentsOutput{}, err
 		}
@@ -822,7 +852,7 @@ func (m *MCPServerWrapper) registerTools() {
 			}
 			workspace := ""
 			if scope := strings.TrimSpace(args.Scope); scope != "" {
-				ws, err := m.resolveDocWorkspace(scope)
+				ws, err := m.resolveDocWorkspace(scope, args.WorkingDirectory)
 				if err != nil {
 					return nil, ReadDocumentOutput{}, err
 				}
@@ -1074,7 +1104,7 @@ func (m *MCPServerWrapper) hybridSearch(ctx context.Context, query string, limit
 
 	if m.config != nil && m.config.HasEmbeddingProvider() {
 		verbose.Printf("generating query embedding for semantic search")
-		vec, err := config.GenerateEmbedding(ctx, m.config, query)
+		vec, err := config.EmbedQuery(ctx, m.config, query)
 		if err == nil && len(vec) > 0 {
 			nodes, searchErr := m.store.VectorSearch(ctx, vec, limit)
 			if searchErr == nil && len(nodes) > 0 {
@@ -1098,7 +1128,7 @@ func (m *MCPServerWrapper) hybridSearch(ctx context.Context, query string, limit
 
 func (m *MCPServerWrapper) searchWorkspace(ctx context.Context, workspace string, query string, limit int) (string, []db.Node, error) {
 	if m.config != nil && m.config.HasEmbeddingProvider() {
-		vec, err := config.GenerateEmbedding(ctx, m.config, query)
+		vec, err := config.EmbedQuery(ctx, m.config, query)
 		if err == nil && len(vec) > 0 {
 			nodes, searchErr := m.store.VectorSearchWorkspace(ctx, workspace, vec, limit)
 			if searchErr == nil && len(nodes) > 0 {
@@ -1116,10 +1146,23 @@ func (m *MCPServerWrapper) searchWorkspace(ctx context.Context, workspace string
 
 // resolveDocWorkspace maps a document scope to a workspace id: the current
 // project's workspace, or the shared global-knowledge bucket.
-func (m *MCPServerWrapper) resolveDocWorkspace(scope string) (string, error) {
+// resolveDocWorkspace maps a doc scope to the bucket its documents live in.
+//
+// Project documents are keyed by project identity, not by the indexer's
+// workspace id: sharing that id let a full index run delete them, and tied them
+// to one directory instead of the whole repository.
+func (m *MCPServerWrapper) resolveDocWorkspace(scope string, workingDir string) (string, error) {
 	switch strings.TrimSpace(scope) {
 	case "", "project":
-		return m.resolveWorkspace(".")
+		dir, err := agentWorkingDir(workingDir)
+		if err != nil {
+			return "", err
+		}
+		projectID, err := project.ID(m.config, dir)
+		if err != nil {
+			return "", err
+		}
+		return knowledge.ProjectWorkspace(projectID), nil
 	case "global":
 		return knowledge.GlobalWorkspace, nil
 	default:
@@ -1128,17 +1171,18 @@ func (m *MCPServerWrapper) resolveDocWorkspace(scope string) (string, error) {
 }
 
 // resolveRuleScope maps a rule scope keyword to a (scopeType, scopeID) pair.
-// global rules share a fixed bucket; project rules use the workspace identity.
-func (m *MCPServerWrapper) resolveRuleScope(scope string) (string, string, error) {
+// global rules share a fixed bucket; project rules use the identity of the
+// directory the agent is working in.
+func (m *MCPServerWrapper) resolveRuleScope(scope string, workingDir string) (string, string, error) {
 	scope = strings.TrimSpace(scope)
 	if scope == "" {
 		scope = "project"
 	}
 	switch scope {
 	case "global":
-		return "global", "global", nil
+		return "global", GlobalScopeID, nil
 	case "project":
-		id, err := m.resolveScopeID("project", "")
+		id, err := m.resolveScopeID("project", "", workingDir)
 		if err != nil {
 			return "", "", err
 		}
@@ -1175,27 +1219,83 @@ func slugify(value string) string {
 	return out
 }
 
-func (m *MCPServerWrapper) resolveScopeID(scopeType string, provided string) (string, error) {
+// resolveScopeID determines the scope id a memory is written to or read from.
+//
+// workingDir is the directory the agent supplied. It matters because this
+// server's own working directory is wherever the agent happened to launch it —
+// often unrelated to the code being worked on — so inferring a project from it
+// silently files memories under a project nobody will look in.
+func (m *MCPServerWrapper) resolveScopeID(scopeType string, provided string, workingDir string) (string, error) {
 	scopeType = strings.TrimSpace(scopeType)
 	provided = strings.TrimSpace(provided)
 	if scopeType == "" {
 		return "", fmt.Errorf("scope_type is required")
 	}
-	if provided != "" {
-		return provided, nil
+
+	switch scopeType {
+	case "global":
+		// Global memory is the cross-project, cross-agent bucket, so it only
+		// works if every writer lands on the same id. A caller-supplied id is
+		// ignored rather than honoured: accepting one splits a single global
+		// fact into per-agent copies that update_memory can never reconcile.
+		if provided != "" && provided != GlobalScopeID {
+			verbose.Printf("ignoring scope_id %q for global scope; global memory uses one shared bucket", provided)
+		}
+		return GlobalScopeID, nil
+	case "project":
+		if provided != "" {
+			return provided, nil
+		}
+		dir, err := agentWorkingDir(workingDir)
+		if err != nil {
+			return "", err
+		}
+		return project.ID(m.config, dir)
+	default:
+		if provided != "" {
+			return provided, nil
+		}
+		return "", fmt.Errorf("scope_id is required for %s scope (it names the group sharing the memory, e.g. a team)", scopeType)
 	}
-	if scopeType != "project" {
-		return "", fmt.Errorf("scope_id is required for %s scope", scopeType)
+}
+
+// agentWorkingDir validates the directory an agent supplied before a project is
+// derived from it.
+//
+// It refuses to fall back to this process's working directory. That directory
+// is wherever the client launched the server — for a stdio MCP server, usually
+// unrelated to the code being worked on — so inferring a project from it files
+// knowledge under a project nobody will ever look in. A relative path is
+// rejected for the same reason: it would be resolved against that same
+// unrelated directory. Failing loudly is recoverable; writing to the wrong
+// project silently is not.
+func agentWorkingDir(workingDir string) (string, error) {
+	dir := strings.TrimSpace(workingDir)
+	if dir == "" {
+		return "", fmt.Errorf("working_directory is required for project scope: pass the absolute path you are working in, since this server's own directory is not yours")
 	}
-	cwd, err := os.Getwd()
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("working_directory must be an absolute path (got %q): a relative path would resolve against this server's directory, not yours", dir)
+	}
+	return dir, nil
+}
+
+// projectForRanking resolves a project for read paths, where a missing or
+// unusable working directory must not fail the request. Recall still returns
+// every match; it simply loses the ranking boost, which is strictly better than
+// boosting a project the agent never asked about.
+func (m *MCPServerWrapper) projectForRanking(workingDir string) *project.Identity {
+	dir, err := agentWorkingDir(workingDir)
 	if err != nil {
-		return "", fmt.Errorf("resolve current workspace: %w", err)
+		verbose.Printf("project affinity unavailable: %v", err)
+		return nil
 	}
-	projectID, err := indexer.ResolveProjectIdentity(m.config, cwd)
+	identity, err := project.Resolve(m.config, dir)
 	if err != nil {
-		return "", err
+		verbose.Printf("project affinity unavailable for %q: %v", dir, err)
+		return nil
 	}
-	return projectID, nil
+	return &identity
 }
 
 func (m *MCPServerWrapper) searchKnowledge(ctx context.Context, scopeType string, scopeID string, knowledgeType string, query string, limit int) (ScopedMemorySearchOutput, error) {

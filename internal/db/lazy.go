@@ -179,6 +179,14 @@ func (l *LazyStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, er
 	return store.GetAllGraphElements(ctx)
 }
 
+func (l *LazyStore) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
+	store, err := l.ensure()
+	if err != nil {
+		return nil, err
+	}
+	return store.ListWorkspaces(ctx)
+}
+
 func (l *LazyStore) UpsertMemoryRecord(ctx context.Context, record MemoryRecord) error {
 	store, err := l.ensure()
 	if err != nil {

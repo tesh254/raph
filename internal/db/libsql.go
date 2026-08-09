@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -126,6 +127,7 @@ type GraphStore interface {
 	GetNodeByID(ctx context.Context, id string) (Node, error)
 	GetNeighbors(ctx context.Context, nodeID string) ([]Node, []Edge, error)
 	GetAllGraphElements(ctx context.Context) ([]Node, []Edge, error)
+	ListWorkspaces(ctx context.Context) ([]Workspace, error)
 	UpsertMemoryRecord(ctx context.Context, record MemoryRecord) error
 	GetMemoryRecord(ctx context.Context, nodeID string) (MemoryRecord, error)
 	GetMemoryRecordByKey(ctx context.Context, scopeType string, scopeID string, knowledgeType string, memoryKey string) (MemoryRecord, error)
@@ -660,6 +662,40 @@ func (s *LibSQLStore) withTx(ctx context.Context, fn func(tx *sql.Tx) error) (er
 	return tx.Commit()
 }
 
+// queryContexter is satisfied by both *sql.DB and *sql.Tx, so a query helper can
+// run standalone or inside a transaction's snapshot.
+type queryContexter interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// withReadTx runs fn inside a DEFERRED (read-only) transaction. Unlike withTx —
+// whose IMMEDIATE mode (DSN _txlock=immediate) grabs the write lock at BEGIN for
+// race-free writes — a read-only transaction begins deferred (modernc issues a
+// plain BEGIN for ReadOnly), so it takes only a shared read lock: it gives fn a
+// single consistent WAL snapshot across multiple queries WITHOUT blocking
+// concurrent writers or waiting on busy_timeout. Use it for multi-query reads
+// that must be internally consistent (e.g. studio aggregates) but must never
+// stall an indexing/memory write.
+func (s *LibSQLStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) (err error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if err = fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *LibSQLStore) VectorSearch(ctx context.Context, queryVector []float32, limit int) ([]Node, error) {
 	return s.vectorSearch(ctx, "", queryVector, limit)
 }
@@ -676,71 +712,136 @@ func (s *LibSQLStore) vectorSearch(ctx context.Context, workspace string, queryV
 		return nil, nil
 	}
 
-	// Only scan rows that actually carry an embedding — skipping the (often
-	// numerous) embedding-less code nodes at the SQL layer avoids loading their
-	// content and attempting to decode an empty vector for every query.
-	query := `SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), embedding_json FROM nodes WHERE embedding_json IS NOT NULL AND embedding_json <> '' AND embedding_json <> '[]'`
-	var rows *sql.Rows
-	var err error
-	if workspace == "" {
-		rows, err = s.db.QueryContext(ctx, query)
-	} else {
-		rows, err = s.db.QueryContext(ctx, query+` AND workspace = ?`, workspace)
+	// Rank in two passes. Pass one scans only id + embedding for every embedded
+	// row (skipping the often-numerous embedding-less code nodes at the SQL
+	// layer) and scores them; pass two hydrates just the top `limit` nodes. This
+	// keeps the (potentially large) content column out of the ranking pass, so a
+	// search over a big corpus no longer pulls every embedded node's full text
+	// into memory only to discard all but a handful. The result set — the same
+	// nodes, in the same order — is unchanged.
+	//
+	// Both passes run in one read-only snapshot so a node updated between them
+	// can't be returned with content that no longer matches the embedding its
+	// rank was computed from. The snapshot is deferred (read lock), so it never
+	// blocks concurrent indexing/memory writes.
+	var results []Node
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		query := `SELECT id, embedding_json FROM nodes WHERE embedding_json IS NOT NULL AND embedding_json <> '' AND embedding_json <> '[]'`
+		var rows *sql.Rows
+		var err error
+		if workspace == "" {
+			rows, err = tx.QueryContext(ctx, query)
+		} else {
+			rows, err = tx.QueryContext(ctx, query+` AND workspace = ?`, workspace)
+		}
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		type ranked struct {
+			id    string
+			score float64
+		}
+
+		var scored []ranked
+		var embedding []float32
+		for rows.Next() {
+			var id, embeddingJSON string
+			if err := rows.Scan(&id, &embeddingJSON); err != nil {
+				return err
+			}
+			// Reuse the backing array across rows: json.Unmarshal into a non-nil
+			// slice overwrites it, so only rows with a longer vector reallocate.
+			embedding = embedding[:0]
+			if err := json.Unmarshal([]byte(embeddingJSON), &embedding); err != nil {
+				continue
+			}
+			if len(embedding) == 0 {
+				continue
+			}
+			score := cosineSimilarity(queryVector, embedding)
+			if math.IsNaN(score) || score <= 0 {
+				continue
+			}
+			scored = append(scored, ranked{id: id, score: score})
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		_ = rows.Close()
+
+		sort.Slice(scored, func(i, j int) bool {
+			if scored[i].score == scored[j].score {
+				return scored[i].id < scored[j].id
+			}
+			return scored[i].score > scored[j].score
+		})
+		if len(scored) > limit {
+			scored = scored[:limit]
+		}
+		if len(scored) == 0 {
+			return nil
+		}
+
+		ids := make([]string, len(scored))
+		for i, r := range scored {
+			ids[i] = r.id
+		}
+		hydrated, err := hydrateVectorNodes(ctx, tx, ids)
+		if err != nil {
+			return err
+		}
+		// Reassemble in ranked order; a node could vanish between passes (a
+		// delete committed before this snapshot took its read lock), so skip any
+		// id the hydrate pass didn't return.
+		results = make([]Node, 0, len(scored))
+		for _, r := range scored {
+			if n, ok := hydrated[r.id]; ok {
+				results = append(results, n)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
+	return results, nil
+}
+
+// hydrateVectorNodes loads the display columns for the given node ids (the top
+// vector-search hits) from q (a *sql.Tx snapshot or the *sql.DB). It mirrors the
+// column set the single-pass scan used to return — id/workspace/domain/type/
+// name/content/url/path plus embedding length — so callers see the same fields.
+func hydrateVectorNodes(ctx context.Context, q queryContexter, ids []string) (map[string]Node, error) {
+	if len(ids) == 0 {
+		return map[string]Node{}, nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := q.QueryContext(ctx,
+		`SELECT id, workspace, domain, type, name, content, COALESCE(url, ''), COALESCE(path, ''), COALESCE(embedding_json, '[]') FROM nodes WHERE id IN (`+placeholders+`)`,
+		args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	type rankedNode struct {
-		node  Node
-		score float64
-	}
-
-	var ranked []rankedNode
+	out := make(map[string]Node, len(ids))
 	for rows.Next() {
 		var n Node
 		var embeddingJSON string
 		if err := rows.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.URL, &n.Path, &embeddingJSON); err != nil {
 			return nil, err
 		}
-
-		if err := json.Unmarshal([]byte(embeddingJSON), &n.Embedding); err != nil {
-			continue
-		}
-		if len(n.Embedding) == 0 {
-			continue
-		}
-		n.EmbeddingLength = len(n.Embedding)
-
-		score := cosineSimilarity(queryVector, n.Embedding)
-		if math.IsNaN(score) || score <= 0 {
-			continue
-		}
-		n.Embedding = nil // scored — drop the vector so it doesn't sit in memory
-		ranked = append(ranked, rankedNode{node: n, score: score})
+		n.EmbeddingLength = embeddingLength(embeddingJSON)
+		out[n.ID] = n
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	sort.Slice(ranked, func(i, j int) bool {
-		if ranked[i].score == ranked[j].score {
-			return ranked[i].node.ID < ranked[j].node.ID
-		}
-		return ranked[i].score > ranked[j].score
-	})
-
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
-	}
-
-	results := make([]Node, 0, len(ranked))
-	for _, item := range ranked {
-		item.node.Embedding = nil
-		results = append(results, item.node)
-	}
-	return results, nil
+	return out, rows.Err()
 }
 
 func (s *LibSQLStore) KeywordSearch(ctx context.Context, query string, limit int) ([]Node, error) {
@@ -902,11 +1003,16 @@ type NodeFilter struct {
 	PropertyEquals map[string]string
 	Query          string
 	Limit          int
-	// Lean selects only id/type/name/url and leaves content, properties, and
-	// embeddings empty. Use it for large listings (e.g. the indexer's symbol
+	// Lean selects only the cheap identifying columns (id/workspace/type/name/url)
+	// and leaves content, properties, and embeddings empty. Use it for large listings (e.g. the indexer's symbol
 	// index) that never touch the heavy columns, to avoid pulling every node's
 	// content and embedding JSON into memory.
 	Lean bool
+	// Offset skips the first N rows of an otherwise identical listing, so a
+	// caller that must visit every node (the hierarchy backfill) can page
+	// through instead of guessing a limit large enough to avoid silently
+	// truncating a big repository.
+	Offset int
 }
 
 func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node, error) {
@@ -916,7 +1022,7 @@ func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node,
 	}
 	selectCols := nodeColumns
 	if filter.Lean {
-		selectCols = `id, type, name, COALESCE(url, '')`
+		selectCols = `id, workspace, type, name, COALESCE(url, '')`
 	}
 	sqlQuery := `SELECT ` + selectCols + ` FROM nodes`
 	var where []string
@@ -955,8 +1061,14 @@ func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node,
 	if len(where) > 0 {
 		sqlQuery += ` WHERE ` + strings.Join(where, ` AND `)
 	}
+	// Ordering by id after updated_at keeps paging stable when rows share a
+	// timestamp, which is the norm for nodes written by one indexing run.
 	sqlQuery += ` ORDER BY updated_at DESC, id ASC LIMIT ?`
 	args = append(args, limit)
+	if filter.Offset > 0 {
+		sqlQuery += ` OFFSET ?`
+		args = append(args, filter.Offset)
+	}
 
 	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {
@@ -967,7 +1079,7 @@ func (s *LibSQLStore) ListNodes(ctx context.Context, filter NodeFilter) ([]Node,
 	for rows.Next() {
 		if filter.Lean {
 			var n Node
-			if err := rows.Scan(&n.ID, &n.Type, &n.Name, &n.URL); err != nil {
+			if err := rows.Scan(&n.ID, &n.Workspace, &n.Type, &n.Name, &n.URL); err != nil {
 				return nil, err
 			}
 			results = append(results, n)
@@ -1228,6 +1340,192 @@ func (s *LibSQLStore) GraphStats(ctx context.Context) (GraphStats, error) {
 		return GraphStats{}, err
 	}
 	return stats, nil
+}
+
+// Workspace summarizes one indexed codebase: the set of nodes sharing a
+// workspace id that the indexer tagged with a filesystem root. Memory- and
+// crawl-only workspaces (which never carry `file` nodes) are excluded, so this
+// lists exactly the repositories that have been indexed — the studio "Repos"
+// view is driven by it.
+type Workspace struct {
+	Workspace   string         `json:"workspace"`
+	Root        string         `json:"root"`
+	Name        string         `json:"name"`
+	Nodes       int            `json:"nodes"`
+	Files       int            `json:"files"`
+	ByDomain    map[string]int `json:"by_domain"`
+	LastIndexed string         `json:"last_indexed,omitempty"`
+}
+
+// memoryTermMatch tests one term against everything a memory is searchable by.
+// Its four placeholders are filled by likeArgs.
+const memoryTermMatch = "(LOWER(n.name) LIKE ? ESCAPE '\\' OR LOWER(n.content) LIKE ? ESCAPE '\\' OR LOWER(mr.display_tags_json) LIKE ? ESCAPE '\\' OR LOWER(mr.normalized_tags_json) LIKE ? ESCAPE '\\')"
+
+func likeArgs(term string) []any {
+	like := "%" + escapeLike(term) + "%"
+	return []any{like, like, like, like}
+}
+
+// escapeLike neutralizes LIKE's wildcards so a query term matches literally.
+// Without it, a memory search for "100%" or "user_id" silently becomes a
+// pattern: "%" alone matches every memory, and "_" matches any character, so
+// recall returns unrelated records and presents them as hits. The escape
+// character is declared per-predicate via ESCAPE.
+func escapeLike(term string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`)
+	return replacer.Replace(term)
+}
+
+// memoryQueryStopwords are function words that appear in almost any phrasing of
+// a question. Matching on them would make every memory a hit and let ranking be
+// decided by whichever record happened to contain "the". Content words are
+// deliberately absent: only words that carry no topic are listed.
+var memoryQueryStopwords = map[string]bool{
+	"the": true, "and": true, "for": true, "are": true, "was": true, "were": true,
+	"what": true, "which": true, "that": true, "this": true, "with": true,
+	"from": true, "have": true, "has": true, "had": true, "how": true, "why": true,
+	"when": true, "where": true, "does": true, "did": true, "you": true,
+	"your": true, "our": true, "about": true, "into": true, "can": true,
+	"all": true, "any": true, "its": true, "there": true, "then": true,
+	"them": true, "they": true, "been": true, "being": true, "some": true,
+}
+
+// memorySearchTerms splits a free-text query into the terms the keyword pass
+// matches on: lowercase, punctuation-free, at least three characters, and not a
+// stopword. A query made entirely of stopwords keeps them rather than matching
+// nothing at all.
+func memorySearchTerms(query string) []string {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return nil
+	}
+
+	fields := strings.FieldsFunc(query, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-')
+	})
+
+	seen := make(map[string]bool, len(fields))
+	terms := make([]string, 0, len(fields))
+	fallback := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if len(field) < 3 || seen[field] {
+			continue
+		}
+		seen[field] = true
+		fallback = append(fallback, field)
+		if memoryQueryStopwords[field] {
+			continue
+		}
+		terms = append(terms, field)
+	}
+	if len(terms) == 0 {
+		return fallback
+	}
+	// Bound the term count so a pasted paragraph can't build an enormous query.
+	if len(terms) > 12 {
+		terms = terms[:12]
+	}
+	return terms
+}
+
+// structuralTypeList is the SQL literal list of node types that hold the
+// project -> workspace -> directory spine together (see internal/indexer).
+// Repository statistics exclude them: they describe a repo's shape, not the
+// content indexed from it, so counting them would inflate every node total and
+// add a phantom "structure" domain to the breakdown.
+const structuralTypeList = `'project', 'workspace', 'directory'`
+
+// ListWorkspaces returns every indexed repository, newest first. A repo is a
+// workspace with at least one `file` node — that's what the indexer writes for
+// a codebase root (it also stamps the absolute root onto each node's `path`),
+// which cleanly separates real repos from workspaces that only hold memories or
+// crawled docs. Both grouped queries (each served by idx_nodes_workspace) run in
+// one READ-ONLY snapshot so the totals and the per-domain breakdown stay
+// internally consistent — otherwise a concurrent index write could make a repo's
+// by_domain counts disagree with its node total within one response. It uses a
+// deferred read transaction (not withTx's immediate write lock): the studio
+// polls this, and a poll must never block or stall an indexing/memory write.
+func (s *LibSQLStore) ListWorkspaces(ctx context.Context) ([]Workspace, error) {
+	var workspaces []Workspace
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		workspaces, err = listWorkspacesTx(ctx, tx)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return workspaces, nil
+}
+
+// listWorkspacesTx is ListWorkspaces' query, scoped to a caller's transaction so
+// a report that combines repositories with other aggregates (see ListProjects)
+// reads them all from one snapshot instead of two, where a concurrent index run
+// could make the halves disagree.
+func listWorkspacesTx(ctx context.Context, tx *sql.Tx) ([]Workspace, error) {
+	workspaces := []Workspace{}
+	rows, err := tx.QueryContext(ctx, `
+			SELECT workspace,
+			       COALESCE(MAX(NULLIF(path, '')), '') AS root,
+			       COUNT(*) AS nodes,
+			       SUM(CASE WHEN type = 'file' THEN 1 ELSE 0 END) AS files,
+			       COALESCE(MAX(NULLIF(updated_at, '')), '') AS last_indexed
+			FROM nodes
+			WHERE TRIM(workspace) <> '' AND type NOT IN (`+structuralTypeList+`)
+			GROUP BY workspace
+			HAVING SUM(CASE WHEN type = 'file' THEN 1 ELSE 0 END) > 0
+			ORDER BY last_indexed DESC, root ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var w Workspace
+		if err := rows.Scan(&w.Workspace, &w.Root, &w.Nodes, &w.Files, &w.LastIndexed); err != nil {
+			return nil, err
+		}
+		w.ByDomain = map[string]int{}
+		if w.Root != "" {
+			w.Name = filepath.Base(w.Root)
+		} else {
+			w.Name = w.Workspace
+		}
+		workspaces = append(workspaces, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Index by workspace id so the per-domain pass can attach counts.
+	// Pointers into the slice let us mutate in place without a second copy.
+	byID := make(map[string]*Workspace, len(workspaces))
+	for i := range workspaces {
+		byID[workspaces[i].Workspace] = &workspaces[i]
+	}
+
+	domainRows, err := tx.QueryContext(ctx, `
+			SELECT workspace, domain, COUNT(*)
+			FROM nodes
+			WHERE TRIM(workspace) <> '' AND type NOT IN (`+structuralTypeList+`)
+			GROUP BY workspace, domain`)
+	if err != nil {
+		return nil, err
+	}
+	defer domainRows.Close()
+	for domainRows.Next() {
+		var ws, domain string
+		var n int
+		if err := domainRows.Scan(&ws, &domain, &n); err != nil {
+			return nil, err
+		}
+		if w := byID[ws]; w != nil && strings.TrimSpace(domain) != "" {
+			w.ByDomain[domain] = n
+		}
+	}
+	if err := domainRows.Err(); err != nil {
+		return nil, err
+	}
+	return workspaces, nil
 }
 
 func (s *LibSQLStore) GetAllGraphElements(ctx context.Context) ([]Node, []Edge, error) {
@@ -1520,15 +1818,54 @@ func (s *LibSQLStore) SearchMemoryRecords(ctx context.Context, filter MemorySear
 			where = append(where, `mr.lifecycle_state IN (`+strings.Join(placeholders, ", ")+`)`)
 		}
 	}
-	if q := strings.TrimSpace(strings.ToLower(filter.Query)); q != "" {
-		where = append(where, `(LOWER(n.name) LIKE ? OR LOWER(n.content) LIKE ? OR LOWER(mr.display_tags_json) LIKE ? OR LOWER(mr.normalized_tags_json) LIKE ?)`)
-		like := "%" + q + "%"
-		args = append(args, like, like, like, like)
+	// Term matching, not phrase matching. Agents ask questions ("what do we know
+	// about deploys?"), and a single LIKE over the whole string matches only a
+	// record that contains that exact sentence — so recall returned nothing for
+	// every natural-language query whenever the semantic pass was unavailable
+	// (no embedding provider, offline, or a timeout). Any term may match; the
+	// ordering below decides which matches are best.
+	var rankExpr string
+	var rankArgs []any
+	if rawQuery := strings.TrimSpace(strings.ToLower(filter.Query)); rawQuery != "" {
+		terms := memorySearchTerms(filter.Query)
+		if len(terms) == 0 {
+			// A query that yields no terms — all fragments shorter than the
+			// minimum ("ci cd"), or a script this tokenizer doesn't split on
+			// (CJK, Cyrillic) — must still constrain the result set. Falling
+			// through with no predicate would return every active memory ordered
+			// by recency and present them as matches. Match the whole string
+			// instead, which is what a caller typing a short query means anyway.
+			terms = []string{rawQuery}
+		}
+		clauses := make([]string, 0, len(terms))
+		for _, term := range terms {
+			clauses = append(clauses, memoryTermMatch)
+			args = append(args, likeArgs(term)...)
+		}
+		where = append(where, `(`+strings.Join(clauses, ` OR `)+`)`)
+
+		// Rank by how many distinct terms a record matched, with the full phrase
+		// worth an extra point so an exact hit still leads.
+		scores := make([]string, 0, len(terms)+1)
+		for _, term := range terms {
+			scores = append(scores, `(CASE WHEN `+memoryTermMatch+` THEN 1 ELSE 0 END)`)
+			rankArgs = append(rankArgs, likeArgs(term)...)
+		}
+		scores = append(scores, `(CASE WHEN `+memoryTermMatch+` THEN 1 ELSE 0 END)`)
+		rankArgs = append(rankArgs, likeArgs(strings.ToLower(strings.TrimSpace(filter.Query)))...)
+		rankExpr = strings.Join(scores, ` + `)
 	}
+
 	if len(where) > 0 {
 		query += ` WHERE ` + strings.Join(where, ` AND `)
 	}
-	query += ` ORDER BY mr.updated_at DESC, n.id ASC LIMIT ?`
+	// Parameters bind in textual order, so the ranking args follow the WHERE args.
+	if rankExpr != "" {
+		query += ` ORDER BY (` + rankExpr + `) DESC, mr.updated_at DESC, n.id ASC LIMIT ?`
+		args = append(args, rankArgs...)
+	} else {
+		query += ` ORDER BY mr.updated_at DESC, n.id ASC LIMIT ?`
+	}
 	args = append(args, limit)
 	if filter.Offset > 0 {
 		query += ` OFFSET ?`
@@ -2278,4 +2615,388 @@ func cosineSimilarity(a []float32, b []float32) float64 {
 		return 0
 	}
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
+}
+
+// RelocateNode re-keys a node: it is copied to newID with a new workspace and
+// url, every edge pointing at the original is repointed, and the original row
+// is removed — all in one transaction.
+//
+// It exists because a node's id encodes where it lives, so moving a document
+// between workspaces has to change its id or the next write for that key would
+// mint a second node instead of updating this one. A copy at the SQL level
+// carries content, properties, timestamps, and the embedding across untouched,
+// which a read-modify-write through Go could not: reads deliberately return an
+// embedding's length rather than its vector, so a document moved that way would
+// silently lose its semantic index.
+func (s *LibSQLStore) RelocateNode(ctx context.Context, oldID, newID, newWorkspace, newURL string) error {
+	oldID = strings.TrimSpace(oldID)
+	newID = strings.TrimSpace(newID)
+	if oldID == "" || newID == "" {
+		return fmt.Errorf("relocate node: both ids are required")
+	}
+	if oldID == newID {
+		return nil
+	}
+
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := copyNodeTx(ctx, tx, oldID, newID, newWorkspace, newURL); err != nil {
+			return err
+		}
+		if err := repointEdgesTx(ctx, tx, oldID, newID); err != nil {
+			return err
+		}
+		return dropRelocatedNodeTx(ctx, tx, oldID, newID)
+	})
+}
+
+// ErrMemoryExists reports that a memory already occupies the destination scope.
+// Migrations skip these rather than clobbering knowledge written under the new
+// identity.
+var ErrMemoryExists = errors.New("a memory already exists at the destination scope")
+
+// RelocateMemory re-keys a memory node the way RelocateNode does, and carries
+// its memory_records row and revision history with it.
+//
+// A memory cannot go through RelocateNode: memory_records and memory_revisions
+// reference the node with ON DELETE CASCADE, so removing the original would
+// delete the record and every revision it was supposed to preserve. The record
+// is repointed at the new node before the old one is dropped.
+func (s *LibSQLStore) RelocateMemory(ctx context.Context, oldID, newID, newWorkspace, newURL, newScopeID string) error {
+	oldID = strings.TrimSpace(oldID)
+	newID = strings.TrimSpace(newID)
+	if oldID == "" || newID == "" {
+		return fmt.Errorf("relocate memory: both ids are required")
+	}
+	if oldID == newID {
+		return nil
+	}
+
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		// The natural key is unique, so a memory already stored under the new
+		// scope would collide. Report it and leave both alone.
+		var conflicts int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM memory_records dest
+			JOIN memory_records src ON src.node_id = ?
+			WHERE dest.node_id <> src.node_id
+			  AND dest.scope_type = src.scope_type
+			  AND dest.scope_id = ?
+			  AND dest.knowledge_type = src.knowledge_type
+			  AND dest.memory_key = src.memory_key`, oldID, newScopeID).Scan(&conflicts); err != nil {
+			return fmt.Errorf("check destination scope: %w", err)
+		}
+		if conflicts > 0 {
+			return ErrMemoryExists
+		}
+
+		if err := copyNodeTx(ctx, tx, oldID, newID, newWorkspace, newURL); err != nil {
+			return err
+		}
+		// Repoint the record and its history BEFORE the original is deleted.
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_records SET node_id = ?, scope_id = ? WHERE node_id = ?`,
+			newID, newScopeID, oldID); err != nil {
+			return fmt.Errorf("move memory record %s: %w", oldID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_revisions SET node_id = ? WHERE node_id = ?`, newID, oldID); err != nil {
+			return fmt.Errorf("move memory revisions of %s: %w", oldID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE memory_records SET replaced_by_node_id = ? WHERE replaced_by_node_id = ?`,
+			newID, oldID); err != nil {
+			return fmt.Errorf("repoint replacement links of %s: %w", oldID, err)
+		}
+		if err := repointEdgesTx(ctx, tx, oldID, newID); err != nil {
+			return err
+		}
+		return dropRelocatedNodeTx(ctx, tx, oldID, newID)
+	})
+}
+
+// copyNodeTx duplicates a node row under a new id, workspace, and url, keeping
+// content, properties, timestamps, and the embedding byte-for-byte. Copying in
+// SQL is what preserves the embedding: reads return a vector's length, not the
+// vector, so a Go round-trip would silently drop it.
+func copyNodeTx(ctx context.Context, tx *sql.Tx, oldID, newID, newWorkspace, newURL string) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO nodes (id, workspace, domain, type, name, content, url, path, embedding_json, properties_json, created_at, updated_at)
+		SELECT ?, ?, domain, type, name, content, ?, path, embedding_json, properties_json, created_at, updated_at
+		FROM nodes WHERE id = ?`, newID, newWorkspace, newURL, oldID); err != nil {
+		return fmt.Errorf("copy node %s: %w", oldID, err)
+	}
+	return nil
+}
+
+// repointEdgesTx moves every edge touching oldID onto newID. It runs before the
+// original is deleted, whose removal would otherwise cascade the edges away.
+func repointEdgesTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE edges SET source_id = ? WHERE source_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("repoint outgoing edges of %s: %w", oldID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE edges SET target_id = ? WHERE target_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("repoint incoming edges of %s: %w", oldID, err)
+	}
+	// access_events has no foreign key, so nothing would move these with the
+	// node. Left behind, a relocated node's history points at an id that no
+	// longer exists: the studio shows the reads and writes with blank metadata,
+	// and splits one node's activity across two identities.
+	if _, err := tx.ExecContext(ctx, `UPDATE access_events SET node_id = ? WHERE node_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("repoint access history of %s: %w", oldID, err)
+	}
+	return nil
+}
+
+// dropRelocatedNodeTx removes the original row and rebuilds the search index
+// entry for the relocated one, so search reflects its new workspace.
+func dropRelocatedNodeTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, oldID); err != nil {
+		return fmt.Errorf("clear search index for %s: %w", oldID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, oldID); err != nil {
+		return fmt.Errorf("remove relocated node %s: %w", oldID, err)
+	}
+
+	row := tx.QueryRowContext(ctx, `SELECT id, workspace, domain, type, name, content, COALESCE(path, '') FROM nodes WHERE id = ?`, newID)
+	var n Node
+	if err := row.Scan(&n.ID, &n.Workspace, &n.Domain, &n.Type, &n.Name, &n.Content, &n.Path); err != nil {
+		return fmt.Errorf("reload relocated node %s: %w", newID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes_fts WHERE node_id = ?`, newID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO nodes_fts (node_id, workspace, domain, type, name, content, path)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, n.ID, n.Workspace, n.Domain, n.Type, n.Name, n.Content, n.Path)
+	return err
+}
+
+// Project is one project and everything indexed or remembered under it.
+//
+// A project is the unit an agent actually works in: memories and documents are
+// scoped to it, and it may hold several indexed roots (a monorepo's packages).
+// The id doubles as the memory scope id, which is why it is surfaced — it is the
+// value that explains why one repository's recall differs from another's.
+type Project struct {
+	ID          string      `json:"id"`
+	Name        string      `json:"name"`
+	Root        string      `json:"root"`
+	Workspaces  []Workspace `json:"workspaces"`
+	Files       int         `json:"files"`
+	Directories int         `json:"directories"`
+	Memories    int         `json:"memories"`
+	Documents   int         `json:"documents"`
+	LastIndexed string      `json:"last_indexed,omitempty"`
+}
+
+// ListProjects returns every project node with its repositories and knowledge
+// counts, newest-indexed first.
+//
+// docWorkspacePrefix is how document buckets are named for a project
+// (knowledge.ProjectWorkspace); it is passed in so this layer does not have to
+// know the knowledge package's naming, which would duplicate it.
+//
+// Like ListWorkspaces this runs in one deferred read snapshot: the studio polls
+// it, so it must never block a write, and the counts must agree with each other.
+func (s *LibSQLStore) ListProjects(ctx context.Context, docWorkspacePrefix string) ([]Project, error) {
+	projects := []Project{}
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		// Repositories are read inside this snapshot, not through
+		// ListWorkspaces' own: two snapshots straddling a re-index can report a
+		// project whose file counts and hierarchy counts describe different
+		// moments, which reads as data loss in the dashboard.
+		workspaces, err := listWorkspacesTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		byWorkspaceID := make(map[string]Workspace, len(workspaces))
+		for _, ws := range workspaces {
+			byWorkspaceID[ws.Workspace] = ws
+		}
+
+		rows, err := tx.QueryContext(ctx, `
+			SELECT id, name, COALESCE(path, '')
+			FROM nodes WHERE type = 'project' ORDER BY name ASC`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p Project
+			if err := rows.Scan(&p.ID, &p.Name, &p.Root); err != nil {
+				return err
+			}
+			p.Workspaces = []Workspace{}
+			projects = append(projects, p)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(projects) == 0 {
+			return nil
+		}
+
+		byID := make(map[string]*Project, len(projects))
+		for i := range projects {
+			byID[projects[i].ID] = &projects[i]
+		}
+
+		// Attach repositories through the structural CONTAINS edges.
+		edgeRows, err := tx.QueryContext(ctx, `
+			SELECT e.source_id, e.target_id
+			FROM edges e JOIN nodes n ON n.id = e.target_id
+			WHERE e.type = 'CONTAINS' AND n.type = 'workspace'`)
+		if err != nil {
+			return err
+		}
+		defer edgeRows.Close()
+		for edgeRows.Next() {
+			var projectID, workspaceID string
+			if err := edgeRows.Scan(&projectID, &workspaceID); err != nil {
+				return err
+			}
+			p := byID[projectID]
+			if p == nil {
+				continue
+			}
+			// A workspace with no file nodes is not a repository (memory- or
+			// crawl-only), so it is absent from the listing and skipped here.
+			if ws, ok := byWorkspaceID[workspaceID]; ok {
+				p.Workspaces = append(p.Workspaces, ws)
+				p.Files += ws.Files
+				if ws.LastIndexed > p.LastIndexed {
+					p.LastIndexed = ws.LastIndexed
+				}
+			}
+		}
+		if err := edgeRows.Err(); err != nil {
+			return err
+		}
+
+		// Directory counts come from the structural nodes themselves.
+		dirRows, err := tx.QueryContext(ctx, `
+			SELECT workspace, COUNT(*) FROM nodes WHERE type = 'directory' GROUP BY workspace`)
+		if err != nil {
+			return err
+		}
+		defer dirRows.Close()
+		dirsByWorkspace := map[string]int{}
+		for dirRows.Next() {
+			var ws string
+			var n int
+			if err := dirRows.Scan(&ws, &n); err != nil {
+				return err
+			}
+			dirsByWorkspace[ws] = n
+		}
+		if err := dirRows.Err(); err != nil {
+			return err
+		}
+		for i := range projects {
+			for _, ws := range projects[i].Workspaces {
+				projects[i].Directories += dirsByWorkspace[ws.Workspace]
+			}
+		}
+
+		// Active memories are scoped by the project id directly.
+		memRows, err := tx.QueryContext(ctx, `
+			SELECT scope_id, COUNT(*) FROM memory_records
+			WHERE lifecycle_state = 'active' GROUP BY scope_id`)
+		if err != nil {
+			return err
+		}
+		defer memRows.Close()
+		for memRows.Next() {
+			var scopeID string
+			var n int
+			if err := memRows.Scan(&scopeID, &n); err != nil {
+				return err
+			}
+			if p := byID[scopeID]; p != nil {
+				p.Memories = n
+			}
+		}
+		if err := memRows.Err(); err != nil {
+			return err
+		}
+
+		// Documents live in a per-project bucket named by the caller's prefix.
+		if strings.TrimSpace(docWorkspacePrefix) != "" {
+			docRows, err := tx.QueryContext(ctx, `
+				SELECT workspace, COUNT(*) FROM nodes WHERE type = 'doc' GROUP BY workspace`)
+			if err != nil {
+				return err
+			}
+			defer docRows.Close()
+			for docRows.Next() {
+				var workspace string
+				var n int
+				if err := docRows.Scan(&workspace, &n); err != nil {
+					return err
+				}
+				projectID, ok := strings.CutPrefix(workspace, docWorkspacePrefix)
+				if !ok {
+					continue
+				}
+				if p := byID[projectID]; p != nil {
+					p.Documents = n
+				}
+			}
+			if err := docRows.Err(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.SliceStable(projects, func(a, b int) bool {
+		if projects[a].LastIndexed != projects[b].LastIndexed {
+			return projects[a].LastIndexed > projects[b].LastIndexed
+		}
+		return projects[a].Name < projects[b].Name
+	})
+	return projects, nil
+}
+
+// ListProjectScopes returns the distinct project scope ids that memories are
+// stored under. The identity migration uses it to report what it could not
+// re-home, so nothing goes quietly missing.
+func (s *LibSQLStore) ListProjectScopes(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT scope_id FROM memory_records
+		WHERE scope_type = 'project' AND TRIM(scope_id) <> '' ORDER BY scope_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var scopes []string
+	for rows.Next() {
+		var scope string
+		if err := rows.Scan(&scope); err != nil {
+			return nil, err
+		}
+		scopes = append(scopes, scope)
+	}
+	return scopes, rows.Err()
+}
+
+// CountProjectKnowledge returns how many active memories and documents a
+// project holds.
+//
+// Counting in SQL rather than listing rows keeps the answer correct past any
+// page size: a listing capped at N reports N for every project bigger than N,
+// which is exactly when the number matters.
+func (s *LibSQLStore) CountProjectKnowledge(ctx context.Context, projectID, docWorkspace string) (memories int, documents int, err error) {
+	err = s.withReadTx(ctx, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM memory_records
+			WHERE scope_type = 'project' AND scope_id = ? AND lifecycle_state = 'active'`,
+			projectID).Scan(&memories); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM nodes WHERE type = 'doc' AND workspace = ?`,
+			docWorkspace).Scan(&documents)
+	})
+	return memories, documents, err
 }

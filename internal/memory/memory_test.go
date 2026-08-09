@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -91,6 +93,7 @@ func (*captureStore) DeleteDocumentNode(context.Context, string) error          
 func (*captureStore) DeleteFileNodes(context.Context, string, string) error         { return nil }
 func (*captureStore) DeleteWorkspace(context.Context, string) error                 { return nil }
 func (*captureStore) ClearAll(context.Context) error                                { return nil }
+func (*captureStore) ListWorkspaces(context.Context) ([]db.Workspace, error)        { return nil, nil }
 func (*captureStore) Close() error                                                  { return nil }
 
 func TestStoreGeneratesAndPersistsEmbedding(t *testing.T) {
@@ -132,6 +135,91 @@ func TestStoreGeneratesAndPersistsEmbedding(t *testing.T) {
 	}
 	if output.Record.ScopeType != "project" || output.Record.MemoryKey != "project-style" {
 		t.Fatalf("expected scoped record metadata, got %+v", output.Record)
+	}
+}
+
+func ids(records []db.MemoryRecord) string {
+	out := make([]string, len(records))
+	for i, r := range records {
+		out[i] = r.Node.ID
+	}
+	return strings.Join(out, ",")
+}
+
+func TestMergeMemoryMatchesUnionsAndDedupes(t *testing.T) {
+	sem := []db.MemoryRecord{{Node: db.Node{ID: "a"}}, {Node: db.Node{ID: "b"}}}
+	kw := []db.MemoryRecord{{Node: db.Node{ID: "b"}}, {Node: db.Node{ID: "c"}}}
+
+	out, mode := mergeMemoryMatches(sem, kw, 10)
+	if ids(out) != "a,b,c" {
+		t.Fatalf("expected semantic order then keyword extras deduped, got %v", ids(out))
+	}
+	if mode != "hybrid" {
+		t.Fatalf("both passes contributed, want hybrid mode, got %q", mode)
+	}
+
+	// Keyword-only still reports the keyword mode.
+	if _, mode := mergeMemoryMatches(nil, kw, 10); mode != "keyword" {
+		t.Fatalf("no semantic pass should be keyword mode, got %q", mode)
+	}
+}
+
+// TestMergeReservesSlotsForKeywordOnly is the regression for the cubic finding:
+// a keyword-only hit (exact/just-written) must survive even when the semantic
+// pass already produced `limit` results. The reserve keeps a slot for it.
+func TestMergeReservesSlotsForKeywordOnly(t *testing.T) {
+	// Semantic fills the whole limit; d is a keyword-only exact hit.
+	sem := []db.MemoryRecord{{Node: db.Node{ID: "a"}}, {Node: db.Node{ID: "b"}}, {Node: db.Node{ID: "c"}}}
+	kw := []db.MemoryRecord{{Node: db.Node{ID: "d"}}}
+
+	out, mode := mergeMemoryMatches(sem, kw, 3)
+	if ids(out) != "a,b,d" {
+		t.Fatalf("keyword-only hit should claim a reserved slot, got %v", ids(out))
+	}
+	if mode != "hybrid" {
+		t.Fatalf("both passes contributed, want hybrid, got %q", mode)
+	}
+	if len(out) != 3 {
+		t.Fatalf("result must respect the limit, got %d", len(out))
+	}
+}
+
+// TestSearchUnscopedSpansScopes is the regression for the "memory looks missing"
+// report: without a scope filter, Search must return memories from every scope,
+// while an explicit scope still narrows. cfg is nil so this exercises the
+// always-on keyword pass (no embedding provider).
+func TestSearchUnscopedSpansScopes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, scopeID := range []string{"p1", "p2"} {
+		if _, err := Store(ctx, store, nil, StoreInput{
+			ScopeType: "project", ScopeID: scopeID, KnowledgeType: "decision",
+			MemoryKey: "deploy-" + scopeID, Title: "Deploy " + scopeID,
+			Content: "we deploy through CI", Source: "user", WriterID: "agent",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, err := Search(ctx, store, nil, SearchInput{Query: "deploy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all.Matches) != 2 {
+		t.Fatalf("unscoped search should span both scope ids, got %d matches", len(all.Matches))
+	}
+
+	one, err := Search(ctx, store, nil, SearchInput{Query: "deploy", ScopeType: "project", ScopeID: "p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one.Matches) != 1 || one.Matches[0].ScopeID != "p1" {
+		t.Fatalf("explicit scope should still narrow to p1, got %+v", one.Matches)
 	}
 }
 
@@ -296,5 +384,495 @@ func TestConcurrentUpdatesAssignUniqueRevisions(t *testing.T) {
 			t.Fatalf("duplicate revision number %d in history (lost-update race)", r.Revision)
 		}
 		seen[r.Revision] = true
+	}
+}
+
+func affinityRecord(id, scopeID string) db.MemoryRecord {
+	return db.MemoryRecord{Node: db.Node{ID: id}, ScopeType: "project", ScopeID: scopeID}
+}
+
+func affinityIDs(records []db.MemoryRecord) []string {
+	out := make([]string, 0, len(records))
+	for _, r := range records {
+		out = append(out, r.Node.ID)
+	}
+	return out
+}
+
+func TestApplyProjectAffinityLiftsProjectMemories(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("other-1", "project:other"),
+		affinityRecord("other-2", "project:other"),
+		affinityRecord("mine-1", "project:mine"),
+		affinityRecord("other-3", "project:other"),
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, "project:mine"))
+	want := []string{"mine-1", "other-1", "other-2", "other-3"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected the project memory boosted past nearby matches, got %v", got)
+	}
+}
+
+// The boost is worth exactly affinityBoostPositions places, and relevance wins
+// ties: a project memory that far behind draws level with the leader and lands
+// just after it. Pinning the boundary keeps the constant honest — if someone
+// raises it, this is where the change shows up.
+func TestApplyProjectAffinityBoundaryTieKeepsRelevanceFirst(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("other-1", "project:other"),
+		affinityRecord("other-2", "project:other"),
+		affinityRecord("other-3", "project:other"),
+		affinityRecord("mine-1", "project:mine"),
+	}
+	if affinityBoostPositions != 3 {
+		t.Skipf("boundary fixture assumes a boost of 3, got %d", affinityBoostPositions)
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, "project:mine"))
+	want := []string{"other-1", "mine-1", "other-2", "other-3"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected a tie at the boundary to keep the stronger match first, got %v", got)
+	}
+}
+
+// The boost is bounded on purpose: a much better match from another scope must
+// still win, otherwise this is a scope filter wearing a different hat.
+func TestApplyProjectAffinityDoesNotOutrankAFarBetterMatch(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("global-best", "global"),
+		affinityRecord("other-1", "project:other"),
+		affinityRecord("other-2", "project:other"),
+		affinityRecord("other-3", "project:other"),
+		affinityRecord("other-4", "project:other"),
+		affinityRecord("mine-far-down", "project:mine"),
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, "project:mine"))
+	if got[0] != "global-best" {
+		t.Fatalf("a far stronger match was buried by the affinity boost: %v", got)
+	}
+	if !slices.Contains(got, "mine-far-down") {
+		t.Fatalf("affinity dropped a record instead of re-ranking it: %v", got)
+	}
+}
+
+func TestApplyProjectAffinityNeverDropsRecords(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("a", "project:mine"),
+		affinityRecord("b", "global"),
+		affinityRecord("c", "shared:team"),
+		affinityRecord("d", "project:other"),
+	}
+
+	got := applyProjectAffinity(records, "project:mine")
+	if len(got) != len(records) {
+		t.Fatalf("expected all %d records retained, got %d", len(records), len(got))
+	}
+	seen := map[string]bool{}
+	for _, r := range got {
+		seen[r.Node.ID] = true
+	}
+	for _, r := range records {
+		if !seen[r.Node.ID] {
+			t.Fatalf("record %s lost during affinity re-ranking", r.Node.ID)
+		}
+	}
+}
+
+func TestApplyProjectAffinityIsStableWithinGroups(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("mine-1", "project:mine"),
+		affinityRecord("mine-2", "project:mine"),
+		affinityRecord("mine-3", "project:mine"),
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, "project:mine"))
+	want := []string{"mine-1", "mine-2", "mine-3"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected relevance order preserved when every record is boosted, got %v", got)
+	}
+}
+
+func TestApplyProjectAffinityNoProjectIsIdentity(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("a", "project:one"),
+		affinityRecord("b", "project:two"),
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, ""))
+	if !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("expected untouched ordering without a project, got %v", got)
+	}
+}
+
+// affinityStore returns records in a fixed order and records the limit it was
+// asked for, so tests can see whether Search widened the candidate pool.
+type affinityStore struct {
+	db.GraphStore
+	records    []db.MemoryRecord
+	seenLimits []int
+}
+
+func (s *affinityStore) SearchMemoryRecords(_ context.Context, filter db.MemorySearchFilter) ([]db.MemoryRecord, error) {
+	s.seenLimits = append(s.seenLimits, filter.Limit)
+	if filter.Limit > 0 && filter.Limit < len(s.records) {
+		return s.records[:filter.Limit], nil
+	}
+	return s.records, nil
+}
+
+// The boost must be able to pull a project memory INTO the page, not merely
+// reorder a page it was already in. Ranked 6th globally with a limit of 5, the
+// project memory is outside the page until the candidate pool is widened.
+func TestSearchWidensCandidatePoolSoAffinityCanPromote(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("other-1", "project:other"),
+		affinityRecord("other-2", "project:other"),
+		affinityRecord("other-3", "project:other"),
+		affinityRecord("other-4", "project:other"),
+		affinityRecord("other-5", "project:other"),
+		affinityRecord("mine", "project:mine"),
+	}
+	store := &affinityStore{records: records}
+
+	out, err := Search(context.Background(), store, nil, SearchInput{
+		Query:     "anything",
+		ProjectID: "project:mine",
+		Limit:     5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Matches) != 5 {
+		t.Fatalf("expected the caller's limit honored, got %d", len(out.Matches))
+	}
+	if !slices.Contains(affinityIDs(out.Matches), "mine") {
+		t.Fatalf("project memory ranked just outside the page was never promoted: %v", affinityIDs(out.Matches))
+	}
+	for _, limit := range store.seenLimits {
+		if limit <= 5 {
+			t.Fatalf("expected a widened candidate fetch, store saw limit %d", limit)
+		}
+	}
+}
+
+func TestSearchWithoutProjectDoesNotOverfetch(t *testing.T) {
+	store := &affinityStore{records: []db.MemoryRecord{affinityRecord("a", "project:other")}}
+	if _, err := Search(context.Background(), store, nil, SearchInput{Query: "anything", Limit: 5}); err != nil {
+		t.Fatal(err)
+	}
+	for _, limit := range store.seenLimits {
+		if limit != 5 {
+			t.Fatalf("expected the plain limit without a project boost, got %d", limit)
+		}
+	}
+}
+
+// An empty result must not claim a semantic lookup happened — that is the
+// signal an agent uses to decide a memory does not exist.
+func TestSearchReportsNoneWhenNothingMatched(t *testing.T) {
+	store := &affinityStore{}
+	out, err := Search(context.Background(), store, nil, SearchInput{Query: "nothing here", Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Matches) != 0 {
+		t.Fatalf("expected no matches, got %d", len(out.Matches))
+	}
+	if out.Mode != "none" {
+		t.Fatalf("expected mode \"none\" for an empty result, got %q", out.Mode)
+	}
+}
+
+// Re-anchoring identity must carry a memory whole: its record, its revision
+// history, and its lifecycle metadata. memory_records and memory_revisions
+// cascade on node delete, so a careless move would silently destroy the history
+// it was meant to preserve.
+func TestMigrateProjectScopeMovesRecordsAndHistory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	const oldScope = "project:legacypath"
+	const newScope = "project:remoteanchor"
+
+	if _, err := Store(ctx, store, nil, StoreInput{
+		ScopeType: "project", ScopeID: oldScope, KnowledgeType: "decision",
+		Title: "Deploy process", Content: "First revision.", Source: "user",
+		WriterID: "agent:test", MemoryKey: "deploy/process",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A second write creates revision history worth preserving.
+	if _, err := Update(ctx, store, nil, UpdateInput{
+		ScopeType: "project", ScopeID: oldScope, KnowledgeType: "decision",
+		Title: "Deploy process", Content: "Second revision.", Source: "user",
+		WriterID: "agent:test", MemoryKey: "deploy/process",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.GetMemoryRecordByKey(ctx, "project", oldScope, "decision", "deploy/process")
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyBefore, err := store.ListMemoryRevisions(ctx, before.Node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(historyBefore) == 0 {
+		t.Fatal("fixture error: expected revision history")
+	}
+
+	stats, err := MigrateProjectScope(ctx, store, oldScope, newScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Moved != 1 || stats.Conflict != 0 {
+		t.Fatalf("expected exactly one memory moved, got %+v", stats)
+	}
+
+	if _, err := store.GetMemoryRecordByKey(ctx, "project", oldScope, "decision", "deploy/process"); err == nil {
+		t.Fatal("memory still present under the legacy scope")
+	}
+	after, err := store.GetMemoryRecordByKey(ctx, "project", newScope, "decision", "deploy/process")
+	if err != nil {
+		t.Fatalf("memory missing under the new scope: %v", err)
+	}
+	if after.Node.Content != "Second revision." || after.Revision != before.Revision {
+		t.Fatalf("memory changed during migration: %+v", after)
+	}
+	historyAfter, err := store.ListMemoryRevisions(ctx, after.Node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(historyAfter) != len(historyBefore) {
+		t.Fatalf("revision history lost: %d before, %d after", len(historyBefore), len(historyAfter))
+	}
+
+	// The re-keyed id must be the one a fresh write for that key computes, or
+	// the next write duplicates instead of updating.
+	if _, err := Put(ctx, store, nil, StoreInput{
+		ScopeType: "project", ScopeID: newScope, KnowledgeType: "decision",
+		Title: "Deploy process", Content: "Third revision.", Source: "user",
+		WriterID: "agent:test", MemoryKey: "deploy/process",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	matches, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
+		ScopeType: "project", ScopeID: newScope, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected the re-write to update the migrated memory, found %d", len(matches))
+	}
+}
+
+// A memory already written under the new identity wins; the legacy one is
+// counted and left alone rather than clobbering deliberate knowledge.
+func TestMigrateProjectScopeSkipsConflicts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	const oldScope = "project:legacypath"
+	const newScope = "project:remoteanchor"
+	for _, scope := range []string{oldScope, newScope} {
+		if _, err := Store(ctx, store, nil, StoreInput{
+			ScopeType: "project", ScopeID: scope, KnowledgeType: "decision",
+			Title: "Same key", Content: "from " + scope, Source: "user",
+			WriterID: "agent:test", MemoryKey: "shared/key",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stats, err := MigrateProjectScope(ctx, store, oldScope, newScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Moved != 0 || stats.Conflict != 1 {
+		t.Fatalf("expected the conflict reported and nothing moved, got %+v", stats)
+	}
+	destination, err := store.GetMemoryRecordByKey(ctx, "project", newScope, "decision", "shared/key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if destination.Node.Content != "from "+newScope {
+		t.Fatalf("migration overwrote the destination memory: %q", destination.Node.Content)
+	}
+	if _, err := store.GetMemoryRecordByKey(ctx, "project", oldScope, "decision", "shared/key"); err != nil {
+		t.Fatal("the conflicting legacy memory was dropped instead of left in place")
+	}
+}
+
+func TestMigrateProjectScopeNoOpForSameOrEmptyScope(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	for _, tc := range [][2]string{{"project:a", "project:a"}, {"", "project:b"}, {"project:a", ""}} {
+		stats, err := MigrateProjectScope(ctx, store, tc[0], tc[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stats.Moved != 0 {
+			t.Fatalf("expected no move for %v, got %+v", tc, stats)
+		}
+	}
+}
+
+// A page consisting entirely of conflicts must not stop the migration: the
+// movable memories behind it would be abandoned, and re-reading the same page
+// forever would hang.
+func TestMigrateProjectScopePagesPastConflicts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := db.InitStorage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	const oldScope = "project:legacypath"
+	const newScope = "project:remoteanchor"
+
+	// Conflicts: present in both scopes, so they cannot move.
+	for i := 0; i < 3; i++ {
+		key := fmt.Sprintf("conflict/%d", i)
+		for _, scope := range []string{oldScope, newScope} {
+			if _, err := Store(ctx, store, nil, StoreInput{
+				ScopeType: "project", ScopeID: scope, KnowledgeType: "decision",
+				Title: key, Content: "from " + scope, Source: "user",
+				WriterID: "agent:test", MemoryKey: key,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// Movable memories that must still be reached.
+	for i := 0; i < 2; i++ {
+		seedScopedMemory(t, store, oldScope, fmt.Sprintf("movable/%d", i))
+	}
+
+	stats, err := MigrateProjectScope(ctx, store, oldScope, newScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Moved != 2 {
+		t.Fatalf("expected both movable memories migrated past the conflicts, got %+v", stats)
+	}
+	if stats.Conflict != 3 {
+		t.Fatalf("expected 3 conflicts reported, got %+v", stats)
+	}
+	left, err := store.SearchMemoryRecords(ctx, db.MemorySearchFilter{
+		ScopeType: "project", ScopeID: oldScope, Limit: 50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 3 {
+		t.Fatalf("expected only the conflicts left behind, found %d", len(left))
+	}
+}
+
+func seedScopedMemory(t *testing.T, store db.GraphStore, scopeID, key string) {
+	t.Helper()
+	if _, err := Store(context.Background(), store, nil, StoreInput{
+		ScopeType: "project", ScopeID: scopeID, KnowledgeType: "decision",
+		Title: key, Content: "content " + key, Source: "user",
+		WriterID: "agent:test", MemoryKey: key,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The boost is for the working directory's project. A shared scope that happens
+// to carry the same id string is a different thing entirely.
+func TestApplyProjectAffinityIgnoresMatchingSharedScope(t *testing.T) {
+	records := []db.MemoryRecord{
+		{Node: db.Node{ID: "shared-1"}, ScopeType: "shared", ScopeID: "project:mine"},
+		{Node: db.Node{ID: "other-1"}, ScopeType: "project", ScopeID: "project:other"},
+		{Node: db.Node{ID: "other-2"}, ScopeType: "project", ScopeID: "project:other"},
+		{Node: db.Node{ID: "mine-1"}, ScopeType: "project", ScopeID: "project:mine"},
+	}
+
+	got := affinityIDs(applyProjectAffinity(records, "project:mine"))
+	if got[0] != "shared-1" {
+		t.Fatalf("ordering changed unexpectedly: %v", got)
+	}
+	// Only the genuine project memory should have moved up.
+	if !slices.Equal(got, []string{"shared-1", "mine-1", "other-1", "other-2"}) {
+		t.Fatalf("expected only the project-scoped memory boosted, got %v", got)
+	}
+}
+
+// When both passes contribute, the merge reserves slots for keyword-only hits
+// and truncates the semantic list. A project memory ranked past that cut must
+// still reach the page — otherwise the boost does nothing in exactly the case
+// hybrid search is designed for.
+func TestSearchBoostSurvivesTheKeywordReserve(t *testing.T) {
+	semantic := []db.MemoryRecord{
+		affinityRecord("sem-1", "project:other"),
+		affinityRecord("sem-2", "project:other"),
+		affinityRecord("sem-3", "project:other"),
+		affinityRecord("sem-4", "project:other"),
+		affinityRecord("mine", "project:mine"),
+	}
+	keyword := []db.MemoryRecord{
+		affinityRecord("kw-1", "project:other"),
+		affinityRecord("kw-2", "project:other"),
+	}
+
+	// Mirrors Search: each pass is boosted once, then merged.
+	merged, _ := mergeMemoryMatches(
+		applyProjectAffinity(semantic, "project:mine"),
+		applyProjectAffinity(keyword, "project:mine"), 5)
+
+	if !slices.Contains(affinityIDs(merged), "mine") {
+		t.Fatalf("the project memory was cut by the keyword reserve before the boost applied: %v", affinityIDs(merged))
+	}
+}
+
+// With no embedding provider the keyword pass is the entire result, so a boost
+// applied both before and after the merge would move a project memory by twice
+// the documented positions — a bounded bias quietly becoming a strong one.
+func TestSearchAppliesAffinityExactlyOnce(t *testing.T) {
+	records := []db.MemoryRecord{
+		affinityRecord("other-1", "project:other"),
+		affinityRecord("other-2", "project:other"),
+		affinityRecord("other-3", "project:other"),
+		affinityRecord("other-4", "project:other"),
+		affinityRecord("mine", "project:mine"),
+	}
+	store := &affinityStore{records: records}
+
+	// cfg is nil, so the semantic pass never runs: keyword only.
+	out, err := Search(context.Background(), store, nil, SearchInput{
+		Query: "anything", ProjectID: "project:mine", Limit: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// One boost of three positions from index 4 ties with index 1, and ties
+	// keep the stronger match first. Two boosts would put "mine" at the front.
+	want := []string{"other-1", "other-2", "mine", "other-3", "other-4"}
+	if got := affinityIDs(out.Matches); !slices.Equal(got, want) {
+		t.Fatalf("affinity applied more than once: got %v, want %v", got, want)
 	}
 }

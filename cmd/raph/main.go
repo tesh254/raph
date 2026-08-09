@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	serverpkg "raph/internal/mcp"
 	"raph/internal/memory"
 	"raph/internal/output"
+	"raph/internal/project"
 	"raph/internal/query"
 	"raph/internal/signing"
 	"raph/internal/studio"
@@ -55,7 +57,14 @@ func resolveWorkspaceID(store db.GraphStore, cfg *config.Config, path string) (s
 }
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	// Install one signal-aware context at the root so Ctrl-C / SIGTERM cancels
+	// whatever command is running. Commands thread cmd.Context() into their
+	// long-running work (index, crawl, sync, serve) so an interrupt unwinds
+	// cleanly — flushing and closing the store — instead of hard-killing a
+	// mid-write process.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := newRootCmd().ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -107,6 +116,8 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newStudioCmd())
 	rootCmd.AddCommand(newSyncCmd())
 	rootCmd.AddCommand(newAgentsCmd())
+	rootCmd.AddCommand(newBackfillCmd())
+	rootCmd.AddCommand(newProjectCmd())
 	rootCmd.AddCommand(newClearCmd())
 	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newUpdateCmd())
@@ -163,6 +174,11 @@ func newSyncCmd() *cobra.Command {
 		Short: "Keep indexed repositories synchronized in the background",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
+			// A zero or negative interval would busy-spin the scanner; require a
+			// sane floor so a typo can't peg a core.
+			if interval < 100*time.Millisecond {
+				return fmt.Errorf("--interval must be at least 100ms, got %s", interval)
+			}
 			if worker {
 				verbose.Printf("starting sync worker in foreground mode interval=%s", interval)
 				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -205,7 +221,7 @@ func newSyncCmd() *cobra.Command {
 			}
 			if remove {
 				verbose.Printf("removing repository from sync path=%s keepData=%t", scanPath, keepData)
-				if err := syncer.Remove(context.Background(), scanPath, !keepData); err != nil {
+				if err := syncer.Remove(cmd.Context(), scanPath, !keepData); err != nil {
 					return err
 				}
 				fmt.Fprintf(out, "Stopped syncing %s (graph data removed=%t)\n", scanPath, !keepData)
@@ -229,7 +245,7 @@ func newSyncCmd() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(out, "Scanning and indexing files...\n")
-			stats, err := idx.Run(context.Background())
+			stats, err := idx.Run(cmd.Context())
 			_ = store.Close()
 			if err != nil {
 				return err
@@ -301,7 +317,7 @@ func newInitCmd() *cobra.Command {
 			}
 
 			fmt.Fprintf(out, "Scanning and indexing files...\n")
-			stats, err := idx.Run(context.Background())
+			stats, err := idx.Run(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -950,12 +966,18 @@ func newRulesCmd() *cobra.Command {
 	return rulesCmd
 }
 
-// resolveDocWorkspace maps a doc scope to a workspace id (project workspace or
-// the shared global-knowledge bucket).
+// resolveDocWorkspace maps a doc scope to a workspace id (the project's
+// document bucket or the shared global-knowledge bucket). It must agree with
+// the MCP server's resolution, or the CLI and agents would read different
+// buckets for the same repository.
 func resolveDocWorkspace(store db.GraphStore, cfg *config.Config, scope, path string) (string, error) {
 	switch strings.TrimSpace(scope) {
 	case "", "project":
-		return resolveWorkspaceID(store, cfg, path)
+		projectID, err := project.ID(cfg, path)
+		if err != nil {
+			return "", err
+		}
+		return knowledge.ProjectWorkspace(projectID), nil
 	case "global":
 		return knowledge.GlobalWorkspace, nil
 	default:
@@ -1193,17 +1215,40 @@ func newDocCmd() *cobra.Command {
 	return docCmd
 }
 
+// maxContentBytes caps how much document content raph reads from a file or
+// stdin, so a runaway pipe or an accidentally huge file can't exhaust memory.
+// 32 MiB is far above any real note, handoff, or document.
+const maxContentBytes = 32 << 20
+
+// readAllLimited reads r fully but refuses more than limit bytes, turning an
+// unbounded stdin/file into a clear error instead of an OOM.
+func readAllLimited(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("input exceeds the %d-byte limit", limit)
+	}
+	return data, nil
+}
+
 // readContent resolves document content from --file, stdin ('-'), or args.
 func readContent(cmd *cobra.Command, file string, args []string) (string, error) {
 	if strings.TrimSpace(file) != "" {
-		data, err := os.ReadFile(file)
+		f, err := os.Open(file)
+		if err != nil {
+			return "", fmt.Errorf("read file: %w", err)
+		}
+		defer f.Close()
+		data, err := readAllLimited(f, maxContentBytes)
 		if err != nil {
 			return "", fmt.Errorf("read file: %w", err)
 		}
 		return string(data), nil
 	}
 	if len(args) == 1 && args[0] == "-" {
-		data, err := io.ReadAll(cmd.InOrStdin())
+		data, err := readAllLimited(cmd.InOrStdin(), maxContentBytes)
 		if err != nil {
 			return "", fmt.Errorf("read stdin: %w", err)
 		}
@@ -1397,13 +1442,19 @@ func brainScopeTypes(scope string) ([]string, error) {
 	}
 }
 
+// maxImportBytes caps a brain bundle read from stdin, a file, or a URL. Bundles
+// are larger than notes, so this ceiling is higher than maxContentBytes while
+// still bounding memory against a hostile or corrupt source.
+const maxImportBytes = 64 << 20
+
 // fetchImportSource resolves an import argument to raw bytes: `-` reads stdin,
-// an existing path reads the file, and an http(s) URL is fetched directly.
+// an existing path reads the file, and an http(s) URL is fetched directly. Every
+// path is bounded by maxImportBytes so an unbounded source can't OOM the CLI.
 func fetchImportSource(ctx context.Context, source string, stdin io.Reader) ([]byte, error) {
 	source = strings.TrimSpace(source)
 	switch {
 	case source == "-":
-		return io.ReadAll(stdin)
+		return readAllLimited(stdin, maxImportBytes)
 	case strings.HasPrefix(source, "http://"), strings.HasPrefix(source, "https://"):
 		if strings.HasPrefix(source, "http://") {
 			fmt.Fprintf(os.Stderr, "raph: warning: importing over plain http is susceptible to tampering; prefer https for %s\n", source)
@@ -1421,10 +1472,15 @@ func fetchImportSource(ctx context.Context, source string, stdin io.Reader) ([]b
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("fetch %s: status %s", source, resp.Status)
 		}
-		return io.ReadAll(io.LimitReader(resp.Body, 64<<20)) // 64MiB ceiling
+		return readAllLimited(resp.Body, maxImportBytes)
 	default:
 		if _, statErr := os.Stat(source); statErr == nil {
-			return os.ReadFile(source)
+			f, err := os.Open(source)
+			if err != nil {
+				return nil, err
+			}
+			defer f.Close()
+			return readAllLimited(f, maxImportBytes)
 		}
 		return nil, fmt.Errorf("%q is not a readable file, http(s) URL, or `-` (stdin)", source)
 	}
@@ -1468,8 +1524,7 @@ func newCrawlCmd() *cobra.Command {
 			}
 
 			fmt.Fprintf(out, "Crawling and indexing pages...\n")
-			ctx := context.Background()
-			if err := docCrawler.Run(ctx); err != nil {
+			if err := docCrawler.Run(cmd.Context()); err != nil {
 				return err
 			}
 
@@ -1539,6 +1594,9 @@ func newStudioCmd() *cobra.Command {
 		Short: "Launch the local graph explorer UI",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("--port must be between 1 and 65535, got %d", port)
+			}
 			fmt.Fprintf(out, "Loading configuration...\n")
 			cfg, err := config.LoadConfigIfPresent()
 			if err != nil {
@@ -1594,7 +1652,7 @@ func newClearCmd() *cobra.Command {
 			defer store.Close()
 
 			verbose.Printf("clearing all nodes, edges, memory records, and web corpora")
-			if err := store.ClearAll(context.Background()); err != nil {
+			if err := store.ClearAll(cmd.Context()); err != nil {
 				return err
 			}
 
@@ -1654,7 +1712,7 @@ func newConfigCmd() *cobra.Command {
 			cfg, err := config.LoadConfig()
 			if err != nil {
 				if errors.Is(err, config.ErrConfigNotFound) {
-					return err
+					return fmt.Errorf("no config found — run `raph config init` to create one: %w", err)
 				}
 				return err
 			}
@@ -1885,4 +1943,194 @@ func newReleaseCmd() *cobra.Command {
 	releaseCmd.AddCommand(verifyCmd)
 	releaseCmd.AddCommand(publicKeyCmd)
 	return releaseCmd
+}
+
+func newBackfillCmd() *cobra.Command {
+	var paths []string
+	cmd := &cobra.Command{
+		Use:   "backfill",
+		Short: "Rebuild the project/workspace/directory graph for already-indexed repositories",
+		Long: "Rebuild the structural spine (project -> workspace -> directory -> file) for repositories\n" +
+			"indexed before it existed.\n\n" +
+			"Nothing is read from disk and nothing is re-embedded: a file node already records the\n" +
+			"workspace it belongs to, the root it was indexed from, and its relative path, which is\n" +
+			"the whole hierarchy. Re-indexing would reproduce the same structure at the cost of\n" +
+			"re-embedding every file. Safe to re-run — every write is an upsert.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+
+			fmt.Fprintf(out, "Initializing local storage...\n")
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			fmt.Fprintf(out, "Rebuilding project hierarchy for indexed repositories...\n")
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+
+			stats, err := indexer.BackfillHierarchy(ctx, store, cfg)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "Backfill complete: %d projects, %d workspaces, %d directories, %d files linked\n",
+				stats.Projects, stats.Workspaces, stats.Directories, stats.Files)
+			if stats.Workspaces == 0 {
+				fmt.Fprintf(out, "No indexed repositories found. Run `raph init --path .` to index one.\n")
+			}
+
+			// Documents written before they had their own bucket sit under the
+			// indexer's workspace id, where an index run would delete them and
+			// where the new project-scoped lookup will not find them.
+			workspaces, err := store.ListWorkspaces(ctx)
+			if err != nil {
+				return err
+			}
+			roots := make(map[string]string, len(workspaces))
+			for _, ws := range workspaces {
+				roots[ws.Workspace] = ws.Root
+			}
+			fmt.Fprintf(out, "Relocating documents stored under indexer workspaces...\n")
+			docStats, err := knowledge.MigrateLegacyProjectDocs(ctx, store, cfg, roots)
+			if err != nil {
+				return err
+			}
+			if docStats.Documents == 0 {
+				fmt.Fprintf(out, "No documents needed relocating.\n")
+			} else {
+				fmt.Fprintf(out, "Moved %d document(s) out of %d legacy workspace(s) into project document scopes\n",
+					docStats.Documents, docStats.Workspaces)
+			}
+
+			// Re-anchor identities last: memories and documents move onto the
+			// remote-derived id, so the graph, memory, and document scopes all
+			// end up agreeing on one project id.
+			fmt.Fprintf(out, "Re-anchoring project identities to repository remotes...\n")
+			identityStats, err := indexer.MigrateProjectIdentities(ctx, store, cfg,
+				backfillRoots(workspaces, paths),
+				func(ctx context.Context, st db.GraphStore, oldID, newID string) (int, int, error) {
+					moved, err := memory.MigrateProjectScope(ctx, st, oldID, newID)
+					return moved.Moved, moved.Conflict, err
+				},
+				func(ctx context.Context, st db.GraphStore, oldID, newID string) (int, error) {
+					return knowledge.MigrateWorkspace(ctx, st,
+						knowledge.ProjectWorkspace(oldID), knowledge.ProjectWorkspace(newID))
+				},
+			)
+			if err != nil {
+				return err
+			}
+			if identityStats.Projects == 0 {
+				fmt.Fprintf(out, "No project identities needed re-anchoring.\n")
+			} else {
+				fmt.Fprintf(out, "Re-anchored %d project(s): %d memories, %d documents moved\n",
+					identityStats.Projects, identityStats.Memories, identityStats.Documents)
+			}
+			if identityStats.Conflicts > 0 {
+				fmt.Fprintf(out, "%d memory/memories already existed under the new identity and were left in place\n", identityStats.Conflicts)
+			}
+			for _, scope := range identityStats.Unresolved {
+				fmt.Fprintf(out, "Still scoped to a path: %s — re-run with --path <that repo> to re-anchor it\n", scope)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringSliceVar(&paths, "path", nil,
+		"Extra repository paths to consider when re-anchoring identities. Needed for projects that hold memories but were never indexed, since their old id is a hash of a path the graph does not record.")
+	return cmd
+}
+
+// backfillRoots gathers every directory a project can be resolved from: roots
+// recorded on indexed nodes, repositories registered for sync, and anything the
+// operator named explicitly. A legacy identity is a hash of a path, so a path is
+// the only thing that can recover it.
+func backfillRoots(workspaces []db.Workspace, extra []string) []string {
+	var roots []string
+	for _, ws := range workspaces {
+		if strings.TrimSpace(ws.Root) != "" {
+			roots = append(roots, ws.Root)
+		}
+	}
+	if repos, err := syncer.List(); err == nil {
+		for _, repo := range repos {
+			if strings.TrimSpace(repo.Path) != "" {
+				roots = append(roots, repo.Path)
+			}
+		}
+	}
+	for _, path := range extra {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(path); err == nil {
+			roots = append(roots, abs)
+		}
+	}
+	return roots
+}
+
+func newProjectCmd() *cobra.Command {
+	var path string
+	cmd := &cobra.Command{
+		Use:   "project",
+		Short: "Show which project a directory resolves to",
+		Long: "Show the project identity a directory resolves to, what it was derived from, and how\n" +
+			"much knowledge is stored under it.\n\n" +
+			"Memories and documents are scoped by this identity, so it is the first thing to check\n" +
+			"when an agent cannot recall something it should. An identity anchored to the repository\n" +
+			"remote survives moving or re-cloning the checkout; one anchored to a path does not.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			cfg, err := config.LoadConfigIfPresent()
+			if err != nil {
+				return err
+			}
+			identity, err := project.Resolve(cfg, path)
+			if err != nil {
+				return err
+			}
+
+			store, err := db.InitStorage()
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			ctx := cmd.Context()
+
+			memories, docs, err := store.CountProjectKnowledge(ctx, identity.ID, knowledge.ProjectWorkspace(identity.ID))
+			if err != nil {
+				return err
+			}
+
+			if resolveFormat() == output.FormatJSON {
+				return json.NewEncoder(out).Encode(map[string]any{
+					"identity":  identity,
+					"memories":  memories,
+					"documents": docs,
+				})
+			}
+
+			fmt.Fprintf(out, "Project:   %s\n", identity.Name)
+			fmt.Fprintf(out, "Identity:  %s\n", identity.ID)
+			fmt.Fprintf(out, "Anchor:    %s (%s)\n", identity.Anchor, identity.Source)
+			fmt.Fprintf(out, "Root:      %s\n", identity.Root)
+			fmt.Fprintf(out, "Knowledge: %d memories, %d documents\n", memories, docs)
+			if identity.Anchor == project.AnchorWorktree || identity.Anchor == project.AnchorDirectory {
+				fmt.Fprintf(out, "\nThis identity is derived from the path, so moving or re-cloning this\n"+
+					"directory starts a new project and leaves its knowledge behind. Add a git\n"+
+					"remote (or set project.identity_override) to anchor it to the repository.\n")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&path, "path", ".", "Directory to resolve")
+	return cmd
 }
